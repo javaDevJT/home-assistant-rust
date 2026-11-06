@@ -152,6 +152,7 @@ async fn handle_socket(
     native.set_state_read_access(identity.can_read_states);
     native.set_notifications(state.features.notifications.clone());
     native.set_zones(state.features.zones.clone());
+    native.set_persons(state.features.persons.clone());
     let native = Arc::new(Mutex::new(native));
     let mut stream_tick = tokio::time::interval(Duration::from_millis(100));
     stream_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);

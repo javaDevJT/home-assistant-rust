@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone"]
+members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker"]
 
 [workspace.package]
 version = "0.1.0"
@@ -33,10 +33,13 @@ hass-template-entities = { path = "crates/hass-template-entities" }
 hass-group = { path = "crates/hass-group" }
 hass-notifications = { path = "crates/hass-notifications" }
 hass-zone = { path = "crates/hass-zone" }
+hass-person = { path = "crates/hass-person" }
+hass-device-tracker = { path = "crates/hass-device-tracker" }
 http-body-util = "0.1"
 ipnet = "2"
 jsonwebtoken = "9"
 minijinja = { version = "2", features = ["fuel", "json", "builtins"] }
+md-5 = "=0.10.6"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

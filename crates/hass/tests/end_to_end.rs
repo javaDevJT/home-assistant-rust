@@ -117,6 +117,11 @@ counter:
 input_text:
   notification_message:
     initial: waiting
+person:
+  - id: resident_unique_id
+    name: Resident
+    device_trackers:
+      - device_tracker.phone
 automation:
   - id: demo_toggle
     triggers:
@@ -144,6 +149,65 @@ automation:
     )
     .unwrap();
     config
+}
+
+#[tokio::test]
+async fn real_process_tracker_reports_drive_person_and_zone_occupancy() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path());
+    let mut server = Server::start(&config).await;
+    server.wait_state("person.resident", "unknown").await;
+    assert_eq!(
+        server
+            .post(
+                "/api/services/device_tracker/see",
+                json!({
+                    "dev_id":"phone","gps":[0.0,0.0],"gps_accuracy":0,"source_type":"gps"
+                })
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server.wait_state("device_tracker.phone", "home").await;
+    server.wait_state("person.resident", "home").await;
+    server.wait_state("zone.home", "1").await;
+    let person: Value = server
+        .get("/api/states/person.resident")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(person["attributes"]["source"], "device_tracker.phone");
+    assert_eq!(person["attributes"]["in_zones"], json!(["zone.home"]));
+    assert_eq!(
+        server
+            .post(
+                "/api/services/device_tracker/see",
+                json!({
+                    "dev_id":"phone","gps":[1.0,1.0],"gps_accuracy":0,"source_type":"gps"
+                })
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server.wait_state("device_tracker.phone", "not_home").await;
+    server.wait_state("person.resident", "not_home").await;
+    server.wait_state("zone.home", "0").await;
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+    let mut restored = Server::start(&config).await;
+    restored.wait_state("person.resident", "not_home").await;
+    assert_eq!(
+        restored
+            .get("/api/states/person.resident_unique_id")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    restored.child.kill().await.unwrap();
+    restored.child.wait().await.unwrap();
 }
 
 #[tokio::test]

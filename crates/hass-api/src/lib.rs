@@ -14,6 +14,7 @@ mod history;
 mod http;
 mod login;
 pub mod network;
+mod persons;
 mod subscriptions;
 mod websocket;
 mod zones;
@@ -51,6 +52,7 @@ pub struct ApiFeatures {
     pub config_entries: Option<hass_config::ConfigEntries>,
     pub notifications: Option<hass_notifications::NotificationManager>,
     pub zones: Option<hass_zone::ZoneManager>,
+    pub persons: Option<hass_person::PersonManager>,
 }
 
 #[derive(Clone)]

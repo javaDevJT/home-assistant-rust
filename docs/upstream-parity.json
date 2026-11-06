@@ -30219,7 +30219,13 @@
       "component_directory": "homeassistant/components/device_tracker/",
       "config_flow_classes": [],
       "domain": "device_tracker",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-device-tracker/src/lib.rs",
+        "crates/hass-device-tracker/README.md",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/main.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -30235,10 +30241,10 @@
       },
       "manifest_blob_oid": "aea2c5c5e5ae5db98cb4f6ddf1875cb528063b5d",
       "manifest_path": "homeassistant/components/device_tracker/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Native see ingestion, GPS and connection state/expiry, actual zone membership, read-only known-device import and private metadata restore have fixtures. Scanner platforms/discovery, complete entity-registry lifecycle, known_devices.yaml writing and exhaustive pinned component acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -105357,7 +105363,14 @@
       "component_directory": "homeassistant/components/person/",
       "config_flow_classes": [],
       "domain": "person",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-person/src/lib.rs",
+        "crates/hass-person/README.md",
+        "crates/hass/src/persons.rs",
+        "crates/hass-api/src/persons.rs",
+        "crates/hass-api/tests/persons_protocol.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [],
         "dependencies": [
@@ -105374,10 +105387,10 @@
       },
       "manifest_blob_oid": "46ccf85db4a69e3bb745d8025526b719dd9e3da5",
       "manifest_path": "homeassistant/components/person/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Native YAML/editable people, registry-resolved identity, tracker priority/restore, private collection feeds, account unlinking and caller-bound profile naming/picture clearing have fixtures. Uploaded image validation, registry display overrides, translations/UI flows, remaining recorder/entity-platform details and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "15_cloud_http_auth_webhook",
       "protocol_families": [
         "cloud_http_auth_webhook"
@@ -167845,6 +167858,29 @@
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
       {
+        "domain": "device_tracker",
+        "local_evidence": [
+          {
+            "path": "crates/hass-device-tracker/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-device-tracker/README.md"
+          },
+          {
+            "path": "crates/hass/src/config.rs"
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Native see ingestion, GPS and connection state/expiry, actual zone membership, read-only known-device import and private metadata restore have fixtures. Scanner platforms/discovery, complete entity-registry lifecycle, known_devices.yaml writing and exhaustive pinned component acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary scoped, transport and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
+      },
+      {
         "domain": "group",
         "local_evidence": [
           {
@@ -168111,6 +168147,32 @@
         "verification": "Primary focused and protocol acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       },
       {
+        "domain": "person",
+        "local_evidence": [
+          {
+            "path": "crates/hass-person/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-person/README.md"
+          },
+          {
+            "path": "crates/hass/src/persons.rs"
+          },
+          {
+            "path": "crates/hass-api/src/persons.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/persons_protocol.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Native YAML/editable people, registry-resolved identity, tracker priority/restore, private collection feeds, account unlinking and caller-bound profile naming/picture clearing have fixtures. Uploaded image validation, registry display overrides, translations/UI flows, remaining recorder/entity-platform details and exhaustive pinned acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary scoped, transport and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
+      },
+      {
         "domain": "recorder",
         "local_evidence": [
           {
@@ -168360,10 +168422,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 26,
+    "partial": 28,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1539
+    "unported": 1537
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

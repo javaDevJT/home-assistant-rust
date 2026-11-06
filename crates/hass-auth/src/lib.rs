@@ -16,7 +16,7 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
-use hass_core::{Error, Result, Runtime};
+use hass_core::{Context, Error, Result, Runtime};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -585,7 +585,7 @@ impl AuthManager {
             validate_display_name(name)?;
         }
         let group_ids = group_ids.map(validate_group_ids).transpose()?;
-        self.transaction(|state| {
+        let updated = self.transaction(|state| {
             let (caller_is_admin, caller_is_owner) = {
                 let caller = require_active_user(state, caller_user_id)?;
                 (user_is_admin(caller), caller.is_owner)
@@ -639,7 +639,40 @@ impl AuthManager {
                 clear_pending_mfa_logins(state, user_id);
             }
             Ok(user)
-        })
+        })?;
+        self.emit_user_event("user_updated", user_id)?;
+        Ok(updated)
+    }
+
+    /// Update only the active caller's display name. Account privilege fields
+    /// remain available through the separate administrator update method.
+    pub fn update_own_name(&self, user_id: &str, name: &str) -> Result<User> {
+        validate_display_name(name)?;
+        let updated = self.transaction(|state| {
+            let user = require_active_user(state, user_id)?;
+            if user.system_generated {
+                return Err(Error::InvalidInput(
+                    "system-generated users cannot change their profile".into(),
+                ));
+            }
+            let user = state
+                .users
+                .get_mut(user_id)
+                .ok_or_else(|| Error::NotFound("user not found".into()))?;
+            user.name = name.trim().to_owned();
+            Ok(public_user(user))
+        })?;
+        self.emit_user_event("user_updated", user_id)?;
+        Ok(updated)
+    }
+
+    fn emit_user_event(&self, event_type: &str, user_id: &str) -> Result<()> {
+        self.inner.runtime.fire_event(
+            event_type,
+            serde_json::Map::from_iter([("user_id".into(), json!(user_id))]),
+            Context::default(),
+        )?;
+        Ok(())
     }
 
     /// Remove a non-owner account and revoke all its sessions.
@@ -684,7 +717,8 @@ impl AuthManager {
                 .sessions
                 .retain(|_, session| session.user_id != user_id);
             Ok(())
-        })
+        })?;
+        self.emit_user_event("user_removed", user_id)
     }
 
     /// Enable or disable a user. Disabling a user revokes all of their sessions.
@@ -694,7 +728,7 @@ impl AuthManager {
         user_id: &str,
         active: bool,
     ) -> Result<User> {
-        self.transaction(|state| {
+        let updated = self.transaction(|state| {
             let caller = require_active_user(state, caller_user_id)?;
             if !user_is_admin(caller) {
                 return Err(Error::InvalidInput(
@@ -719,7 +753,9 @@ impl AuthManager {
                 clear_pending_mfa_logins(state, user_id);
             }
             Ok(result)
-        })
+        })?;
+        self.emit_user_event("user_updated", user_id)?;
+        Ok(updated)
     }
 
     /// Enroll a local username and Argon2id password for an existing account.

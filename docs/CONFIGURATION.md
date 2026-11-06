@@ -52,3 +52,30 @@ collection separately from YAML definitions. The administrator-only
 replaces only the YAML zone collection. It does not reconfigure other domains.
 Saved `config/core/update` settings update the home zone and take precedence
 over startup YAML on subsequent restarts.
+
+The native tracker provider accepts `device_tracker:` settings with
+`consider_home` in seconds, `track_new_devices`, and an optional `devices` list.
+It reads an existing `known_devices.yaml` beside the main configuration through
+the same secret/include loader and never rewrites that file. Known-device
+entries default to `track: false`; reports for newly observed devices follow
+`track_new_devices`. Configured and imported device identities must be unique.
+Scanner platform loading remains a separate porting gap.
+
+```yaml
+person:
+  - id: resident_unique_id
+    name: Resident
+    device_trackers: device_tracker.phone
+device_tracker:
+  consider_home: 180
+  track_new_devices: true
+```
+
+A person's `id` is its unique identity, while the shared entity registry assigns
+the state ID from its name, such as `person.resident`. Startup restores saved
+person fields, starts the providers, then selects the current trackers before
+running `homeassistant_started` automations. The administrator-only
+`person.reload` service rereads only YAML people; editable people use the
+authenticated `person/*` collection. Ordinary users can edit their own name
+and clear their linked editable person's picture. New picture uploads await
+the native image collection and are not accepted as arbitrary URLs.

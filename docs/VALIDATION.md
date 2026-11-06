@@ -1,6 +1,14 @@
 # Validation evidence
 
-Published checkpoint `7e093fc2bdc5f0a521f932a46f65f9df9a828b5d` passed **304 workspace tests**, formatting, strict full-workspace Clippy, and its optimized build on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. It also passed the Linux CI run linked below. Subsequent person/tracker work remains outside this receipt. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
+The current 19-crate checkpoint passed **366 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Publication is recorded below as it completes. The previous published 17-crate checkpoint and its green Linux run remain separately pinned. Image-upload work is outside this receipt. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
+
+## Current 19-crate acceptance
+
+`cargo test --workspace --locked --no-fail-fast` passed 366 tests across 49 unit/integration/doc-test targets, with no failed or ignored tests. Workspace formatting, strict all-target Clippy, `cargo build --release --locked`, and optimized executable example `--check` passed. Optimized executable SHA-256: `22fcac39e7f83aa7d2bc14b5445b2b6e49ffa52c244ccad4e9e7971f39124839`.
+
+The compiled process now verifies actual `device_tracker.see` reports flowing through registry-backed person selection to zone occupancy and surviving a hard restart. A real authenticated WebSocket fixture verifies person config/storage lists, ordinary-user administration denial, private current/live updates, caller-only profile edits, tracker preservation on profile changes, and actual auth deletion/unlinking. Auth regression covers persisted self-name updates without privilege changes, disabled-account rejection, user event payloads and revocation. App fixtures prove secret-aware read-only known-device import, empty/default YAML, duplicate person identity preflight and writer-lease release after person host shutdown. Gravatar URLs are hashed locally with pinned precedence and require no external request.
+
+The full inventory remains a partition of all 1,565 manifests over 32 batches: 28 partial native domains, 1,537 unported, zero complete. Source conditions, translations, scanner platforms, complete registry/provider lifecycle and other listed gaps remain open. Non-null person picture uploads remain unavailable until the excluded image component is integrated; arbitrary URLs are not accepted as uploaded pictures.
 
 ## Published 17-crate acceptance
 

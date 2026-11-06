@@ -33,9 +33,13 @@ pub(crate) struct NativeSubscriptions {
     allow_state_read: bool,
     notifications: Option<hass_notifications::NotificationManager>,
     zones: Option<hass_zone::ZoneManager>,
+    persons: Option<hass_person::PersonManager>,
 }
 
 enum ActiveSubscription {
+    Persons {
+        receiver: broadcast::Receiver<Event>,
+    },
     Zones {
         receiver: broadcast::Receiver<Event>,
     },
@@ -98,6 +102,7 @@ impl NativeSubscriptions {
             allow_state_read: true,
             notifications: None,
             zones: None,
+            persons: None,
         }
     }
 
@@ -116,6 +121,10 @@ impl NativeSubscriptions {
         self.zones = manager;
     }
 
+    pub(crate) fn set_persons(&mut self, manager: Option<hass_person::PersonManager>) {
+        self.persons = manager;
+    }
+
     /// Handle a subscription-related WebSocket command, if this manager owns it.
     pub(crate) fn handle_command(
         &mut self,
@@ -130,6 +139,7 @@ impl NativeSubscriptions {
             .ok_or_else(|| Error::InvalidInput("WebSocket command type must be a string".into()))?;
 
         match command_type {
+            "person/subscribe" => self.subscribe_persons(object).map(Some),
             "zone/subscribe" => self.subscribe_zones(object).map(Some),
             "persistent_notification/subscribe" => self.subscribe_notifications(object).map(Some),
             "subscribe_events" => self.subscribe_events(object).map(Some),
@@ -259,6 +269,35 @@ impl NativeSubscriptions {
             },
         );
         Ok(success_result(Vec::new()))
+    }
+
+    fn subscribe_persons(
+        &mut self,
+        object: &Map<String, Value>,
+    ) -> Result<SubscriptionCommandResult> {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "id" | "type"))
+        {
+            return Err(Error::InvalidInput(
+                "Invalid person subscription command".into(),
+            ));
+        }
+        let id = command_id(object)?;
+        self.ensure_capacity(id)?;
+        let manager = self
+            .persons
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("Person integration is not configured".into()))?;
+        let (snapshot, receiver) = manager.snapshot_and_subscribe()?;
+        let initial = snapshot
+            .storage
+            .into_iter()
+            .map(|person| json!({"change_type":"added","person_id":person.id,"item":person}))
+            .collect::<Vec<_>>();
+        self.subscriptions
+            .insert(id, ActiveSubscription::Persons { receiver });
+        Ok(success_result(vec![event_envelope(id, json!(initial))]))
     }
 
     fn subscribe_zones(
@@ -555,6 +594,13 @@ impl NativeSubscriptions {
             return Ok(());
         };
         match subscription {
+            ActiveSubscription::Persons { .. } => {
+                if event.event_type == hass_person::PERSON_COLLECTION_UPDATED_SIGNAL
+                    && let Some(changes) = event.data.get("changes")
+                {
+                    output.push(event_envelope(id, changes.clone()));
+                }
+            }
             ActiveSubscription::Zones { .. } => {
                 if event.event_type == hass_zone::ZONE_COLLECTION_UPDATED_SIGNAL
                     && let Some(changes) = event.data.get("changes")
@@ -759,6 +805,7 @@ impl ActiveSubscription {
             Self::Events { receiver, .. }
             | Self::Notifications { receiver }
             | Self::Zones { receiver }
+            | Self::Persons { receiver }
             | Self::Entities { receiver, .. }
             | Self::ConfigEntries { receiver, .. }
             | Self::ConfigFlowProgress { receiver, .. }

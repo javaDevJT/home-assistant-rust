@@ -31,10 +31,10 @@ Protocol tags are evidence-led: each needs a matching manifest selector/dependen
 | Status | Integrations | Meaning |
 | --- | ---: | --- |
 | Complete | 0 | No entire upstream integration is accepted as full parity. |
-| Partial | 26 | Rust source implements an identifiable subset; the full upstream behavior and acceptance remain open. |
-| Unported | 1,539 | No behaviorally accepted native adapter is evidenced for the manifest domain. |
+| Partial | 28 | Rust source implements an identifiable subset; the full upstream behavior and acceptance remain open. |
+| Unported | 1,537 | No behaviorally accepted native adapter is evidenced for the manifest domain. |
 
-The partial domains are api, auth, automation, config, counter, group, homeassistant, http, input_boolean, input_button, input_datetime, input_number, input_select, input_text, mqtt, persistent_notification, recorder, rest, rest_command, scene, schedule, script, template, timer, websocket_api, and zone. Native groups, generic controls, notification transport/triggers, zone geometry/collections, template entities, MQTT config-entry/registry lifecycle, REST lifecycle, and recorder maintenance have focused acceptance evidence. The JSON retains initial source-export/line-count snapshots alongside updated port status and evidence paths; exact primary checks and revisions are recorded in [PORTING.md](PORTING.md) and [VALIDATION.md](VALIDATION.md). Source presence alone is never full acceptance.
+The partial domains are api, auth, automation, config, counter, device_tracker, group, homeassistant, http, input_boolean, input_button, input_datetime, input_number, input_select, input_text, mqtt, persistent_notification, person, recorder, rest, rest_command, scene, schedule, script, template, timer, websocket_api, and zone. Native groups, generic controls, notification transport/triggers, tracker/person/zone pipelines, template entities, MQTT config-entry/registry lifecycle, REST lifecycle, and recorder maintenance have focused acceptance evidence. The JSON retains initial source-export/line-count snapshots alongside updated port status and evidence paths; exact primary checks and revisions are recorded in [PORTING.md](PORTING.md) and [VALIDATION.md](VALIDATION.md). Source presence alone is never full acceptance.
 
 ## Core work that gates the integration waves
 

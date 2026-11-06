@@ -4,6 +4,7 @@ mod config;
 mod helpers;
 mod homeassistant;
 mod integration_drivers;
+mod persons;
 mod recorder;
 mod yaml;
 mod zones;
@@ -147,6 +148,21 @@ async fn main() -> Result<()> {
     )
     .await?;
     let zone_manager = zones.manager();
+    let mut trackers = hass_device_tracker::DeviceTrackerIntegration::start(
+        runtime.clone(),
+        zone_manager.clone(),
+        config.device_tracker.clone(),
+    )
+    .await?;
+    let persons = persons::Persons::start(
+        runtime.clone(),
+        auth.clone(),
+        registries.clone(),
+        args.config.clone(),
+        config.person.clone(),
+    )
+    .await?;
+    let person_manager = persons.manager();
     let groups = hass_group::GroupIntegration::start_with_order(
         runtime.clone(),
         config.group.clone(),
@@ -215,6 +231,12 @@ async fn main() -> Result<()> {
     )
     .await?;
     let templates = hass_template::TemplateEngine::new(runtime.clone());
+    let starting_runtime = runtime.clone();
+    tokio::task::spawn_blocking(move || {
+        starting_runtime.fire_event("homeassistant_start", Map::new(), Context::default())
+    })
+    .await??;
+    persons.mark_started().await?;
     let started_runtime = runtime.clone();
     tokio::task::spawn_blocking(move || {
         started_runtime.fire_event("homeassistant_started", Map::new(), Context::default())
@@ -235,6 +257,7 @@ async fn main() -> Result<()> {
             config_entries: Some(config_entries),
             notifications: Some(notification_manager),
             zones: Some(zone_manager),
+            persons: Some(person_manager),
         },
         Some(shutdown_rx),
     );
@@ -250,7 +273,9 @@ async fn main() -> Result<()> {
     let script_result = scripts.shutdown().await;
     let rest_result = rest.shutdown().await;
     let native_result = native.shutdown().await;
+    let tracker_result = trackers.shutdown().await;
     let homeassistant_result = homeassistant.shutdown();
+    let person_result = persons.shutdown().await;
     let zone_result = zones.shutdown().await;
     let group_result = groups.shutdown().await;
     let notification_result = notifications.shutdown();
@@ -266,7 +291,9 @@ async fn main() -> Result<()> {
     script_result?;
     rest_result?;
     native_result?;
+    tracker_result?;
     homeassistant_result?;
+    person_result?;
     zone_result?;
     group_result?;
     notification_result?;

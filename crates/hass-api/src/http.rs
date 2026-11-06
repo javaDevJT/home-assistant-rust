@@ -272,7 +272,10 @@ pub(crate) async fn call_service(
     Extension(identity): Extension<Identity>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if (domain == "recorder" || (domain == "zone" && service == "reload")) && !identity.is_admin {
+    if (domain == "recorder"
+        || (matches!(domain.as_str(), "zone" | "person") && service == "reload"))
+        && !identity.is_admin
+    {
         return Err(ApiError::forbidden());
     }
     if query.keys().any(|key| key != "return_response") {

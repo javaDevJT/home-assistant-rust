@@ -188,6 +188,7 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
         || kind.starts_with("config_entries/")
         || kind == "config/core/update"
         || matches!(kind, "zone/create" | "zone/update" | "zone/delete")
+        || matches!(kind, "person/create" | "person/update" | "person/delete")
         || kind.starts_with("config/auth_provider/")
         || matches!(
             kind,
@@ -212,8 +213,10 @@ pub(crate) fn websocket_allowed(
     }
     if kind == "call_service"
         && (message.get("domain").and_then(Value::as_str) == Some("recorder")
-            || (message.get("domain").and_then(Value::as_str) == Some("zone")
-                && message.get("service").and_then(Value::as_str) == Some("reload")))
+            || (matches!(
+                message.get("domain").and_then(Value::as_str),
+                Some("zone" | "person")
+            ) && message.get("service").and_then(Value::as_str) == Some("reload")))
         && !identity.is_admin
     {
         return false;
@@ -263,6 +266,9 @@ pub(crate) async fn handle_ws(
     command: &Value,
 ) -> Option<Result<Value>> {
     let kind = command.get("type")?.as_str()?;
+    if kind.starts_with("person/") {
+        return Some(crate::persons::handle(state, identity, command).await);
+    }
     if kind.starts_with("zone/") {
         let Some(manager) = state.features.zones.clone() else {
             return Some(Err(Error::NotFound(

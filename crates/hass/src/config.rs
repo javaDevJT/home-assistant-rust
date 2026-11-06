@@ -36,6 +36,10 @@ pub struct Config {
     pub group: BTreeMap<String, hass_group::GroupConfig>,
     #[serde(default, deserialize_with = "deserialize_zones")]
     pub zone: Vec<hass_zone::ZoneConfig>,
+    #[serde(default, deserialize_with = "deserialize_people")]
+    pub person: Vec<hass_person::PersonConfig>,
+    #[serde(default)]
+    pub device_tracker: hass_device_tracker::TrackerConfig,
     #[serde(skip)]
     pub group_order: Vec<String>,
     #[serde(default)]
@@ -116,7 +120,27 @@ impl Default for RecorderConfig {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        Self::from_value(crate::yaml::load(path)?)
+        let mut config = Self::from_value(crate::yaml::load(path)?)?;
+        let known = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("known_devices.yaml");
+        if known
+            .try_exists()
+            .context("cannot inspect known_devices.yaml")?
+        {
+            let value = crate::yaml::load(&known)?;
+            let mut value = serde_json::to_value(value).context("invalid known-device mapping")?;
+            if value.is_null() {
+                value = json!({});
+            }
+            config
+                .device_tracker
+                .devices
+                .extend(hass_device_tracker::parse_known_devices(value)?);
+            config.device_tracker.validate()?;
+        }
+        Ok(config)
     }
 
     /// Reload only the zone component, preserving the loader's include,
@@ -132,6 +156,17 @@ impl Config {
         Ok(zones)
     }
 
+    pub fn load_people(path: &Path) -> Result<Vec<hass_person::PersonConfig>> {
+        let root = crate::yaml::load(path)?;
+        let value = root.get("person").cloned().unwrap_or_default();
+        let people = deserialize_people(value)
+            .map_err(|_| anyhow::anyhow!("invalid person configuration"))?;
+        for person in &people {
+            person.validate()?;
+        }
+        Ok(people)
+    }
+
     #[cfg(test)]
     pub fn parse(source: &str) -> Result<Self> {
         if source.len() as u64 > MAX_CONFIG_BYTES {
@@ -141,6 +176,9 @@ impl Config {
     }
 
     fn from_value(mut value: serde_yaml::Value) -> Result<Self> {
+        if value.is_null() {
+            value = serde_yaml::Value::Mapping(Default::default());
+        }
         let group_order = value
             .get("group")
             .and_then(serde_yaml::Value::as_mapping)
@@ -185,6 +223,8 @@ impl Config {
                 "template",
                 "group",
                 "zone",
+                "person",
+                "device_tracker",
                 "timer",
                 "input_button",
                 "input_datetime",
@@ -252,6 +292,14 @@ impl Config {
         for zone in &self.zone {
             zone.validate()?;
         }
+        let mut person_ids = std::collections::BTreeSet::new();
+        for person in &self.person {
+            person.validate()?;
+            if !person_ids.insert(&person.id) {
+                bail!("duplicate person unique ID");
+            }
+        }
+        self.device_tracker.validate()?;
         Ok(())
     }
 
@@ -281,6 +329,8 @@ impl Config {
             "group",
             "persistent_notification",
             "zone",
+            "person",
+            "device_tracker",
         ];
         if !self.script.is_empty() {
             components.push("script");
@@ -361,6 +411,32 @@ where
     serde_yaml::from_value(value).map_err(serde::de::Error::custom)
 }
 
+fn deserialize_people<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<hass_person::PersonConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    let values = match value {
+        serde_yaml::Value::Sequence(values) => values,
+        other => vec![other],
+    };
+    let values = values
+        .into_iter()
+        .filter(|value| match value {
+            serde_yaml::Value::Null => false,
+            serde_yaml::Value::Bool(value) => *value,
+            serde_yaml::Value::Number(value) => value.as_f64().is_none_or(|value| value != 0.0),
+            serde_yaml::Value::String(value) => !value.is_empty(),
+            serde_yaml::Value::Sequence(value) => !value.is_empty(),
+            serde_yaml::Value::Mapping(value) => !value.is_empty(),
+            serde_yaml::Value::Tagged(_) => true,
+        })
+        .collect();
+    serde_yaml::from_value(serde_yaml::Value::Sequence(values)).map_err(serde::de::Error::custom)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,10 +452,12 @@ mod tests {
 
     #[test]
     fn default_config_is_explicitly_local_and_persistent() {
-        let config = Config::parse("{}\n").unwrap();
-        assert!(config.http.server_host.is_loopback());
-        assert_ne!(config.recorder.db_path, ":memory:");
-        assert_eq!(config.api_config()["version"], hass_core::VERSION);
+        for source in ["{}\n", "\n", "null\n"] {
+            let config = Config::parse(source).unwrap();
+            assert!(config.http.server_host.is_loopback());
+            assert_ne!(config.recorder.db_path, ":memory:");
+            assert_eq!(config.api_config()["version"], hass_core::VERSION);
+        }
     }
 
     #[test]
@@ -445,6 +523,76 @@ mod tests {
         assert!(
             Config::parse("zone:\n  - name: Invalid\n    latitude: 100\n    longitude: 0\n")
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn people_yaml_removes_falsy_entries_and_keeps_unique_ids_separate_from_names() {
+        for source in [
+            "person:\n",
+            "person: {}\n",
+            "person: [null, false, 0, '', {}, []]\n",
+        ] {
+            assert!(Config::parse(source).unwrap().person.is_empty());
+        }
+        let config = Config::parse(
+            "person:\n  id: '1234'\n  name: Resident\n  device_trackers: device_tracker.phone\n",
+        )
+        .unwrap();
+        assert_eq!(config.person[0].id, "1234");
+        assert_eq!(
+            config.person[0].device_trackers,
+            vec!["device_tracker.phone"]
+        );
+        assert!(
+            Config::parse(
+                "person:\n  - {id: duplicate, name: First}\n  - {id: duplicate, name: Second}\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn known_device_import_resolves_secrets_without_rewriting_source_or_creating_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("configuration.yaml");
+        let known_path = directory.path().join("known_devices.yaml");
+        let source = "phone:\n  name: !secret device_name\n  mac: aa:bb:cc:dd:ee:ff\n  track: true\nrouter:\n  name: Router\n";
+        std::fs::write(&config_path, "{}\n").unwrap();
+        std::fs::write(&known_path, source).unwrap();
+        std::fs::write(
+            directory.path().join("secrets.yaml"),
+            "device_name: Handset\n",
+        )
+        .unwrap();
+        let config = Config::load(&config_path).unwrap();
+        let phone = config
+            .device_tracker
+            .devices
+            .iter()
+            .find(|device| device.dev_id == "phone")
+            .unwrap();
+        assert_eq!(phone.name.as_deref(), Some("Handset"));
+        assert_eq!(phone.mac.as_deref(), Some("AA:BB:CC:DD:EE:FF"));
+        assert!(phone.track);
+        assert!(
+            !config
+                .device_tracker
+                .devices
+                .iter()
+                .find(|device| device.dev_id == "router")
+                .unwrap()
+                .track
+        );
+        assert_eq!(std::fs::read_to_string(&known_path).unwrap(), source);
+        assert!(!directory.path().join("data").exists());
+        std::fs::write(&known_path, "\n").unwrap();
+        assert!(
+            Config::load(&config_path)
+                .unwrap()
+                .device_tracker
+                .devices
+                .is_empty()
         );
     }
 }

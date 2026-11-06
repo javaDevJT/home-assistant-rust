@@ -745,10 +745,12 @@ dependencies = [
  "hass-automation",
  "hass-config",
  "hass-core",
+ "hass-device-tracker",
  "hass-group",
  "hass-mqtt",
  "hass-native",
  "hass-notifications",
+ "hass-person",
  "hass-registry",
  "hass-rest",
  "hass-script",
@@ -780,6 +782,7 @@ dependencies = [
  "hass-config",
  "hass-core",
  "hass-notifications",
+ "hass-person",
  "hass-registry",
  "hass-template",
  "hass-zone",
@@ -866,6 +869,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-device-tracker"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "hass-zone",
+ "md-5",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "hass-group"
 version = "0.1.0"
 dependencies = [
@@ -927,6 +945,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "hass-person"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "hass-registry",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
