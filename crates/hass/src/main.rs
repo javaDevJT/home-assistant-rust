@@ -4,6 +4,7 @@ mod config;
 mod helpers;
 mod homeassistant;
 mod integration_drivers;
+mod logging;
 mod persons;
 mod recorder;
 mod system_sensors;
@@ -22,6 +23,7 @@ use std::{
     sync::Arc,
 };
 use tracing::{info, warn};
+use tracing_subscriber::prelude::*;
 
 #[derive(Parser)]
 #[command(
@@ -69,13 +71,6 @@ fn read_token(path: Option<&Path>) -> Result<String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "hass=info,hass_automation=info".into()),
-        )
-        .with_target(false)
-        .init();
     let args = Args::parse();
     let config = Config::load(&args.config)?;
     if args.check {
@@ -146,6 +141,23 @@ async fn main() -> Result<()> {
         })
         .await
         .context("runtime initialization failed")??;
+    let logger_runtime = runtime.clone();
+    let logger_auth = auth.clone();
+    let logger_config = config.logger.clone().unwrap_or_default();
+    let logger = tokio::task::spawn_blocking(move || {
+        logging::start(logger_runtime, &logger_auth, logger_config)
+    })
+    .await??;
+    let logger_manager = logger.manager();
+    let logger_catalog = logging::loaded_catalog(config_entries.clone(), api_config.clone());
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_filter(logger.filter()),
+        )
+        .try_init()
+        .context("cannot initialize native logging")?;
     let image_runtime = runtime.clone();
     let image_directory = args
         .config
@@ -301,6 +313,8 @@ async fn main() -> Result<()> {
             images: Some(image_manager),
             webhooks: Some(webhooks),
             tags: Some(tag_manager),
+            logger: Some(logger_manager),
+            logger_catalog: Some(logger_catalog),
         },
         Some(shutdown_rx),
     );
@@ -326,6 +340,7 @@ async fn main() -> Result<()> {
     let zone_result = zones.shutdown().await;
     let group_result = groups.shutdown().await;
     let notification_result = notifications.shutdown();
+    let logger_result = logger.shutdown();
     let stop_result = tokio::task::spawn_blocking(move || {
         runtime.fire_event("homeassistant_stop", Map::new(), Context::default())
     })
@@ -348,6 +363,7 @@ async fn main() -> Result<()> {
     zone_result?;
     group_result?;
     notification_result?;
+    logger_result?;
     stop_result?;
     Ok(())
 }

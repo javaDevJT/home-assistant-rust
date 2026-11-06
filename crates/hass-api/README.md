@@ -169,3 +169,13 @@ and **removed** arrays containing **tag_id** and **item**. Generic
 update/delete IDs are strict strings. Create IDs, descriptions and device IDs
 accept scalar string coercion. The pinned integration has no **tag/scan**
 command or HTTP scan endpoint; actual readers call the native scan manager.
+
+**logger/log_info** returns the numeric effective levels for loaded native
+integrations and integrations with current custom settings. It is readable by
+authenticated users. **logger/log_level** identifies a module with **module**;
+**logger/integration_log_level** identifies an integration with **integration**.
+Both require administrator authority, uppercase **level** and **persistence**
+(`none`, `once` or `permanent`). Unknown fields and levels fail validation.
+The administrator-only HTTP/WebSocket logger services accept case-insensitive
+levels. These paths change the same filter attached to the application's real
+tracing output layer and publish **logging_changed** with an empty payload.

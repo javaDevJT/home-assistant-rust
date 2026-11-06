@@ -13,6 +13,7 @@ mod extensions;
 mod history;
 mod http;
 mod images;
+mod logger;
 mod login;
 pub mod network;
 mod persons;
@@ -59,6 +60,8 @@ pub struct ApiFeatures {
     pub images: Option<hass_image_upload::ImageManager>,
     pub webhooks: Option<hass_webhook::WebhookManager>,
     pub tags: Option<hass_tag::TagManager>,
+    pub logger: Option<hass_logger::LoggerManager>,
+    pub logger_catalog: Option<hass_logger::IntegrationCatalogProvider>,
 }
 
 #[derive(Clone)]

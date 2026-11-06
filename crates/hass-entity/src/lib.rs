@@ -63,6 +63,8 @@ pub struct EntitySpec {
     pub info: ProviderEntityInfo,
     /// State attributes retained live but excluded from recorded history.
     pub recording_policy: StateRecordingPolicy,
+    /// Initial registry availability; existing user decisions are preserved.
+    pub enabled_by_default: bool,
 }
 
 impl EntitySpec {
@@ -88,6 +90,7 @@ impl EntitySpec {
             prior_entity_id: None,
             info: ProviderEntityInfo::default(),
             recording_policy: StateRecordingPolicy::default(),
+            enabled_by_default: true,
         }
     }
 
@@ -144,6 +147,14 @@ impl EntitySpec {
     #[must_use]
     pub fn with_info(mut self, info: ProviderEntityInfo) -> Self {
         self.info = info;
+        self
+    }
+
+    /// Disable a newly created registry identity until a user enables it.
+    /// Existing and restored registry entries keep their current setting.
+    #[must_use]
+    pub fn with_enabled_by_default(mut self, enabled: bool) -> Self {
+        self.enabled_by_default = enabled;
         self
     }
 
@@ -1069,6 +1080,7 @@ impl EntityLifecycleInner {
                 registration.translation_key = info.translation_key.clone();
                 registration.supported_features = info.supported_features;
                 registration.has_entity_name = info.has_entity_name;
+                registration.disabled_by = (!spec.enabled_by_default).then(|| "integration".into());
                 registrations.push(ProviderEntityRegistration::new(registration, info));
             }
             let reserved_entity_ids = reserved_generated_ids
@@ -2969,6 +2981,60 @@ mod tests {
             "unavailable"
         );
         assert_eq!(registries.entities().len(), 1);
+        lifecycle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_disabled_registry_entries_preserve_later_user_enablement() {
+        let (runtime, _) = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+        let spec = registered_spec("fixture").with_enabled_by_default(false);
+        let handle = lifecycle
+            .register_provider_batch("fixture", vec![spec.clone()])
+            .unwrap()
+            .remove(0);
+        let id = handle.registry_id().unwrap().to_owned();
+        let entry = registries.provider_entity(&id).unwrap();
+        assert_eq!(entry.disabled_by.as_deref(), Some("integration"));
+        assert!(handle.publish(EntitySnapshot::new("1")).unwrap().is_none());
+        assert!(runtime.get_state(&entry.entity_id).is_none());
+        registries
+            .update_entity(
+                &entry.entity_id,
+                EntityUpdate {
+                    disabled_by: Some(None),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        assert!(handle.publish(EntitySnapshot::new("2")).unwrap().is_some());
+        let refreshed = lifecycle
+            .register_provider_batch("fixture", vec![spec.clone()])
+            .unwrap()
+            .remove(0);
+        assert_eq!(registries.provider_entity(&id).unwrap().disabled_by, None);
+        assert!(
+            refreshed
+                .publish(EntitySnapshot::new("3"))
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(runtime.get_state(&entry.entity_id).unwrap().state, "3");
+        registries.remove_entity(&entry.entity_id).unwrap();
+        refreshed.publish(EntitySnapshot::new("ignored")).unwrap();
+        let restored = lifecycle
+            .register_provider_batch("fixture", vec![spec])
+            .unwrap()
+            .remove(0);
+        assert_eq!(restored.registry_id(), Some(id.as_str()));
+        assert_eq!(registries.provider_entity(&id).unwrap().disabled_by, None);
+        assert!(
+            restored
+                .publish(EntitySnapshot::new("4"))
+                .unwrap()
+                .is_some()
+        );
         lifecycle.shutdown().await.unwrap();
     }
 

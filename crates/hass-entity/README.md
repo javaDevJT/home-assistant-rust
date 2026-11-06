@@ -15,6 +15,10 @@ provider metadata. A registry identity is `(domain, platform, unique_id)`.
 Without a unique ID, the manager allocates and persists an entity ID under the
 `(provider_id, provider_key)` receipt.
 
+`with_enabled_by_default(false)` sets a newly created registry entry's
+`disabled_by` to `integration`. Existing or restored entries retain user
+enablement choices, including across authoritative provider refreshes.
+
 `register_batch` validates a batch before registering it and returns handles in
 input order. `register_provider_batch` additionally reconciles one provider
 namespace against its complete active configuration. `provider_id` is an

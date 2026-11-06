@@ -813,6 +813,7 @@ dependencies = [
  "hass-entity",
  "hass-group",
  "hass-image-upload",
+ "hass-logger",
  "hass-mqtt",
  "hass-native",
  "hass-notifications",
@@ -853,6 +854,7 @@ dependencies = [
  "hass-core",
  "hass-entity",
  "hass-image-upload",
+ "hass-logger",
  "hass-notifications",
  "hass-person",
  "hass-registry",
@@ -875,6 +877,8 @@ dependencies = [
  "totp-rs",
  "tower",
  "tower-http",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
@@ -1004,6 +1008,21 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "hass-logger"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

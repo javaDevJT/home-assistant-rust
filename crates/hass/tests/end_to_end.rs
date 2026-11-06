@@ -221,6 +221,73 @@ automation:
 }
 
 #[tokio::test]
+async fn real_process_logger_settings_obey_permanent_once_and_session_lifetimes() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        "recorder:\n  db_path: state.sqlite\nlogger:\n  default: info\n",
+    )
+    .unwrap();
+    async fn logger_level(socket: &mut Socket, id: u64) -> i64 {
+        let info = ws_command(socket, json!({"id":id,"type":"logger/log_info"})).await;
+        assert_eq!(info["success"], true, "{info}");
+        info["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["domain"] == "logger")
+            .unwrap()["level"]
+            .as_i64()
+            .unwrap()
+    }
+    async fn stop(server: &mut Server, socket: &mut Socket) {
+        socket.close(None).await.unwrap();
+        server.child.kill().await.unwrap();
+        server.child.wait().await.unwrap();
+    }
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    assert_eq!(logger_level(&mut socket, 1).await, 20);
+    assert_eq!(ws_command(&mut socket,json!({"id":2,"type":"logger/integration_log_level","integration":"logger","level":"DEBUG","persistence":"permanent"})).await["success"],true);
+    assert_eq!(logger_level(&mut socket, 3).await, 10);
+    stop(&mut server, &mut socket).await;
+
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    assert_eq!(logger_level(&mut socket, 1).await, 10);
+    assert_eq!(ws_command(&mut socket,json!({"id":2,"type":"logger/integration_log_level","integration":"logger","level":"WARNING","persistence":"once"})).await["success"],true);
+    assert_eq!(logger_level(&mut socket, 3).await, 30);
+    stop(&mut server, &mut socket).await;
+
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    assert_eq!(logger_level(&mut socket, 1).await, 30);
+    stop(&mut server, &mut socket).await;
+
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    assert_eq!(logger_level(&mut socket, 1).await, 20);
+    assert_eq!(
+        server
+            .post(
+                "/api/services/logger/set_default_level",
+                json!({"level":"error"})
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(logger_level(&mut socket, 2).await, 40);
+    stop(&mut server, &mut socket).await;
+
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    assert_eq!(logger_level(&mut socket, 1).await, 20);
+    stop(&mut server, &mut socket).await;
+}
+
+#[tokio::test]
 async fn real_process_tags_registry_and_trigger_survive_hard_restart() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("configuration.yaml");

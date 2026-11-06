@@ -605,7 +605,7 @@ async fn run_scheduler(
                 }
                 joined = scene_runs.join_next(), if !scene_runs.is_empty() => {
                     if let Some(Err(error)) = joined {
-                        tracing::error!(%error, "scene apply task failed during shutdown");
+                    tracing::error!(target: "hass_script::scene", %error, "scene apply task failed during shutdown");
                     }
                 }
             }
@@ -662,7 +662,7 @@ async fn run_scheduler(
             }
             joined = scene_runs.join_next(), if !scene_runs.is_empty() => {
                 if let Some(Err(error)) = joined {
-                    tracing::error!(%error, "scene apply task failed");
+                tracing::error!(target: "hass_script::scene", %error, "scene apply task failed");
                 }
             }
         }

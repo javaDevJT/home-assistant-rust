@@ -317,7 +317,7 @@ pub(crate) async fn call_service(
     Extension(identity): Extension<Identity>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if (domain == "recorder"
+    if (matches!(domain.as_str(), "recorder" | "logger")
         || (matches!(domain.as_str(), "zone" | "person") && service == "reload"))
         && !identity.is_admin
     {

@@ -44,6 +44,8 @@ pub struct Config {
     pub image_upload: serde_yaml::Value,
     #[serde(default)]
     pub tag: serde_yaml::Value,
+    #[serde(default)]
+    pub logger: Option<hass_logger::LoggerConfig>,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
     pub sensor: Vec<crate::system_sensors::SystemSensorYamlPlatform>,
     #[serde(skip)]
@@ -233,6 +235,7 @@ impl Config {
                 "device_tracker",
                 "image_upload",
                 "tag",
+                "logger",
                 "sensor",
                 "timer",
                 "input_button",
@@ -259,6 +262,9 @@ impl Config {
     }
 
     fn validate(&self) -> Result<()> {
+        if let Some(logger) = &self.logger {
+            hass_logger::validate_config(logger)?;
+        }
         if !(1..=365_000).contains(&self.recorder.purge_keep_days) {
             bail!("recorder.purge_keep_days must be between 1 and 365000");
         }
@@ -358,6 +364,7 @@ impl Config {
             "device_tracker",
             "image_upload",
             "tag",
+            "logger",
             "webhook",
             "time_date",
             "uptime",
@@ -488,6 +495,26 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn logger_configuration_is_validated_before_runtime_setup() {
+        let config = Config::parse("logger:\n  default: info\n  logs:\n    homeassistant.components.mqtt: DeBuG\n  filters:\n    hass_mqtt: ['^skip']\n").unwrap();
+        assert!(
+            config.api_config()["components"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("logger"))
+        );
+        for source in [
+            "logger:\n  default: null\n",
+            "logger:\n  default: 10\n",
+            "logger:\n  default: ' INFO '\n",
+            "logger:\n  filters:\n    hass_mqtt: ['[broken']\n",
+            "logger:\n  unsupported: true\n",
+        ] {
+            assert!(Config::parse(source).is_err(), "{source}");
+        }
+    }
 
     #[test]
     fn rejects_unsupported_configuration_instead_of_ignoring_it() {

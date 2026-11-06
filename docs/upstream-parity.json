@@ -79690,7 +79690,19 @@
       "component_directory": "homeassistant/components/logger/",
       "config_flow_classes": [],
       "domain": "logger",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-logger/src/lib.rs",
+        "crates/hass-logger/README.md",
+        "crates/hass-api/src/logger.rs",
+        "crates/hass-api/tests/logger_protocol.rs",
+        "crates/hass/src/logging.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/main.rs",
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass-native/src/lib.rs",
+        "crates/hass-script/src/lib.rs",
+        "crates/hass/src/system_sensors.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -79703,10 +79715,10 @@
       },
       "manifest_blob_oid": "eed80c3f4608bb16b878266db0063af22942a773",
       "manifest_path": "homeassistant/components/logger/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Tracing combines ERROR and CRITICAL/FATAL thresholds; Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -168176,6 +168188,74 @@
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
       {
+        "domain": "logger",
+        "local_evidence": [
+          {
+            "path": "crates/hass-logger/src/lib.rs",
+            "test_functions_present": [
+              "failed_startup_notification_does_not_consume_once_settings",
+              "strict_config_accepts_aliases_and_rejects_unknown_fields_or_bad_regex",
+              "actual_fmt_layer_applies_levels_regexes_aliases_and_live_updates",
+              "empty_root_logger_name_controls_real_events_and_inherits",
+              "set_level_service_validates_whole_batch_and_requires_admin",
+              "every_level_update_emits_public_event_after_commit",
+              "once_settings_apply_for_one_restart_and_are_removed_before_exposure",
+              "permanent_none_and_notset_update_storage_and_inheritance",
+              "yaml_and_saved_levels_merge_to_chattiest_then_live_override_wins",
+              "dropping_integration_unregisters_services_and_invalidates_weak_handles",
+              "integration_log_info_only_reports_supplied_native_catalog",
+              "log_info_unions_unloaded_integration_settings_and_removes_replaced_entries"
+            ]
+          },
+          {
+            "path": "crates/hass-logger/README.md"
+          },
+          {
+            "path": "crates/hass-api/src/logger.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/logger_protocol.rs",
+            "test_functions_present": [
+              "logger_commands_enforce_roles_and_change_real_output_and_restart_settings"
+            ]
+          },
+          {
+            "path": "crates/hass/src/logging.rs",
+            "test_functions_present": [
+              "native_target_aliases_keep_integration_levels_independent",
+              "service_auth_lives_with_host_and_checks_current_user_before_cleanup"
+            ]
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "logger_configuration_is_validated_before_runtime_setup"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_logger_settings_obey_permanent_once_and_session_lifetimes"
+            ]
+          },
+          {
+            "path": "crates/hass-native/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-script/src/lib.rs"
+          },
+          {
+            "path": "crates/hass/src/system_sensors.rs"
+          }
+        ],
+        "remaining": "Tracing combines ERROR and CRITICAL/FATAL thresholds; Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
+        "status": "partial",
+        "verification": "Frozen corrected 25-crate workspace passes 517 tests across 66 targets with zero failed/ignored, formatting, strict locked all-target Clippy, optimized build and CLI validation. Logger contributes 12 native tests, actual authenticated IO with captured output, app preflight/authority/independent-target checks and five compiled-process hard-start lifetimes. Primary resolved both independent review findings: target alias coupling and failed-start Once consumption."
+      },
+      {
         "domain": "mqtt",
         "local_evidence": [
           {
@@ -168679,10 +168759,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 33,
+    "partial": 34,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1532
+    "unported": 1531
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

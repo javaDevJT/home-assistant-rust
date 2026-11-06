@@ -1617,7 +1617,7 @@ async fn timer_worker(
                     Context::default(),
                     Some(deadline.generation),
                 ) {
-                    tracing::warn!(entity_id = %format!("timer.{id}"), %error, "timer finish persistence failed; retrying");
+                        tracing::warn!(target: "hass_native::timer", entity_id = %format!("timer.{id}"), %error, "timer finish persistence failed; retrying");
                     tokio::select! {
                         _ = sleep(StdDuration::from_secs(1)) => {},
                         changed = deadline_rx.changed() => if changed.is_err() { return; },
@@ -1891,7 +1891,7 @@ async fn schedule_worker(
         if let Err(error) =
             runtime.set_state(&entity_id, &state, attributes, Context::default(), false)
         {
-            tracing::warn!(%entity_id, %error, "schedule state persistence failed");
+            tracing::warn!(target: "hass_native::schedule", %entity_id, %error, "schedule state persistence failed");
             tokio::select! {
                 _ = sleep(StdDuration::from_secs(1)) => {},
                 changed = shutdown_rx.changed() => if changed.is_err() || *shutdown_rx.borrow() { return; },

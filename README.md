@@ -52,6 +52,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Tags | Registry-backed collection, native reader callback, scan-triggered actions, private WebSocket feeds and history attribute projection |
 | Automation | State/event/numeric/template/time/MQTT/notification/webhook/tag/lifecycle triggers, conditions, execution modes |
 | Clock sensors | Time/date formats, timezone and DST scheduling, fixed setup-time uptime, YAML and config-entry flows |
+| Logging | Actual dynamic tracing levels/message filters, admin controls, persistent and once-only settings, public change notifications |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -92,6 +93,7 @@ cargo test --workspace --locked
 - [Webhooks, callback authority and private automation delivery](crates/hass-webhook/README.md)
 - [Native time/date and uptime sensors](crates/hass-system-sensors/README.md)
 - [Native tag collection, scan callbacks and automation triggers](crates/hass-tag/README.md)
+- [Native logger policy, filters and persisted controls](crates/hass-logger/README.md)
 - [Config entries, native drivers, and core settings](crates/hass-config/README.md)
 - [Supported configuration example](examples/configuration.yaml)
 - [YAML includes, secrets, packages, and loading limits](docs/CONFIGURATION.md)

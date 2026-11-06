@@ -107,6 +107,35 @@ captured at provider setup, refreshed on reload/restart. It is not an elapsed
 duration or operating-system boot time. See the
 [system sensor contract](../crates/hass-system-sensors/README.md).
 
+Native logging controls the actual tracing output layer:
+
+```yaml
+logger:
+  default: info
+  logs:
+    homeassistant.components.mqtt: debug
+  filters:
+    hass_mqtt:
+      - '^Repeated fixture message'
+```
+
+Configuration and service levels accept any letter case, without trimming.
+Supported names are `NOTSET`, `DEBUG`, `INFO`, `WARNING`/`WARN`, `ERROR` and
+`CRITICAL`/`FATAL`. Regex filters suppress matching messages from the exact
+logger name; they do not propagate to child logger records. Invalid names,
+levels and regexes fail configuration validation before opening the database.
+The native regex engine supports its documented Rust syntax; Python lookaround
+and backreference patterns are rejected. Tracing shares its error threshold
+between `ERROR` and `CRITICAL`/`FATAL`.
+
+Administrator services `logger.set_level` and `logger.set_default_level` apply
+session settings. Authenticated users can read `logger/log_info`; administrator
+WebSocket controls accept uppercase level names and persistence `none`, `once`
+or `permanent`. `once` survives one subsequent start, and `permanent` remains
+until replaced or cleared with `NOTSET`. The app maps known integration names
+to distinct native targets, including timer, schedule, scene and clock-provider
+output. Explicit Rust targets and their `::` hierarchy are also supported.
+
 `tag:` accepts null or an empty mapping. Tags are editable persistent collection
 items managed by the authenticated `tag/*` WebSocket commands; names live in
 the shared entity registry. Native reader integrations call `TagManager::scan`,

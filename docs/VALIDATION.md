@@ -1,8 +1,18 @@
 # Validation evidence
 
-The accepted 24-crate tag/recording/composite source passes **499 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Linux publication follows this local gate. Earlier checkpoints remain separately pinned below. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
+The corrected 25-crate logger source passes **517 workspace tests** across 66 targets, formatting, strict locked all-target Clippy, optimized build and CLI validation on 2026-11-06. Optimized executable SHA-256: `35a81889ca1a243637136ef2bf1a7f20d4b313b6325730d9a4fe1372cc702d60`. Publication follows this gate; the Sun crate remains outside this receipt.
 
-## Accepted 24-crate source
+## Accepted 25-crate logger source
+
+Actual authenticated WebSocket/HTTP controls change the filter attached to a real captured tracing layer. Fixtures verify ordinary reads, administrator mutations/services, strict WebSocket schemas, source config/service case rules, exact message filtering, public empty change events and persistent settings. The compiled process survives five hard starts with correct permanent, once-only and session lifetimes. The app retains authorization while using weak callbacks, then unregisters cleanly.
+
+Independent Rust review found coupled aliases and Once consumption on failed startup. Corrections use distinct integration targets, including actual timer/schedule/scene/clock callsites, and restore prior settings if either startup notification fails. Regression tests prove independent effective/info levels, alias uniqueness, failure recovery and the next default session. The reviewer did not independently read pinned Python objects; primary source comparisons remain separately recorded in the execution ledger. The shared default-disabled entity builder preserves user enablement across refresh/restore, supporting subsequent Sun integration.
+
+All 517 tests pass with zero failures/ignored cases, including 12 compiled-process cases and 12 logger unit cases. The inventory reconciles 34 partial native domains, 1,531 unported and zero complete over 1,565 manifests and 32 disjoint batches. Python-only regex syntax, distinct critical severity, remaining attribution/repairs/frontend behavior and full parity remain open. No production deployment or physical provider activity occurred.
+
+## Published 24-crate source
+
+Published 24-crate tag/recording/composite source `c1318a838c9ffeaa15ef0e57785861273c841adc` passes **499 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS, followed by [green Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42298490640). Later logger/Sun changes are outside that receipt. Earlier checkpoints remain separately pinned below. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
 
 `cargo test --workspace --locked --no-fail-fast` passes 499 tests across 63 unit/integration/doc-test targets, with zero failed or ignored cases. Formatting, strict locked all-target Clippy, optimized build and optimized example `--check` pass. Optimized macOS executable SHA-256: `1efc479a1bba8d8d07280c23f5c026eaacb92c2a45ad710b4bdfd6605888ad2f`.
 

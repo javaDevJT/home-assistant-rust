@@ -733,6 +733,18 @@ fn retry_delay(attempts: u32) -> u64 {
         .min(RETRY_MAX_SECS)
 }
 
+fn trace_entry_failure(domain: &str, entry_id: &str, error: &hass_core::Error, message: &str) {
+    match domain {
+        TIME_DATE_DOMAIN => {
+            tracing::warn!(target: "hass::system_sensors::time_date", %entry_id, %error, "{message}")
+        }
+        UPTIME_DOMAIN => {
+            tracing::warn!(target: "hass::system_sensors::uptime", %entry_id, %error, "{message}")
+        }
+        _ => tracing::warn!(%entry_id, %error, "{message}"),
+    }
+}
+
 fn restore_system_sensor_entries(entries: &ConfigEntries) {
     for domain in [TIME_DATE_DOMAIN, UPTIME_DOMAIN] {
         for entry in entries.list_entries(Some(domain)) {
@@ -745,12 +757,22 @@ fn restore_system_sensor_entries(entries: &ConfigEntries) {
                     .is_some_and(|retry_at| retry_at <= Utc::now())
                     && let Err(error) = entries.retry_entry(&entry.entry_id)
                 {
-                    tracing::warn!(entry_id = %entry.entry_id, error = %error, "system sensor config entry retry failed during restore");
+                    trace_entry_failure(
+                        domain,
+                        &entry.entry_id,
+                        &error,
+                        "system sensor config entry retry failed during restore",
+                    );
                 }
                 continue;
             }
             if let Err(error) = entries.setup_entry(&entry.entry_id) {
-                tracing::warn!(entry_id = %entry.entry_id, error = %error, "system sensor config entry setup failed during restore");
+                trace_entry_failure(
+                    domain,
+                    &entry.entry_id,
+                    &error,
+                    "system sensor config entry setup failed during restore",
+                );
             }
         }
     }
@@ -771,7 +793,7 @@ async fn retry_scheduler(entries: Arc<ConfigEntries>, mut stop: oneshot::Receive
                                 && entry.retry_at.is_some_and(|retry_at| retry_at <= Utc::now())
                                 && let Err(error) = entries.retry_entry(&entry.entry_id)
                             {
-                                tracing::warn!(entry_id = %entry.entry_id, error = %error, "system sensor config entry retry failed");
+                                trace_entry_failure(domain, &entry.entry_id, &error, "system sensor config entry retry failed");
                             }
                         }
                     }

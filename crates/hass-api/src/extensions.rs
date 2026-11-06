@@ -192,6 +192,7 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
         || matches!(kind, "image/create" | "image/update" | "image/delete")
         || kind == "webhook/list"
         || matches!(kind, "tag/create" | "tag/update" | "tag/delete")
+        || matches!(kind, "logger/log_level" | "logger/integration_log_level")
         || kind.starts_with("config/auth_provider/")
         || matches!(
             kind,
@@ -215,11 +216,13 @@ pub(crate) fn websocket_allowed(
         return false;
     }
     if kind == "call_service"
-        && (message.get("domain").and_then(Value::as_str) == Some("recorder")
-            || (matches!(
-                message.get("domain").and_then(Value::as_str),
-                Some("zone" | "person")
-            ) && message.get("service").and_then(Value::as_str) == Some("reload")))
+        && (matches!(
+            message.get("domain").and_then(Value::as_str),
+            Some("recorder" | "logger")
+        ) || (matches!(
+            message.get("domain").and_then(Value::as_str),
+            Some("zone" | "person")
+        ) && message.get("service").and_then(Value::as_str) == Some("reload")))
         && !identity.is_admin
     {
         return false;
@@ -270,6 +273,18 @@ pub(crate) async fn handle_ws(
     command: &Value,
 ) -> Option<Result<Value>> {
     let kind = command.get("type")?.as_str()?;
+    if matches!(
+        kind,
+        "logger/log_info" | "logger/log_level" | "logger/integration_log_level"
+    ) {
+        let (Some(manager), Some(catalog)) = (
+            state.features.logger.clone(),
+            state.features.logger_catalog.clone(),
+        ) else {
+            return Some(Err(Error::NotFound("Logger is not configured".into())));
+        };
+        return Some(crate::logger::handle(manager, catalog, command).await);
+    }
     if matches!(
         kind,
         "tag/list" | "tag/create" | "tag/update" | "tag/delete"
