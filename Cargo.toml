@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities"]
+members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone"]
 
 [workspace.package]
 version = "0.1.0"
@@ -30,6 +30,9 @@ hass-native = { path = "crates/hass-native" }
 hass-config = { path = "crates/hass-config" }
 hass-rest = { path = "crates/hass-rest" }
 hass-template-entities = { path = "crates/hass-template-entities" }
+hass-group = { path = "crates/hass-group" }
+hass-notifications = { path = "crates/hass-notifications" }
+hass-zone = { path = "crates/hass-zone" }
 http-body-util = "0.1"
 ipnet = "2"
 jsonwebtoken = "9"

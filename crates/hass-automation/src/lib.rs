@@ -19,7 +19,7 @@
 //! ```
 
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -49,6 +49,7 @@ const MAX_LINEAGE_DEPTH: usize = 32;
 const MAX_LINEAGE_ENTRIES: usize = 4096;
 const LINEAGE_TTL: Duration = Duration::from_secs(5 * 60);
 const AUTOMATION_ENABLED_PREFIX: &str = "automation.enabled.";
+const PERSISTENT_NOTIFICATION_SIGNAL: &str = "persistent_notifications_updated";
 
 /// A configured automation. All fields are strict: unrecognized YAML keys
 /// produce a deserialization error instead of being ignored.
@@ -167,12 +168,61 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value_template: Option<String>,
     },
+    /// Match an added, updated, or removed persistent notification.
+    PersistentNotification {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notification_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        update_type: Option<NotificationUpdateTypes>,
+    },
     /// Match an event type and a top-level subset of its data.
     Event {
         event_type: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_data: Option<Map<String, Value>>,
     },
+}
+
+/// Update types emitted by Home Assistant's persistent notification trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationUpdateType {
+    /// A current notification snapshot. The native feed does not emit snapshots.
+    Current,
+    /// A new notification was created.
+    Added,
+    /// An existing notification was replaced.
+    Updated,
+    /// One or more notifications were dismissed.
+    Removed,
+}
+
+impl NotificationUpdateType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Added => "added",
+            Self::Updated => "updated",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+/// One update type or a list of update types accepted by a notification trigger.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum NotificationUpdateTypes {
+    One(NotificationUpdateType),
+    Many(Vec<NotificationUpdateType>),
+}
+
+impl NotificationUpdateTypes {
+    fn allows(&self, update_type: NotificationUpdateType) -> bool {
+        match self {
+            Self::One(expected) => *expected == update_type,
+            Self::Many(expected) => expected.is_empty() || expected.contains(&update_type),
+        }
+    }
 }
 
 /// One clock time or a list of clock times in `HH:MM[:SS]` form.
@@ -249,6 +299,12 @@ enum TriggerRepr {
         #[serde(default)]
         value_template: Option<String>,
     },
+    PersistentNotification {
+        #[serde(default)]
+        notification_id: Option<String>,
+        #[serde(default)]
+        update_type: Option<NotificationUpdateTypes>,
+    },
     Event {
         event_type: String,
         #[serde(default)]
@@ -317,6 +373,13 @@ impl From<TriggerRepr> for Trigger {
                 topic,
                 payload,
                 value_template,
+            },
+            TriggerRepr::PersistentNotification {
+                notification_id,
+                update_type,
+            } => Self::PersistentNotification {
+                notification_id,
+                update_type,
             },
             TriggerRepr::Event {
                 event_type,
@@ -691,6 +754,7 @@ pub fn validate(automations: &[Automation]) -> Result<()> {
                         )));
                     }
                 }
+                Trigger::PersistentNotification { .. } => {}
                 Trigger::Event { event_type, .. } if !valid_event_type(event_type) => {
                     return Err(Error::InvalidInput(format!(
                         "automation `{}` has an invalid event_type",
@@ -1140,15 +1204,35 @@ fn shutdown_runs(runtime: &Runtime, automations: &[Automation]) -> Vec<PendingRu
             automation: automation.clone(),
             trigger_context: shutdown_event.context.clone(),
             lineage: Vec::new(),
-            variables: variables_for_trigger(
+            variables: homeassistant_trigger_variables(
                 runtime,
                 automation,
-                Some(&shutdown_event),
-                "homeassistant",
-                None,
+                &shutdown_event,
+                "shutdown",
+                "Home Assistant stopping",
             ),
         })
         .collect()
+}
+
+fn homeassistant_trigger_variables(
+    runtime: &Runtime,
+    automation: &Automation,
+    event: &Event,
+    event_name: &str,
+    description: &str,
+) -> Map<String, Value> {
+    let mut trigger_fields = Map::new();
+    trigger_fields.insert("event".into(), Value::String(event_name.into()));
+    trigger_fields.insert("description".into(), Value::String(description.into()));
+    variables_for_trigger_with_fields(
+        runtime,
+        automation,
+        Some(event),
+        "homeassistant",
+        None,
+        Some(trigger_fields),
+    )
 }
 
 fn initial_template_states(
@@ -1198,7 +1282,12 @@ pub fn start_with_timezone(
     let signal_receiver = automations
         .iter()
         .flat_map(|automation| &automation.triggers)
-        .any(|trigger| matches!(trigger, Trigger::Mqtt { .. }))
+        .any(|trigger| {
+            matches!(
+                trigger,
+                Trigger::Mqtt { .. } | Trigger::PersistentNotification { .. }
+            )
+        })
         .then(|| runtime.subscribe_signals());
 
     let mut enabled = HashMap::with_capacity(automations.len());
@@ -1433,51 +1522,7 @@ async fn run_engine(input: EngineInput) -> Result<()> {
     );
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    // Home Assistant startup triggers fire once after the listener is ready.
-    let startup_event = synthetic_event(
-        "homeassistant",
-        serde_json::json!({ "event": "start" }),
-        Context::default(),
-    );
-    for automation in &automations {
-        if !automation_is_enabled(&controls, &automation.id) {
-            continue;
-        }
-        if automation
-            .triggers
-            .iter()
-            .any(|trigger| matches!(trigger, Trigger::HomeAssistant { event } if event == "start"))
-        {
-            let variables = variables_for_trigger(
-                &runtime,
-                automation,
-                Some(&startup_event),
-                "homeassistant",
-                None,
-            );
-            match conditions_match(&runtime, &automation.conditions, &variables) {
-                Ok(true) => {
-                    if let Err(error) = enqueue_run(
-                        &mut pending,
-                        &active_by_automation,
-                        PendingRun {
-                            automation: automation.clone(),
-                            trigger_context: startup_event.context.clone(),
-                            lineage: Vec::new(),
-                            variables,
-                        },
-                    ) {
-                        failure = Some(error);
-                        break;
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    tracing::warn!(automation_id = %automation.id, %error, "startup automation condition failed")
-                }
-            }
-        }
-    }
+    let mut consumed_start_triggers = HashSet::<(String, usize)>::new();
 
     loop {
         if failure.is_some() {
@@ -1683,6 +1728,19 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                             continue;
                         }
                         for automation in &automations {
+                            let mut new_start_receipts = HashSet::new();
+                            if event.event_type == "homeassistant_started" {
+                                for (trigger_index, trigger) in
+                                    automation.triggers.iter().enumerate()
+                                {
+                                    if matches!(trigger, Trigger::HomeAssistant { event } if event == "start")
+                                        && consumed_start_triggers
+                                            .insert((automation.id.clone(), trigger_index))
+                                    {
+                                        new_start_receipts.insert(trigger_index);
+                                    }
+                                }
+                            }
                             if !automation_is_enabled(&controls, &automation.id) {
                                 continue;
                             }
@@ -1697,6 +1755,11 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                                 continue;
                             }
                             for (trigger_index, trigger) in automation.triggers.iter().enumerate() {
+                                if matches!(trigger, Trigger::HomeAssistant { event } if event == "start")
+                                    && !new_start_receipts.contains(&trigger_index)
+                                {
+                                    continue;
+                                }
                                 let matched = if let Trigger::Template { value_template, r#for } = trigger {
                                     if event.event_type != "state_changed" { continue; }
                                     let variables = variables_for_trigger(&runtime, automation, Some(&event), "template", None);
@@ -1814,37 +1877,53 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                                 continue;
                             }
                             for trigger in &automation.triggers {
-                                let matched = match match_event_trigger(&runtime, automation, trigger, &event, true) {
-                                    Ok(matched) => {
-                                        matched
-                                    },
-                                    Err(error) => {
-                                        tracing::warn!(automation_id = %automation.id, %error, "native signal trigger evaluation failed");
-                                        None
+                                let matched = if matches!(trigger, Trigger::PersistentNotification { .. }) {
+                                    match persistent_notification_trigger_matches(
+                                        &runtime,
+                                        automation,
+                                        trigger,
+                                        &event,
+                                    ) {
+                                        Ok(matches) => matches,
+                                        Err(error) => {
+                                            tracing::warn!(automation_id = %automation.id, %error, "persistent notification trigger evaluation failed");
+                                            Vec::new()
+                                        }
+                                    }
+                                } else {
+                                    match match_event_trigger(&runtime, automation, trigger, &event, true) {
+                                        Ok(Some(matched)) => vec![matched],
+                                        Ok(None) => Vec::new(),
+                                        Err(error) => {
+                                            tracing::warn!(automation_id = %automation.id, %error, "native signal trigger evaluation failed");
+                                            Vec::new()
+                                        }
                                     }
                                 };
-                                let Some(matched) = matched else { continue; };
-                                let run = PendingRun {
-                                    automation: automation.clone(),
-                                    trigger_context: event.context.clone(),
-                                    lineage: inherited_lineage.clone(),
-                                    variables: matched.variables,
-                                };
-                                match conditions_match(&runtime, &run.automation.conditions, &run.variables) {
-                                    Ok(true) => {}
-                                    Ok(false) => continue,
-                                    Err(error) => {
-                                        tracing::warn!(automation_id = %run.automation.id, %error, "native signal automation condition failed");
-                                        continue;
+                                for matched in matched {
+                                    let run = PendingRun {
+                                        automation: automation.clone(),
+                                        trigger_context: event.context.clone(),
+                                        lineage: inherited_lineage.clone(),
+                                        variables: matched.variables,
+                                    };
+                                    match conditions_match(&runtime, &run.automation.conditions, &run.variables) {
+                                        Ok(true) => {}
+                                        Ok(false) => continue,
+                                        Err(error) => {
+                                            tracing::warn!(automation_id = %run.automation.id, %error, "native signal automation condition failed");
+                                            continue;
+                                        }
+                                    }
+                                    if run.automation.mode == AutomationMode::Restart {
+                                        cancel_automation_runs(&run.automation.id, &mut pending, &mut active_by_automation, &mut schedule_cancels);
+                                    }
+                                    if let Err(error) = enqueue_run(&mut pending, &active_by_automation, run) {
+                                        failure = Some(error);
+                                        break;
                                     }
                                 }
-                                if run.automation.mode == AutomationMode::Restart {
-                                    cancel_automation_runs(&run.automation.id, &mut pending, &mut active_by_automation, &mut schedule_cancels);
-                                }
-                                if let Err(error) = enqueue_run(&mut pending, &active_by_automation, run) {
-                                    failure = Some(error);
-                                    break;
-                                }
+                                if failure.is_some() { break; }
                             }
                             if failure.is_some() { break; }
                         }
@@ -2049,7 +2128,20 @@ fn match_event_trigger(
     native_signal: bool,
 ) -> Result<Option<TriggerMatch>> {
     let platform = trigger_platform_name(trigger);
-    let variables = variables_for_trigger(runtime, automation, Some(event), platform, None);
+    let variables = match trigger {
+        Trigger::HomeAssistant { event: expected }
+            if expected == "start" && event.event_type == "homeassistant_started" =>
+        {
+            homeassistant_trigger_variables(
+                runtime,
+                automation,
+                event,
+                "start",
+                "Home Assistant starting",
+            )
+        }
+        _ => variables_for_trigger(runtime, automation, Some(event), platform, None),
+    };
     let (matches, duration, entity_id) = match trigger {
         Trigger::State { r#for, .. } => {
             let entity = state_trigger_matches(trigger, event)?;
@@ -2076,9 +2168,7 @@ fn match_event_trigger(
             None,
         ),
         Trigger::HomeAssistant { event: expected } => (
-            !native_signal
-                && event.event_type == "homeassistant"
-                && event.data.get("event").and_then(Value::as_str) == Some(expected),
+            !native_signal && expected == "start" && event.event_type == "homeassistant_started",
             &None,
             None,
         ),
@@ -2118,6 +2208,7 @@ fn match_event_trigger(
                 )
             }
         }
+        Trigger::PersistentNotification { .. } => (false, &None, None),
         Trigger::Time { .. } | Trigger::TimePattern { .. } => (false, &None, None),
     };
     if !matches {
@@ -2147,7 +2238,79 @@ fn trigger_platform_name(trigger: &Trigger) -> &'static str {
         Trigger::TimePattern { .. } => "time_pattern",
         Trigger::HomeAssistant { .. } => "homeassistant",
         Trigger::Mqtt { .. } => "mqtt",
+        Trigger::PersistentNotification { .. } => "persistent_notification",
         Trigger::Event { .. } => "event",
+    }
+}
+
+fn persistent_notification_trigger_matches(
+    runtime: &Runtime,
+    automation: &Automation,
+    trigger: &Trigger,
+    event: &Event,
+) -> Result<Vec<TriggerMatch>> {
+    let Trigger::PersistentNotification {
+        notification_id,
+        update_type,
+    } = trigger
+    else {
+        return Ok(Vec::new());
+    };
+    if event.event_type != PERSISTENT_NOTIFICATION_SIGNAL {
+        return Ok(Vec::new());
+    }
+    let Some(actual_type) = event.data.get("type").and_then(Value::as_str) else {
+        return Ok(Vec::new());
+    };
+    let Some(actual_type) = parse_notification_update_type(actual_type) else {
+        return Ok(Vec::new());
+    };
+    if update_type
+        .as_ref()
+        .is_some_and(|expected| !expected.allows(actual_type))
+    {
+        return Ok(Vec::new());
+    }
+    let Some(notifications) = event.data.get("notifications").and_then(Value::as_object) else {
+        return Ok(Vec::new());
+    };
+    let notification_id = notification_id.as_deref().filter(|id| !id.is_empty());
+    let mut matches = Vec::with_capacity(notifications.len());
+    for notification in notifications.values() {
+        if notification_id.is_some_and(|expected| {
+            notification.get("notification_id").and_then(Value::as_str) != Some(expected)
+        }) {
+            continue;
+        }
+        let mut trigger_fields = Map::new();
+        trigger_fields.insert(
+            "update_type".into(),
+            Value::String(actual_type.as_str().into()),
+        );
+        trigger_fields.insert("notification".into(), notification.clone());
+        matches.push(TriggerMatch {
+            variables: variables_for_trigger_with_fields(
+                runtime,
+                automation,
+                None,
+                "persistent_notification",
+                None,
+                Some(trigger_fields),
+            ),
+            duration: None,
+            entity_id: None,
+        });
+    }
+    Ok(matches)
+}
+
+fn parse_notification_update_type(value: &str) -> Option<NotificationUpdateType> {
+    match value {
+        "current" => Some(NotificationUpdateType::Current),
+        "added" => Some(NotificationUpdateType::Added),
+        "updated" => Some(NotificationUpdateType::Updated),
+        "removed" => Some(NotificationUpdateType::Removed),
+        _ => None,
     }
 }
 
@@ -2157,6 +2320,17 @@ fn variables_for_trigger(
     event: Option<&Event>,
     platform: &str,
     additional: Option<Map<String, Value>>,
+) -> Map<String, Value> {
+    variables_for_trigger_with_fields(runtime, automation, event, platform, additional, None)
+}
+
+fn variables_for_trigger_with_fields(
+    runtime: &Runtime,
+    automation: &Automation,
+    event: Option<&Event>,
+    platform: &str,
+    additional: Option<Map<String, Value>>,
+    trigger_fields: Option<Map<String, Value>>,
 ) -> Map<String, Value> {
     let mut variables = automation.variables.clone();
     for (name, value) in &automation.trigger_variables {
@@ -2180,6 +2354,9 @@ fn variables_for_trigger(
         if let Some(value) = event.data.get("new_state") {
             trigger.insert("to_state".into(), value.clone());
         }
+    }
+    if let Some(trigger_fields) = trigger_fields {
+        trigger.extend(trigger_fields);
     }
     variables.insert("trigger".into(), Value::Object(trigger));
     let template = TemplateEngine::new(runtime.clone());
@@ -2599,6 +2776,7 @@ fn condition_matches(
 mod tests {
     use super::*;
     use hass_core::{MemoryStore, ServiceResult};
+    use hass_notifications::NotificationIntegration;
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration as StdDuration,
@@ -2611,6 +2789,40 @@ mod tests {
 
     fn config(yaml: &str) -> Vec<Automation> {
         serde_yaml::from_str(yaml).unwrap()
+    }
+
+    fn call_notification_service(runtime: &Runtime, service: &str, data: Value) {
+        runtime
+            .call_service(ServiceCall {
+                domain: "persistent_notification".into(),
+                service: service.into(),
+                data: data.as_object().cloned().unwrap_or_default(),
+                target: Map::new(),
+                context: Context::default(),
+            })
+            .unwrap();
+    }
+
+    async fn receive_notification_run(
+        receiver: &mut mpsc::UnboundedReceiver<ServiceCall>,
+    ) -> ServiceCall {
+        tokio::time::timeout(StdDuration::from_secs(2), receiver.recv())
+            .await
+            .expect("automation action should run before timeout")
+            .expect("automation action channel should remain open")
+    }
+
+    async fn receive_notification_messages(
+        receiver: &mut mpsc::UnboundedReceiver<ServiceCall>,
+        count: usize,
+    ) -> Vec<String> {
+        let mut messages = Vec::with_capacity(count);
+        for _ in 0..count {
+            let call = receive_notification_run(receiver).await;
+            messages.push(call.data["message"].as_str().unwrap().to_owned());
+        }
+        messages.sort();
+        messages
     }
 
     fn register_notifier(runtime: &Runtime, sender: mpsc::UnboundedSender<ServiceCall>) {
@@ -3196,7 +3408,7 @@ mod tests {
         let (sender, mut receiver) = mpsc::unbounded_channel();
         register_notifier(&runtime, sender);
         let engine = start(
-            runtime,
+            runtime.clone(),
             config(
                 r#"
 - id: lifecycle
@@ -3209,21 +3421,182 @@ mod tests {
     - action: test.notify
       data:
         message: "{{ trigger.event }}"
+        platform: "{{ trigger.platform }}"
+        event_type: "{{ trigger.event_type }}"
+        description: "{{ trigger.description }}"
 "#,
             ),
         )
         .unwrap();
+        runtime
+            .fire_event("homeassistant_started", Map::new(), Context::default())
+            .unwrap();
         let startup = tokio::time::timeout(StdDuration::from_secs(2), receiver.recv())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(startup.data["message"], "start");
+        assert_eq!(startup.data["platform"], "homeassistant");
+        assert_eq!(startup.data["event_type"], "homeassistant_started");
+        assert_eq!(startup.data["description"], "Home Assistant starting");
         engine.shutdown().await.unwrap();
         let shutdown = tokio::time::timeout(StdDuration::from_secs(2), receiver.recv())
             .await
             .unwrap()
             .unwrap();
         assert_eq!(shutdown.data["message"], "shutdown");
+        assert_eq!(shutdown.data["platform"], "homeassistant");
+        assert_eq!(shutdown.data["event_type"], "homeassistant");
+        assert_eq!(shutdown.data["description"], "Home Assistant stopping");
+    }
+
+    #[tokio::test]
+    async fn homeassistant_start_waits_for_real_event_and_is_consumed_once() {
+        let runtime = runtime();
+        runtime
+            .set_state(
+                "input_boolean.ready",
+                "on",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: startup_metadata
+  variables:
+    details: "{{ trigger.platform ~ '|' ~ trigger.event ~ '|' ~ trigger.description ~ '|' ~ trigger.event_type }}"
+  trigger_variables:
+    source_name: test
+  triggers:
+    - trigger: homeassistant
+      event: start
+  actions:
+    - action: test.notify
+      data:
+        message: "{{ details }}"
+        source_name: "{{ source_name }}"
+- id: disabled_at_start
+  initial_state: false
+  triggers:
+    - trigger: homeassistant
+      event: start
+  actions:
+    - action: test.notify
+      data:
+        message: disabled
+- id: condition_false_at_start
+  conditions:
+    - condition: state
+      entity_id: input_boolean.ready
+      state: "off"
+  triggers:
+    - trigger: homeassistant
+      event: start
+  actions:
+    - action: test.notify
+      data:
+        message: condition
+"#,
+            ),
+        )
+        .unwrap();
+
+        runtime
+            .fire_event(
+                "homeassistant",
+                serde_json::json!({"event":"start"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                Context::default(),
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(40)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "a data field named start must not substitute for the lifecycle event"
+        );
+
+        runtime
+            .fire_event("homeassistant_started", Map::new(), Context::default())
+            .unwrap();
+        let startup = receive_notification_run(&mut receiver).await;
+        assert_eq!(
+            startup.data["message"],
+            "homeassistant|start|Home Assistant starting|homeassistant_started"
+        );
+        assert_eq!(startup.data["source_name"], "test");
+        tokio::time::sleep(StdDuration::from_millis(40)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "disabled and condition-false start triggers must not run"
+        );
+
+        runtime
+            .call_service(ServiceCall {
+                domain: "automation".into(),
+                service: "turn_on".into(),
+                data: Map::new(),
+                target: serde_json::json!({"entity_id":"automation.disabled_at_start"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                context: Context::default(),
+            })
+            .unwrap();
+        runtime
+            .set_state(
+                "input_boolean.ready",
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        runtime
+            .fire_event("homeassistant_started", Map::new(), Context::default())
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(80)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "each start trigger must consume its first receipt, including disabled or failed conditions"
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn homeassistant_start_is_not_replayed_for_a_late_engine() {
+        let runtime = runtime();
+        runtime
+            .fire_event("homeassistant_started", Map::new(), Context::default())
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime,
+            config(
+                r#"
+- id: late_start
+  triggers:
+    - trigger: homeassistant
+      event: start
+  actions:
+    - action: test.notify
+      data:
+        message: should_not_run
+"#,
+            ),
+        )
+        .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(60)).await;
+        assert!(receiver.try_recv().is_err());
+        engine.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -3274,6 +3647,350 @@ mod tests {
                 .is_some()
         );
         engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persistent_notification_trigger_fans_out_change_payloads() {
+        let runtime = runtime();
+        let _notifications = NotificationIntegration::start(runtime.clone()).unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: notification_changes
+  mode: queued
+  max: 32
+  variables:
+    summary: "{{ trigger.platform ~ '|' ~ trigger.update_type ~ '|' ~ trigger.notification.notification_id ~ '|' ~ trigger.notification.message }}"
+  triggers:
+    - trigger: persistent_notification
+  actions:
+    - action: test.notify
+      data:
+        message: "{{ summary }}"
+        notification: "{{ trigger.notification }}"
+"#,
+            ),
+        )
+        .unwrap();
+
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"alpha","message":"created","title":"Alpha"}),
+        );
+        let added = receive_notification_run(&mut receiver).await;
+        assert_eq!(
+            added.data["message"],
+            "persistent_notification|added|alpha|created"
+        );
+        assert_eq!(added.data["notification"]["notification_id"], "alpha");
+        assert_eq!(added.data["notification"]["message"], "created");
+        assert_eq!(added.data["notification"]["title"], "Alpha");
+        assert!(added.data["notification"]["created_at"].as_str().is_some());
+
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"alpha","message":"updated"}),
+        );
+        let updated = receive_notification_run(&mut receiver).await;
+        assert_eq!(
+            updated.data["message"],
+            "persistent_notification|updated|alpha|updated"
+        );
+        assert!(updated.data["notification"]["title"].is_null());
+
+        call_notification_service(
+            &runtime,
+            "dismiss",
+            serde_json::json!({"notification_id":"alpha"}),
+        );
+        assert_eq!(
+            receive_notification_run(&mut receiver).await.data["message"],
+            "persistent_notification|removed|alpha|updated"
+        );
+
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"beta","message":"second"}),
+        );
+        let _ = receive_notification_run(&mut receiver).await;
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"gamma","message":"third"}),
+        );
+        let _ = receive_notification_run(&mut receiver).await;
+        call_notification_service(&runtime, "dismiss_all", serde_json::json!({}));
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 2).await,
+            [
+                "persistent_notification|removed|beta|second",
+                "persistent_notification|removed|gamma|third"
+            ]
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persistent_notification_trigger_filters_scalar_and_list_update_types() {
+        let runtime = runtime();
+        let _notifications = NotificationIntegration::start(runtime.clone()).unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: empty_filters
+  mode: queued
+  max: 16
+  triggers:
+    - trigger: persistent_notification
+      notification_id: ""
+      update_type: []
+  actions:
+    - action: test.notify
+      data:
+        message: "{{ 'empty:' ~ trigger.notification.notification_id ~ ':' ~ trigger.update_type }}"
+- id: scalar_filter
+  mode: queued
+  max: 16
+  triggers:
+    - platform: persistent_notification
+      notification_id: wanted
+      update_type: added
+  actions:
+    - action: test.notify
+      data:
+        message: "{{ 'scalar:' ~ trigger.notification.notification_id ~ ':' ~ trigger.update_type }}"
+- id: list_filter
+  mode: queued
+  max: 16
+  triggers:
+    - trigger: persistent_notification
+      notification_id: wanted
+      update_type: [updated, removed]
+  actions:
+    - action: test.notify
+      data:
+        message: "{{ 'list:' ~ trigger.notification.notification_id ~ ':' ~ trigger.update_type }}"
+"#,
+            ),
+        )
+        .unwrap();
+
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"other","message":"other"}),
+        );
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 1).await,
+            ["empty:other:added"]
+        );
+
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"wanted","message":"first"}),
+        );
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 2).await,
+            ["empty:wanted:added", "scalar:wanted:added"]
+        );
+
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"wanted","message":"replaced"}),
+        );
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 2).await,
+            ["empty:wanted:updated", "list:wanted:updated"]
+        );
+
+        call_notification_service(
+            &runtime,
+            "dismiss",
+            serde_json::json!({"notification_id":"wanted"}),
+        );
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 2).await,
+            ["empty:wanted:removed", "list:wanted:removed"]
+        );
+
+        call_notification_service(
+            &runtime,
+            "dismiss",
+            serde_json::json!({"notification_id":"other"}),
+        );
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 1).await,
+            ["empty:other:removed"]
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn persistent_notification_trigger_does_not_replay_or_use_public_events() {
+        let runtime = runtime();
+        let _notifications = NotificationIntegration::start(runtime.clone()).unwrap();
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"existing","message":"before startup"}),
+        );
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: current_only
+  mode: queued
+  triggers:
+    - trigger: persistent_notification
+      update_type: current
+  actions:
+    - action: test.notify
+      data:
+        message: current
+- id: private_notification
+  mode: queued
+  triggers:
+    - trigger: persistent_notification
+  actions:
+    - action: test.notify
+      data:
+        message: private_signal
+- id: public_event
+  mode: queued
+  triggers:
+    - trigger: event
+      event_type: persistent_notifications_updated
+  actions:
+    - action: test.notify
+      data:
+        message: public_event
+"#,
+            ),
+        )
+        .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(40)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "startup must not replay a current notification"
+        );
+
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"after","message":"after startup"}),
+        );
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 1).await,
+            ["private_signal"]
+        );
+        tokio::time::sleep(StdDuration::from_millis(40)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "private notification signals must not reach public event triggers or synthesize current"
+        );
+
+        runtime
+            .fire_event(
+                PERSISTENT_NOTIFICATION_SIGNAL,
+                Map::new(),
+                Context::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 1).await,
+            ["public_event"]
+        );
+        tokio::time::sleep(StdDuration::from_millis(40)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "public events must not invoke persistent notification signal triggers"
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn persistent_notification_trigger_rejects_invalid_update_types() {
+        let invalid: std::result::Result<Vec<Automation>, _> = serde_yaml::from_str(
+            r#"
+- id: invalid_update_type
+  triggers:
+    - trigger: persistent_notification
+      update_type: changed
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(invalid.is_err());
+    }
+
+    #[tokio::test]
+    async fn persistent_notification_trigger_preserves_causality_and_shutdown() {
+        let runtime = runtime();
+        let _notifications = NotificationIntegration::start(runtime.clone()).unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: self
+  mode: queued
+  triggers:
+    - trigger: event
+      event_type: begin
+    - trigger: persistent_notification
+      notification_id: self
+      update_type: added
+  actions:
+    - action: test.notify
+      data:
+        message: ran
+    - action: persistent_notification.create
+      data:
+        notification_id: self
+        message: generated by automation
+"#,
+            ),
+        )
+        .unwrap();
+        runtime
+            .fire_event("begin", Map::new(), Context::default())
+            .unwrap();
+        assert_eq!(
+            receive_notification_messages(&mut receiver, 1).await,
+            ["ran"]
+        );
+        tokio::time::sleep(StdDuration::from_millis(60)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "an automation must not re-enter itself from its notification service call"
+        );
+
+        engine.shutdown().await.unwrap();
+        call_notification_service(
+            &runtime,
+            "create",
+            serde_json::json!({"notification_id":"after_shutdown","message":"ignored"}),
+        );
+        tokio::time::sleep(StdDuration::from_millis(40)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "shutdown must stop the signal listener"
+        );
     }
 
     #[tokio::test]

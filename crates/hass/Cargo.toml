@@ -24,6 +24,9 @@ hass-native.workspace = true
 hass-config.workspace = true
 hass-rest.workspace = true
 hass-template-entities.workspace = true
+hass-group.workspace = true
+hass-notifications.workspace = true
+hass-zone.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -31,6 +34,7 @@ serde_path_to_error.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 futures-util.workspace = true

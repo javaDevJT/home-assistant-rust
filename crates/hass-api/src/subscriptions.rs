@@ -31,9 +31,17 @@ pub(crate) struct NativeSubscriptions {
     subscriptions: BTreeMap<u64, ActiveSubscription>,
     drain_cursor: usize,
     allow_state_read: bool,
+    notifications: Option<hass_notifications::NotificationManager>,
+    zones: Option<hass_zone::ZoneManager>,
 }
 
 enum ActiveSubscription {
+    Zones {
+        receiver: broadcast::Receiver<Event>,
+    },
+    Notifications {
+        receiver: broadcast::Receiver<Event>,
+    },
     Events {
         receiver: broadcast::Receiver<Event>,
         event_type: String,
@@ -88,11 +96,24 @@ impl NativeSubscriptions {
             subscriptions: BTreeMap::new(),
             drain_cursor: 0,
             allow_state_read: true,
+            notifications: None,
+            zones: None,
         }
     }
 
     pub(crate) fn set_state_read_access(&mut self, allowed: bool) {
         self.allow_state_read = allowed;
+    }
+
+    pub(crate) fn set_notifications(
+        &mut self,
+        manager: Option<hass_notifications::NotificationManager>,
+    ) {
+        self.notifications = manager;
+    }
+
+    pub(crate) fn set_zones(&mut self, manager: Option<hass_zone::ZoneManager>) {
+        self.zones = manager;
     }
 
     /// Handle a subscription-related WebSocket command, if this manager owns it.
@@ -109,6 +130,8 @@ impl NativeSubscriptions {
             .ok_or_else(|| Error::InvalidInput("WebSocket command type must be a string".into()))?;
 
         match command_type {
+            "zone/subscribe" => self.subscribe_zones(object).map(Some),
+            "persistent_notification/subscribe" => self.subscribe_notifications(object).map(Some),
             "subscribe_events" => self.subscribe_events(object).map(Some),
             "subscribe_entities" => self.subscribe_entities(object).map(Some),
             "unsubscribe_events" => self.unsubscribe_events(object).map(Some),
@@ -236,6 +259,70 @@ impl NativeSubscriptions {
             },
         );
         Ok(success_result(Vec::new()))
+    }
+
+    fn subscribe_zones(
+        &mut self,
+        object: &Map<String, Value>,
+    ) -> Result<SubscriptionCommandResult> {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "id" | "type"))
+        {
+            return Err(Error::InvalidInput(
+                "Invalid zone subscription command".into(),
+            ));
+        }
+        let id = command_id(object)?;
+        self.ensure_capacity(id)?;
+        let manager = self
+            .zones
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("Zone integration is not configured".into()))?;
+        let (snapshot, receiver) = manager.snapshot_and_subscribe()?;
+        let initial = snapshot
+            .into_iter()
+            .map(|zone| json!({"change_type":"added","zone_id":zone.id,"item":zone}))
+            .collect::<Vec<_>>();
+        self.subscriptions
+            .insert(id, ActiveSubscription::Zones { receiver });
+        Ok(success_result(vec![event_envelope(id, json!(initial))]))
+    }
+
+    fn subscribe_notifications(
+        &mut self,
+        object: &Map<String, Value>,
+    ) -> Result<SubscriptionCommandResult> {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "id" | "type"))
+        {
+            return Err(Error::InvalidInput(
+                "Invalid notification subscription command".into(),
+            ));
+        }
+        let id = command_id(object)?;
+        self.ensure_capacity(id)?;
+        let manager = self
+            .notifications
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("Notification integration is not configured".into()))?;
+        let (snapshot, receiver) = manager.snapshot_and_subscribe()?;
+        let initial = snapshot
+            .into_iter()
+            .map(|notification| {
+                let id = notification.notification_id.clone();
+                serde_json::to_value(notification)
+                    .map(|value| (id, value))
+                    .map_err(|_| Error::Service("Cannot serialize notification".into()))
+            })
+            .collect::<Result<Map<String, Value>>>()?;
+        self.subscriptions
+            .insert(id, ActiveSubscription::Notifications { receiver });
+        Ok(success_result(vec![event_envelope(
+            id,
+            json!({"type":"current","notifications":initial}),
+        )]))
     }
 
     fn subscribe_entities(
@@ -468,6 +555,18 @@ impl NativeSubscriptions {
             return Ok(());
         };
         match subscription {
+            ActiveSubscription::Zones { .. } => {
+                if event.event_type == hass_zone::ZONE_COLLECTION_UPDATED_SIGNAL
+                    && let Some(changes) = event.data.get("changes")
+                {
+                    output.push(event_envelope(id, changes.clone()));
+                }
+            }
+            ActiveSubscription::Notifications { .. } => {
+                if event.event_type == hass_notifications::SIGNAL_PERSISTENT_NOTIFICATIONS_UPDATED {
+                    output.push(event_envelope(id, Value::Object(event.data.clone())));
+                }
+            }
             ActiveSubscription::Events {
                 event_type,
                 allow_state_read,
@@ -658,6 +757,8 @@ impl ActiveSubscription {
     fn try_recv(&mut self) -> std::result::Result<Event, broadcast::error::TryRecvError> {
         match self {
             Self::Events { receiver, .. }
+            | Self::Notifications { receiver }
+            | Self::Zones { receiver }
             | Self::Entities { receiver, .. }
             | Self::ConfigEntries { receiver, .. }
             | Self::ConfigFlowProgress { receiver, .. }

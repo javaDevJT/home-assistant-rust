@@ -187,6 +187,7 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
     kind.starts_with("config/auth/")
         || kind.starts_with("config_entries/")
         || kind == "config/core/update"
+        || matches!(kind, "zone/create" | "zone/update" | "zone/delete")
         || kind.starts_with("config/auth_provider/")
         || matches!(
             kind,
@@ -210,7 +211,9 @@ pub(crate) fn websocket_allowed(
         return false;
     }
     if kind == "call_service"
-        && message.get("domain").and_then(Value::as_str) == Some("recorder")
+        && (message.get("domain").and_then(Value::as_str) == Some("recorder")
+            || (message.get("domain").and_then(Value::as_str) == Some("zone")
+                && message.get("service").and_then(Value::as_str) == Some("reload")))
         && !identity.is_admin
     {
         return false;
@@ -260,6 +263,39 @@ pub(crate) async fn handle_ws(
     command: &Value,
 ) -> Option<Result<Value>> {
     let kind = command.get("type")?.as_str()?;
+    if kind.starts_with("zone/") {
+        let Some(manager) = state.features.zones.clone() else {
+            return Some(Err(Error::NotFound(
+                "Zone integration is not configured".into(),
+            )));
+        };
+        return Some(crate::zones::handle(manager, command).await);
+    }
+    if kind == "persistent_notification/get" {
+        if command.as_object().is_none_or(|object| {
+            object
+                .keys()
+                .any(|key| !matches!(key.as_str(), "id" | "type"))
+        }) {
+            return Some(Err(Error::InvalidInput(
+                "Invalid notification get command".into(),
+            )));
+        }
+        let Some(manager) = state.features.notifications.clone() else {
+            return Some(Err(Error::NotFound(
+                "Notification integration is not configured".into(),
+            )));
+        };
+        return Some(
+            tokio::task::spawn_blocking(move || {
+                serde_json::to_value(manager.list()?)
+                    .map_err(|_| Error::Service("Cannot serialize notifications".into()))
+            })
+            .await
+            .map_err(|_| Error::Service("Notification task failed".into()))
+            .and_then(|value| value),
+        );
+    }
     if kind == "auth/setup_mfa" {
         return Some(crate::login::setup_mfa(state, identity, command).await);
     }

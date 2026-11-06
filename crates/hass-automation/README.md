@@ -43,7 +43,14 @@ unsupported trigger platforms are rejected.
 ```
 
 Triggers include state, numeric state, template, local `time`, `time_pattern`,
-Home Assistant startup/shutdown, event, and MQTT message signals. State,
+Home Assistant startup/shutdown, event, MQTT message signals, and persistent
+notification changes. Notification triggers support optional `notification_id`
+and scalar or list `update_type` filters (`current`, `added`, `updated`, or
+`removed`). Empty IDs and update-type lists do not filter. The native notification
+feed does not replay existing items or synthesize `current` updates when the
+automation engine starts; each changed notification in a bulk dismissal gets
+its own trigger run. Notification changes arrive only through the private
+`persistent_notifications_updated` signal. State,
 numeric-state, and template triggers accept `for` durations up to 24 hours.
 State triggers can observe an attribute; numeric thresholds are exclusive.
 Template triggers fire on false-to-true transitions. The time trigger accepts

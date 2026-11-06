@@ -19,6 +19,12 @@ input_boolean:
     name: Demo toggle
     initial: false
 
+group:
+  demo_controls:
+    name: Demo controls
+    entities:
+      - input_boolean.demo
+
 input_number:
   temperature_target:
     name: Temperature target

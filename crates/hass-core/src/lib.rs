@@ -713,6 +713,17 @@ impl Runtime {
         self.inner.events.subscribe()
     }
 
+    /// Actual public event-bus receivers, registered under the wildcard bus
+    /// topic. Integration-private dispatcher receivers are excluded.
+    pub fn event_listeners(&self) -> BTreeMap<String, usize> {
+        let count = self.inner.events.receiver_count();
+        if count == 0 {
+            BTreeMap::new()
+        } else {
+            BTreeMap::from([("*".to_owned(), count)])
+        }
+    }
+
     /// Atomically snapshot states and subscribe to subsequent public changes.
     /// The ordering guard prevents a client from receiving an older queued
     /// update after the initial snapshot and rolling its cache backward.
@@ -909,6 +920,26 @@ impl Runtime {
         data: Map<String, Value>,
         context: Context,
     ) -> Result<Event> {
+        self.fire_event_origin(event_type, data, context, "LOCAL")
+    }
+
+    /// Persist a remotely originated REST event with the caller's context.
+    pub fn fire_remote_event(
+        &self,
+        event_type: &str,
+        data: Map<String, Value>,
+        context: Context,
+    ) -> Result<Event> {
+        self.fire_event_origin(event_type, data, context, "REMOTE")
+    }
+
+    fn fire_event_origin(
+        &self,
+        event_type: &str,
+        data: Map<String, Value>,
+        context: Context,
+        origin: &str,
+    ) -> Result<Event> {
         if event_type.is_empty() {
             return Err(Error::InvalidInput("event type cannot be empty".into()));
         }
@@ -920,7 +951,7 @@ impl Runtime {
         let event = Event {
             event_type: event_type.to_owned(),
             data,
-            origin: "LOCAL".into(),
+            origin: origin.into(),
             time_fired: Utc::now(),
             context,
         };

@@ -117,10 +117,11 @@ async fn mfa_enrollment_challenge_exchange_and_disable_use_native_transports() {
         .with_step_duration(30)
         .build()
         .unwrap();
-    // Consume the previous accepted window at enrollment; the current window
-    // can then prove a distinct, non-replayed login without a time-based sleep.
+    // Consume the current window at enrollment, then use the accepted future
+    // window for a distinct login. A real clock tick between requests cannot
+    // invalidate enrollment as it could with a previous-window code.
     let now = chrono::Utc::now().timestamp() as u64;
-    let enrollment_code = totp.generate(now - 30).to_string();
+    let enrollment_code = totp.generate(now).to_string();
     let enabled=command(&mut ws,json!({"id":3,"type":"auth/setup_mfa","flow_id":flow,"user_input":{"code":enrollment_code}})).await;
     assert_eq!(enabled["result"]["type"], "create_entry");
     assert!(!enabled.to_string().contains(secret));
@@ -163,7 +164,7 @@ async fn mfa_enrollment_challenge_exchange_and_disable_use_native_transports() {
         .unwrap();
     assert_eq!(replay["type"], "form");
     let login_code = totp
-        .generate(chrono::Utc::now().timestamp() as u64)
+        .generate(chrono::Utc::now().timestamp() as u64 + 30)
         .to_string();
     let complete: Value = client
         .post(format!("{base}/auth/login_flow/{login_flow}"))

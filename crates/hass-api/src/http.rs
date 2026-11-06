@@ -272,7 +272,7 @@ pub(crate) async fn call_service(
     Extension(identity): Extension<Identity>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if domain == "recorder" && !identity.is_admin {
+    if (domain == "recorder" || (domain == "zone" && service == "reload")) && !identity.is_admin {
         return Err(ApiError::forbidden());
     }
     if query.keys().any(|key| key != "return_response") {
@@ -342,14 +342,16 @@ fn value_object(value: Value) -> Result<Map<String, Value>, ApiError> {
         .ok_or_else(|| ApiError::invalid("Expected a JSON object"))
 }
 
-pub(crate) async fn get_events() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({
-            "message": "Event listener inventory is not implemented by hass-core."
-        })),
+pub(crate) async fn get_events(State(state): State<Arc<AppState>>) -> Json<Vec<Value>> {
+    Json(
+        state
+            .api
+            .runtime
+            .event_listeners()
+            .into_iter()
+            .map(|(event, listener_count)| json!({"event":event,"listener_count":listener_count}))
+            .collect(),
     )
-        .into_response()
 }
 
 pub(crate) async fn fire_event(
@@ -365,7 +367,7 @@ pub(crate) async fn fire_event(
     let data = parse_object(&body, true)?;
     let response_event_type = event_type.clone();
     let runtime = state.api.runtime.clone();
-    run_blocking(move || runtime.fire_event(&event_type, data, identity.context())).await?;
+    run_blocking(move || runtime.fire_remote_event(&event_type, data, identity.context())).await?;
     Ok(Json(
         json!({ "message": format!("Event {response_event_type} fired.") }),
     ))
@@ -562,20 +564,70 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn event_listener_inventory_is_explicitly_unimplemented() {
+    async fn event_listener_inventory_reports_actual_public_receivers() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        let public = runtime.subscribe();
+        let private = runtime.subscribe_signals();
+        let app = crate::router(ApiState {
+            runtime: runtime.clone(),
+            access_token: "test-secret-token".into(),
+            config: json!({}),
+        });
         let (status, body) = response_json(
-            test_router()
+            app.clone()
                 .oneshot(request("GET", "/api/events", Some("test-secret-token"), ""))
                 .await
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(
-            body["message"]
-                .as_str()
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, json!([{"event":"*","listener_count":1}]));
+        drop(public);
+        let (_, body) = response_json(
+            app.oneshot(request("GET", "/api/events", Some("test-secret-token"), ""))
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(body, json!([]));
+        drop(private);
+    }
+
+    #[tokio::test]
+    async fn rest_event_origin_is_remote_while_internal_events_remain_local() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        let mut receiver = runtime.subscribe();
+        let app = crate::router(ApiState {
+            runtime: runtime.clone(),
+            access_token: "test-secret-token".into(),
+            config: json!({}),
+        });
+        let (status, _) = response_json(
+            app.oneshot(request(
+                "POST",
+                "/api/events/remote_fixture",
+                Some("test-secret-token"),
+                r#"{"source":"http"}"#,
+            ))
+            .await
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let event = receiver.try_recv().unwrap();
+        assert_eq!(event.event_type, "remote_fixture");
+        assert_eq!(event.origin, "REMOTE");
+        assert_eq!(event.data["source"], "http");
+        assert_eq!(
+            runtime
+                .fire_event(
+                    "internal_fixture",
+                    Map::new(),
+                    hass_core::Context::default()
+                )
                 .unwrap()
-                .contains("listener inventory")
+                .origin,
+            "LOCAL"
         );
     }
 

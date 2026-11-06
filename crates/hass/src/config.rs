@@ -33,6 +33,12 @@ pub struct Config {
     #[serde(default)]
     pub template: Vec<hass_template_entities::TemplateBlock>,
     #[serde(default)]
+    pub group: BTreeMap<String, hass_group::GroupConfig>,
+    #[serde(default, deserialize_with = "deserialize_zones")]
+    pub zone: Vec<hass_zone::ZoneConfig>,
+    #[serde(skip)]
+    pub group_order: Vec<String>,
+    #[serde(default)]
     pub timer: BTreeMap<String, hass_native::TimerConfig>,
     #[serde(default)]
     pub input_button: BTreeMap<String, hass_native::InputButtonConfig>,
@@ -113,6 +119,19 @@ impl Config {
         Self::from_value(crate::yaml::load(path)?)
     }
 
+    /// Reload only the zone component, preserving the loader's include,
+    /// package and secret handling without reconfiguring other integrations.
+    pub fn load_zones(path: &Path) -> Result<Vec<hass_zone::ZoneConfig>> {
+        let root = crate::yaml::load(path)?;
+        let value = root.get("zone").cloned().unwrap_or_default();
+        let zones =
+            deserialize_zones(value).map_err(|_| anyhow::anyhow!("invalid zone configuration"))?;
+        for zone in &zones {
+            zone.validate()?;
+        }
+        Ok(zones)
+    }
+
     #[cfg(test)]
     pub fn parse(source: &str) -> Result<Self> {
         if source.len() as u64 > MAX_CONFIG_BYTES {
@@ -122,6 +141,17 @@ impl Config {
     }
 
     fn from_value(mut value: serde_yaml::Value) -> Result<Self> {
+        let group_order = value
+            .get("group")
+            .and_then(serde_yaml::Value::as_mapping)
+            .map(|groups| {
+                groups
+                    .keys()
+                    .filter_map(serde_yaml::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
         // Packages have already been merged by the loader. They are not a
         // second integration configuration or public/debug settings payload.
         if let Some(home) = value
@@ -153,6 +183,8 @@ impl Config {
                 "rest",
                 "rest_command",
                 "template",
+                "group",
+                "zone",
                 "timer",
                 "input_button",
                 "input_datetime",
@@ -164,7 +196,7 @@ impl Config {
                 bail!("unsupported configuration key: {key}");
             }
         }
-        let config: Self = serde_path_to_error::deserialize(value).map_err(|error| {
+        let mut config: Self = serde_path_to_error::deserialize(value).map_err(|error| {
             // A typed decoding error can quote an invalid scalar. Preserve
             // its configuration path without printing resolved secret values.
             anyhow::anyhow!(
@@ -172,6 +204,7 @@ impl Config {
                 error.path()
             )
         })?;
+        config.group_order = group_order;
         config.validate()?;
         Ok(config)
     }
@@ -215,6 +248,10 @@ impl Config {
         }
         hass_rest::validate_config(&self.rest, &self.rest_command)?;
         hass_template_entities::validate(&self.template)?;
+        hass_group::validate(&self.group)?;
+        for zone in &self.zone {
+            zone.validate()?;
+        }
         Ok(())
     }
 
@@ -234,7 +271,17 @@ impl Config {
         } else {
             json!({"length":"mi", "mass":"lb", "temperature":"°F", "volume":"gal", "pressure":"psi", "wind_speed":"mph", "accumulated_precipitation":"in"})
         };
-        let mut components = vec!["api", "websocket_api", "recorder", "auth", "template"];
+        let mut components = vec![
+            "api",
+            "websocket_api",
+            "recorder",
+            "auth",
+            "template",
+            "homeassistant",
+            "group",
+            "persistent_notification",
+            "zone",
+        ];
         if !self.script.is_empty() {
             components.push("script");
         }
@@ -261,9 +308,6 @@ impl Config {
         }
         if !self.schedule.is_empty() {
             components.push("schedule");
-        }
-        if !self.template.is_empty() {
-            components.push("template");
         }
         if !self.automation.is_empty() {
             components.push("automation");
@@ -297,6 +341,24 @@ impl Config {
             "recovery_mode": false,
         })
     }
+}
+
+fn deserialize_zones<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<hass_zone::ZoneConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    let value = match value {
+        serde_yaml::Value::Null => serde_yaml::Value::Sequence(Vec::new()),
+        serde_yaml::Value::Mapping(ref mapping) if mapping.is_empty() => {
+            serde_yaml::Value::Sequence(Vec::new())
+        }
+        serde_yaml::Value::Sequence(_) => value,
+        other => serde_yaml::Value::Sequence(vec![other]),
+    };
+    serde_yaml::from_value(value).map_err(serde::de::Error::custom)
 }
 
 #[cfg(test)]
@@ -354,5 +416,35 @@ mod tests {
         let error = format!("{:#}", Config::load(&path).unwrap_err());
         assert!(error.contains("http.server_port"));
         assert!(!error.contains("credential-that-must-not-appear"));
+    }
+
+    #[test]
+    fn group_display_order_follows_resolved_yaml_insertion_order() {
+        let config =
+            Config::parse("group:\n  zebra: [input_boolean.demo]\n  alpha: [input_boolean.demo]\n")
+                .unwrap();
+        assert_eq!(config.group_order, vec!["zebra", "alpha"]);
+    }
+
+    #[test]
+    fn zone_yaml_accepts_empty_and_singleton_forms_and_validates_coordinates() {
+        for source in ["zone:\n", "zone: {}\n", "zone: []\n"] {
+            assert!(Config::parse(source).unwrap().zone.is_empty());
+        }
+        let zone = "name: Work\nlatitude: 42\nlongitude: -83\n";
+        let config = Config::parse(&format!(
+            "zone:\n{}",
+            zone.lines()
+                .map(|line| format!("  {line}\n"))
+                .collect::<String>()
+        ))
+        .unwrap();
+        assert_eq!(config.zone.len(), 1);
+        assert_eq!(config.zone[0].name, "Work");
+        assert_eq!(config.zone[0].radius, 100.0);
+        assert!(
+            Config::parse("zone:\n  - name: Invalid\n    latitude: 100\n    longitude: 0\n")
+                .is_err()
+        );
     }
 }

@@ -31,7 +31,7 @@ curl -X POST -H "Authorization: Bearer $(cat /tmp/hass-rust.token)" \
   http://127.0.0.1:8123/api/events/demo_toggle
 ```
 
-The event runs the example automation and toggles `input_boolean.demo`. A POST to `/api/states/...` only changes the recorded state representation. Helper services operate on the configured native helpers. Physical devices require an actual Rust integration port.
+The event runs the example automation and toggles `input_boolean.demo`. A POST to `/api/states/...` changes the recorded state representation. Helper services operate on configured native helpers; generic Home Assistant controls delegate to actual domain providers, including the supported MQTT device commands.
 
 ## Implemented surface
 
@@ -43,14 +43,17 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Registries | Persistent entity/device/area/floor/label identity and CRUD |
 | Configuration | Persistent entries, native driver flows/setup/unload/retry, core settings |
 | Native helpers | input_boolean/number/text/select/button/datetime, counter, timer, schedule |
-| Automation | State/event/numeric/template/time/MQTT/lifecycle triggers, conditions, execution modes |
+| Groups and controls | Legacy aggregate groups, native membership services, generic turn_on/turn_off/toggle delegation |
+| Notifications | Internal feed, create/dismiss services, authenticated current/live WebSocket updates and automation triggers |
+| Zones | Home, YAML and editable zones, WGS-84 distance, occupancy, live collection feeds and YAML reload |
+| Automation | State/event/numeric/template/time/MQTT/notification/lifecycle triggers, conditions, execution modes |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
 | WebSocket | Native auth, live entity/config/template/event subscriptions, services, registries |
 | Process | YAML validation, trusted proxy origin checks, local-user policy, joined shutdown |
 
-Every integration remains subject to the detailed [parity inventory](docs/PARITY.md); no complete upstream integration is claimed. Unsupported options and commands fail explicitly. The official frontend, additional auth providers and custom permissions, most device integrations, recorder statistics, and upstream database migrations remain open. `/api/events` listener inventory currently returns 501; history currently requires `filter_entity_id`. Synchronous service handlers must terminate; shutdown waits for in-flight handlers.
+Every integration remains subject to the detailed [parity inventory](docs/PARITY.md); no complete upstream integration is claimed. Unsupported options and commands fail explicitly. The official frontend, additional auth providers and custom permissions, most device integrations, recorder statistics, and upstream database migrations remain open. Event inventory reports actual public wildcard receivers; history requires `filter_entity_id`. Synchronous service handlers must terminate; shutdown waits for in-flight handlers.
 
 ## Checks and project index
 
@@ -72,6 +75,9 @@ cargo test --workspace --locked
 - [Scripts and scenes](crates/hass-script/README.md)
 - [Reactive template sensors and action-backed controls](crates/hass-template-entities/README.md)
 - [Timers, dates, buttons, and schedules](crates/hass-native/README.md)
+- [Groups, membership, and aggregate states](crates/hass-group/README.md)
+- [Internal notification services and feed](crates/hass-notifications/README.md)
+- [Location zones, editable collection and geometry](crates/hass-zone/README.md)
 - [Config entries, native drivers, and core settings](crates/hass-config/README.md)
 - [Supported configuration example](examples/configuration.yaml)
 - [YAML includes, secrets, packages, and loading limits](docs/CONFIGURATION.md)

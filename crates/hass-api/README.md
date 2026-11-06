@@ -9,6 +9,7 @@ state writes update the runtime and do not control devices.
 Construct **ApiState** with the runtime, optional static administrator token,
 and base configuration JSON. **router_with_features** also accepts native auth,
 registry, template and config-entry managers, plus a network-origin policy.
+Optional native notification and zone managers supply their private feeds.
 Protected requests accept the static token or native session JWT. **/health**
 returns **{"status":"ok"}**. WebSocket authentication follows **auth_required**
 with an **auth** message. Handshakes expose the native **ha_version** value
@@ -57,17 +58,26 @@ This closes active WebSockets so they do not hold the server drain open.
 | POST /api/events/{event_type} | Fire an event with an optional JSON object body |
 | GET /api/history/period | Query history with filter_entity_id and optional end_time |
 | GET /api/history/period/{timestamp} | Query history from an RFC 3339 timestamp, with filter_entity_id and optional end_time |
-| GET /api/events | Returns 501 because the core does not expose an event-listener inventory |
+| GET /api/events | Actual public event listener counts in event/listener_count objects |
 
 History requires **filter_entity_id**, matching the pinned HTTP adapter. A
 comma-separated list is accepted. The default start is 24 hours before the
 current time; default end is one day after start. Timestamps must be RFC 3339.
 History payloads omit private runtime contexts and reporting metadata.
 
+`skip_initial_state`, `significant_changes_only`, `minimal_response` and
+`no_attributes` follow the pinned HTTP flags. The native public bus currently
+uses wildcard receivers with consumer-side filtering; inventory reports that
+actual wildcard count. Private integration-dispatcher receivers are excluded,
+and dropped public receivers disappear from the inventory.
+
 REST errors are JSON objects with a message field. Invalid JSON, invalid
 inputs, and unsupported query parameters return 400; absent entities/services
-return 404; storage failures return a sanitized 500. The event inventory route
-returns 501 with a message explaining the missing core capability.
+return 404; storage failures return a sanitized 500.
+
+REST event injection records the pinned `REMOTE` origin while retaining its
+verified user context. Internal events and the pinned WebSocket injection path
+use `LOCAL`.
 
 ## WebSocket route
 
@@ -96,3 +106,20 @@ never exposed on public event subscriptions.
 Authentication times out after 10 seconds. A socket accepts messages up to
 1 MiB and frames up to 256 KiB. The server permits at most 128 WebSocket
 connections and 32 active subscriptions per connection.
+
+The internal notification feed exposes **persistent_notification/get** and
+**persistent_notification/subscribe** to ordinary authenticated users. A
+subscription receives its ACK before a keyed **current** snapshot, followed by
+**added**, **updated**, and **removed** frames. Generic **unsubscribe_events**
+removes the receiver. Feed traffic stays on the private dispatcher and does
+not appear as public event updates or recorded notification state rows.
+
+The editable zone collection exposes **zone/list** and **zone/subscribe** to
+authenticated users; **zone/create**, **zone/update** and **zone/delete** require
+an administrator. Updates and deletion identify the item with **zone_id**.
+The list and initial/live change arrays contain editable storage zones, while
+implicit home and YAML zones remain ordinary states. A subscription ACK
+precedes its initial **added** array; later items use **added**, **updated** or
+**removed** with **zone_id** and **item**. Generic **unsubscribe_events** removes
+the private receiver. The app's **zone.reload** service checks administrator
+authority for both internal user contexts and HTTP/WebSocket transport calls.

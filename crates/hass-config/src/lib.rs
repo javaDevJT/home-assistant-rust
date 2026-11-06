@@ -1112,6 +1112,20 @@ impl ConfigEntries {
 
     /// Validate, persist, and replace the core configuration.
     pub fn update_core_config(&self, config: CoreConfig) -> Result<CoreConfig> {
+        let _operation = self.lock_operation();
+        let event_data = config
+            .to_json()
+            .as_object()
+            .cloned()
+            .ok_or_else(|| Error::Service("core configuration is not an object".into()))?;
+        self.replace_core_config(config, event_data)
+    }
+
+    fn replace_core_config(
+        &self,
+        config: CoreConfig,
+        event_data: Map<String, Value>,
+    ) -> Result<CoreConfig> {
         config.validate()?;
         self.mutate(|state| {
             state.core_config = config.clone();
@@ -1119,6 +1133,8 @@ impl ConfigEntries {
             Ok(())
         })?;
         self.runtime.set_time_zone(&config.time_zone)?;
+        self.runtime
+            .fire_event("core_config_updated", event_data, Context::default())?;
         Ok(config)
     }
 
@@ -1317,6 +1333,25 @@ impl ConfigEntries {
     }
 
     fn handle_core_update(&self, object: &Map<String, Value>) -> Result<Value> {
+        let _operation = self.lock_operation();
+        if let Some(field) = object.keys().find(|field| {
+            !matches!(
+                field.as_str(),
+                "id" | "type"
+                    | "location_name"
+                    | "latitude"
+                    | "longitude"
+                    | "elevation"
+                    | "time_zone"
+                    | "unit_system"
+                    | "external_url"
+                    | "internal_url"
+            )
+        }) {
+            return Err(Error::InvalidInput(format!(
+                "unsupported core configuration field {field}"
+            )));
+        }
         let mut config = self.core_config();
         if let Some(value) = object.get("location_name") {
             config.location_name = value
@@ -1368,7 +1403,12 @@ impl ConfigEntries {
         if let Some(value) = object.get("internal_url") {
             config.internal_url = optional_url_value("internal_url", value)?;
         }
-        self.update_core_config(config.clone())?;
+        let event_data = object
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "id" | "type"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        self.replace_core_config(config.clone(), event_data)?;
         Ok(config.to_json())
     }
 
@@ -2379,6 +2419,7 @@ mod tests {
     #[test]
     fn core_config_websocket_updates_validate_values_and_persist() {
         let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let mut events = manager.runtime.subscribe();
         let updated = manager
             .handle_ws(&json!({
                 "type":"config/core/update",
@@ -2389,11 +2430,33 @@ mod tests {
             .unwrap();
         assert_eq!(updated["location_name"], "Apartment");
         assert_eq!(updated["unit_system"]["name"], "imperial");
+        let event = events.try_recv().unwrap();
+        assert_eq!(event.event_type, "core_config_updated");
+        assert_eq!(
+            event.data,
+            json!({
+                "location_name":"Apartment",
+                "unit_system":"imperial",
+                "external_url":"https://example.test"
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        );
         assert!(
             manager
                 .handle_ws(&json!({"type":"config/core/update", "latitude":100.0}))
                 .is_err()
         );
         assert_eq!(manager.core_config().location_name, "Apartment");
+        assert!(
+            manager
+                .handle_ws(&json!({"type":"config/core/update", "unexpected":true}))
+                .is_err()
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 }

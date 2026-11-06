@@ -74,7 +74,7 @@ pub fn resolve_service_targets(
 
     let parsed = parse_targets(&merged, registries)?;
     let resolution = if parsed.all_entities {
-        resolve_all_entities(runtime, registries, &call.domain)?
+        resolve_all_entities(runtime, registries, &call.domain, &call.service)?
     } else {
         let selected = resolve_registry_targets(&parsed, registries)?;
         if selected.is_empty() {
@@ -333,15 +333,29 @@ fn resolve_all_entities(
     runtime: &Runtime,
     registries: Option<&Registries>,
     domain: &str,
+    service: &str,
 ) -> Result<TargetResolution> {
     let mut entity_ids = BTreeSet::new();
+    let services = runtime.services();
     for state in runtime.states() {
-        if state
+        let entity_domain = state
             .entity_id
             .split_once('.')
             .map(|(entity_domain, _)| entity_domain)
-            != Some(domain)
-        {
+            .unwrap_or("");
+        let eligible = if domain == "homeassistant" {
+            // Native generic controls delegate to an actual domain service.
+            // Groups are redundant in an all-entity expansion and could
+            // otherwise reintroduce hidden members through membership.
+            !matches!(entity_domain, "homeassistant" | "group")
+                && services
+                    .get(entity_domain)
+                    .and_then(Value::as_object)
+                    .is_some_and(|entries| entries.contains_key(service))
+        } else {
+            entity_domain == domain
+        };
+        if !eligible {
             continue;
         }
         if registries
@@ -1004,6 +1018,68 @@ mod tests {
             resolve_entity_service_targets(&runtime, Some(&registries), &mut explicit_target)
                 .unwrap(),
             TargetResolution::NoMatches
+        );
+    }
+
+    #[test]
+    fn generic_all_selects_real_control_domains_without_group_or_self_recursion() {
+        let runtime = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        for domain in ["light", "input_boolean", "homeassistant"] {
+            runtime
+                .register_service(
+                    domain,
+                    "turn_on",
+                    json!({}),
+                    Arc::new(|_, _| {
+                        Err(Error::Service("selector must not execute a service".into()))
+                    }),
+                )
+                .unwrap();
+        }
+        for id in [
+            "light.one",
+            "input_boolean.helper",
+            "sensor.reading",
+            "group.all_lights",
+            "homeassistant.fake",
+        ] {
+            runtime
+                .set_state(id, "off", Map::new(), Context::default(), false)
+                .unwrap();
+        }
+        let hidden = entity(
+            &registries,
+            "light",
+            "hidden_generic",
+            None,
+            None,
+            &[],
+            None,
+        );
+        registries
+            .update_entity(
+                &hidden.entity_id,
+                EntityUpdate {
+                    hidden_by: Some(Some("user".into())),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        runtime
+            .set_state(
+                &hidden.entity_id,
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let mut all = call(Map::new(), value_map(json!({"entity_id":"all"})));
+        all.domain = "homeassistant".into();
+        assert_eq!(
+            resolve_entity_service_targets(&runtime, Some(&registries), &mut all).unwrap(),
+            TargetResolution::Matched(vec!["input_boolean.helper".into(), "light.one".into()])
         );
     }
 }

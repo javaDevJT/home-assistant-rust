@@ -104,12 +104,19 @@ fn write_config(dir: &Path) -> std::path::PathBuf {
 recorder:
   db_path: state.sqlite
 template: !include templates.yaml
+group:
+  demo_controls:
+    name: Demo controls
+    entities:
+      - input_boolean.demo
 input_boolean:
-  demo:
-    initial: false
+  demo: {}
 counter:
   presses:
     initial: 0
+input_text:
+  notification_message:
+    initial: waiting
 automation:
   - id: demo_toggle
     triggers:
@@ -122,10 +129,179 @@ automation:
       - action: counter.increment
         target:
           entity_id: counter.presses
+  - id: notification_message
+    triggers:
+      - trigger: persistent_notification
+        notification_id: process_fixture
+        update_type: added
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.notification_message
+        data:
+          value: "{{ trigger.notification.message }}"
 "#,
     )
     .unwrap();
     config
+}
+
+#[tokio::test]
+async fn real_process_notification_trigger_uses_private_service_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path());
+    let mut server = Server::start(&config).await;
+    server
+        .wait_state("input_text.notification_message", "waiting")
+        .await;
+    assert_eq!(
+        server
+            .post(
+                "/api/services/persistent_notification/create",
+                json!({"notification_id":"process_fixture","message":"native notification"}),
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server
+        .wait_state("input_text.notification_message", "native notification")
+        .await;
+    assert_eq!(
+        server
+            .post(
+                "/api/services/persistent_notification/dismiss_all",
+                json!({}),
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_process_zone_reload_occupancy_and_saved_home_location() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = write_config(dir.path());
+    let zones_path = dir.path().join("zones.yaml");
+    std::fs::write(
+        &zones_path,
+        "- name: Work\n  latitude: 42\n  longitude: -83\n",
+    )
+    .unwrap();
+    let mut source = std::fs::read_to_string(&config).unwrap();
+    source.push_str("\nzone: !include zones.yaml\n");
+    std::fs::write(&config, source).unwrap();
+    let mut server = Server::start(&config).await;
+    server.wait_state("zone.home", "0").await;
+    server.wait_state("zone.work", "0").await;
+    assert_eq!(
+        server
+            .post(
+                "/api/states/person.fixture",
+                json!({"state":"Work","attributes":{"in_zones":["zone.work"]}}),
+            )
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    server.wait_state("zone.work", "1").await;
+    let zone: Value = server
+        .get("/api/states/zone.work")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(zone["attributes"]["persons"], json!(["person.fixture"]));
+
+    // Reload resolves the include again and validates only this component.
+    std::fs::write(
+        &zones_path,
+        "- name: New Work\n  latitude: 43\n  longitude: -84\n",
+    )
+    .unwrap();
+    assert_eq!(
+        server
+            .post("/api/services/zone/reload", json!({}))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server.wait_state("zone.new_work", "0").await;
+    assert_eq!(
+        server.get("/api/states/zone.work").await.status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let ws_url = format!(
+        "{}/api/websocket",
+        server.url.replacen("http://", "ws://", 1)
+    );
+    let (mut socket, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+    socket.next().await.unwrap().unwrap();
+    socket
+        .send(Message::Text(
+            json!({"type":"auth","access_token":TOKEN})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let accepted = socket.next().await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(accepted.to_text().unwrap()).unwrap()["type"],
+        "auth_ok"
+    );
+    socket
+        .send(Message::Text(
+            json!({"id":1,"type":"config/core/update","location_name":"Saved Home","latitude":41.5,"longitude":-82.5})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let updated = socket.next().await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(updated.to_text().unwrap()).unwrap()["success"],
+        true
+    );
+    for attempt in 0..100 {
+        let home: Value = server
+            .get("/api/states/zone.home")
+            .await
+            .json()
+            .await
+            .unwrap();
+        if home["attributes"]["latitude"] == 41.5 {
+            assert_eq!(home["attributes"]["longitude"], -82.5);
+            assert_eq!(home["attributes"]["friendly_name"], "Saved Home");
+            break;
+        }
+        assert!(
+            attempt < 99,
+            "zone.home did not follow the accepted core update"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    socket.close(None).await.unwrap();
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+    let mut restored = Server::start(&config).await;
+    let home: Value = restored
+        .get("/api/states/zone.home")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(home["attributes"]["latitude"], 41.5);
+    assert_eq!(home["attributes"]["friendly_name"], "Saved Home");
+    restored.child.kill().await.unwrap();
+    restored.child.wait().await.unwrap();
 }
 
 #[tokio::test]
@@ -142,6 +318,7 @@ async fn real_process_auth_services_automation_history_and_crash_restore() {
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     server.wait_state("input_boolean.demo", "off").await;
     server.wait_state("sensor.doubled", "0").await;
+    server.wait_state("group.demo_controls", "off").await;
     let created = server
         .post(
             "/api/states/sensor.example",
@@ -168,6 +345,61 @@ async fn real_process_auth_services_automation_history_and_crash_restore() {
         StatusCode::OK
     );
     server.wait_state("input_boolean.demo", "on").await;
+    server.wait_state("group.demo_controls", "on").await;
+    assert_eq!(server.post("/api/services/group/set",json!({"object_id":"temporary","entities":["input_boolean.demo"],"name":"Temporary controls"})).await.status(),StatusCode::OK);
+    server.wait_state("group.temporary", "on").await;
+    assert_eq!(
+        server
+            .post(
+                "/api/services/homeassistant/turn_off",
+                json!({"entity_id":"group.temporary"})
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server.wait_state("input_boolean.demo", "off").await;
+    server.wait_state("group.demo_controls", "off").await;
+    assert_eq!(
+        server
+            .post(
+                "/api/services/homeassistant/turn_on",
+                json!({"entity_id":"group.demo_controls"})
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server.wait_state("input_boolean.demo", "on").await;
+    assert_eq!(
+        server
+            .post(
+                "/api/services/group/remove",
+                json!({"object_id":"temporary"})
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        server.get("/api/states/group.temporary").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let listeners: Value = server
+        .get("/api/events")
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        listeners
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["event"] == "*" && row["listener_count"].as_u64().unwrap_or(0) > 0)
+    );
     assert_eq!(
         server
             .post("/api/events/demo_toggle", json!({}))
@@ -178,6 +410,7 @@ async fn real_process_auth_services_automation_history_and_crash_restore() {
     server.wait_state("counter.presses", "1").await;
     server.wait_state("sensor.doubled", "2").await;
     server.wait_state("input_boolean.demo", "off").await;
+    server.wait_state("group.demo_controls", "off").await;
     let history_response = server
         .get("/api/history/period?filter_entity_id=input_boolean.demo")
         .await;
@@ -196,6 +429,7 @@ async fn real_process_auth_services_automation_history_and_crash_restore() {
     restarted.wait_state("counter.presses", "1").await;
     restarted.wait_state("sensor.doubled", "2").await;
     restarted.wait_state("input_boolean.demo", "off").await;
+    restarted.wait_state("group.demo_controls", "off").await;
     restarted.wait_state("sensor.example", "43").await;
     restarted.child.kill().await.unwrap();
     restarted.child.wait().await.unwrap();

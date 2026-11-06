@@ -2,9 +2,11 @@
 
 mod config;
 mod helpers;
+mod homeassistant;
 mod integration_drivers;
 mod recorder;
 mod yaml;
+mod zones;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
@@ -134,18 +136,53 @@ async fn main() -> Result<()> {
         })
         .await
         .context("runtime initialization failed")??;
+    let mut notifications = hass_notifications::NotificationIntegration::start(runtime.clone())?;
+    let notification_manager = notifications.manager();
+    let zones = zones::Zones::start(
+        runtime.clone(),
+        auth.clone(),
+        config_entries.clone(),
+        args.config.clone(),
+        config.zone.clone(),
+    )
+    .await?;
+    let zone_manager = zones.manager();
+    let groups = hass_group::GroupIntegration::start_with_order(
+        runtime.clone(),
+        config.group.clone(),
+        config.group_order.clone(),
+    )
+    .await?;
+    let group_lookup = groups.lookup();
+    let target_groups = group_lookup.clone();
     let target_registries = registries.clone();
     let _service_targets =
         runtime.install_service_target_resolver_if_absent(Arc::new(move |runtime, call| {
-            Ok(!matches!(
-                hass_registry::targets::resolve_entity_service_targets(
-                    runtime,
-                    Some(&target_registries),
-                    call
-                )?,
-                hass_registry::targets::TargetResolution::NoMatches
-            ))
+            match hass_registry::targets::resolve_entity_service_targets(
+                runtime,
+                Some(&target_registries),
+                call,
+            )? {
+                hass_registry::targets::TargetResolution::NoMatches => Ok(false),
+                hass_registry::targets::TargetResolution::Unspecified => Ok(true),
+                hass_registry::targets::TargetResolution::Matched(ids) => {
+                    let expanded = hass_group::expand_entity_ids(runtime, &target_groups, &ids)?;
+                    if expanded.len() > hass_core::MAX_HISTORY_QUERY_FILTERS {
+                        return Err(hass_core::Error::InvalidInput(
+                            "Expanded group target exceeds the native entity limit".into(),
+                        ));
+                    }
+                    if expanded.is_empty() {
+                        return Ok(false);
+                    }
+                    call.data
+                        .insert("entity_id".into(), serde_json::json!(expanded));
+                    Ok(true)
+                }
+            }
         }));
+    let homeassistant =
+        homeassistant::HomeAssistantServices::start_with_groups(runtime.clone(), group_lookup)?;
     let recorder = recorder::RecorderMaintenance::start(
         runtime.clone(),
         auth.clone(),
@@ -196,6 +233,8 @@ async fn main() -> Result<()> {
             registries: Some(registries),
             templates: Some(templates),
             config_entries: Some(config_entries),
+            notifications: Some(notification_manager),
+            zones: Some(zone_manager),
         },
         Some(shutdown_rx),
     );
@@ -211,6 +250,10 @@ async fn main() -> Result<()> {
     let script_result = scripts.shutdown().await;
     let rest_result = rest.shutdown().await;
     let native_result = native.shutdown().await;
+    let homeassistant_result = homeassistant.shutdown();
+    let zone_result = zones.shutdown().await;
+    let group_result = groups.shutdown().await;
+    let notification_result = notifications.shutdown();
     let stop_result = tokio::task::spawn_blocking(move || {
         runtime.fire_event("homeassistant_stop", Map::new(), Context::default())
     })
@@ -223,6 +266,10 @@ async fn main() -> Result<()> {
     script_result?;
     rest_result?;
     native_result?;
+    homeassistant_result?;
+    zone_result?;
+    group_result?;
+    notification_result?;
     stop_result?;
     Ok(())
 }

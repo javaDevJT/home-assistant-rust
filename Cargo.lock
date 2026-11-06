@@ -745,14 +745,17 @@ dependencies = [
  "hass-automation",
  "hass-config",
  "hass-core",
+ "hass-group",
  "hass-mqtt",
  "hass-native",
+ "hass-notifications",
  "hass-registry",
  "hass-rest",
  "hass-script",
  "hass-storage",
  "hass-template",
  "hass-template-entities",
+ "hass-zone",
  "reqwest",
  "serde",
  "serde_json",
@@ -763,6 +766,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -775,8 +779,10 @@ dependencies = [
  "hass-auth",
  "hass-config",
  "hass-core",
+ "hass-notifications",
  "hass-registry",
  "hass-template",
+ "hass-zone",
  "http-body-util",
  "ipnet",
  "qrcode",
@@ -818,6 +824,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "hass-core",
+ "hass-notifications",
  "hass-script",
  "hass-template",
  "serde",
@@ -859,6 +866,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-group"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "hass-mqtt"
 version = "0.1.0"
 dependencies = [
@@ -891,6 +913,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "hass-notifications"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
  "uuid",
 ]
 
@@ -994,6 +1029,16 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hass-zone"
+version = "0.1.0"
+dependencies = [
+ "hass-core",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

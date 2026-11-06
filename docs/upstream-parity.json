@@ -913,7 +913,7 @@
     {
       "area": "Startup, configuration, loader and config-entry lifecycle",
       "coverage_status": "partial_or_unported",
-      "gap": "Current YAML parsing and startup wiring handle only the documented native subset; manifest loading, dependency ordering, config flows, options/reconfigure/migration, discovery and unload/reload lifecycle are not implemented.",
+      "gap": "Native config entries execute real registered setup/unload/retry/migration/config/options callbacks with persistent state and HTTP adapters. Manifest-aware loading, complete dependency ordering, remaining discovery/subentry/platform flows and exhaustive rollback/reload contracts remain open.",
       "id": "loader_setup_config_entries",
       "local_evidence_paths": [
         "crates/hass/src/config.rs",
@@ -956,7 +956,7 @@
     {
       "area": "Entity, device, area, floor and label registries",
       "coverage_status": "partial_or_unported",
-      "gap": "A native registry implementation is in progress; its lifecycle, durable identity, foreign-reference checks, command payload/return shapes and registry_updated event parity still need the scoped acceptance tests.",
+      "gap": "Native entity/device/area/floor/label CRUD, durable identity, invalid-reference checks, live selectors and registry events have fixtures. Child/composite devices, categories, remaining registries and exhaustive payload acceptance remain open.",
       "id": "registries",
       "local_evidence_paths": [
         "crates/hass-registry/src/lib.rs",
@@ -981,7 +981,7 @@
     {
       "area": "Users, auth providers, refresh sessions, permissions and MFA",
       "coverage_status": "partial_or_unported",
-      "gap": "AuthManager/login code provides a subset; full provider configuration, permission checks across all commands/services, MFA flows, revocation/restart behavior and HA error contracts remain open.",
+      "gap": "Native local password users, JWT/rotating refresh sessions, MFA enrollment/challenges/replay budgets, signed paths and live transport role checks have fixtures. External providers, custom per-entity permissions and all remaining auth/error contracts remain open.",
       "id": "authentication_and_permissions",
       "local_evidence_paths": [
         "crates/hass-auth/src/lib.rs",
@@ -1005,7 +1005,7 @@
     {
       "area": "HTTP server, REST API, proxy trust and request safety",
       "coverage_status": "partial_or_unported",
-      "gap": "REST coverage is a selected subset; forwarded-header trust, bans, CORS, security filters/headers, auth providers, exact payloads/statuses and full endpoint semantics remain open.",
+      "gap": "Native REST and WebSocket transports cover state/services/events/history/templates/auth and config flows with origin/proxy/local-only policy. Remaining endpoints, IP bans, CORS, middleware/header and exact error parity stay open.",
       "id": "http_rest_and_proxy_security",
       "local_evidence_paths": [
         "crates/hass-api/src/http.rs",
@@ -1049,7 +1049,7 @@
     {
       "area": "Recorder event/state pipeline, history, purge and statistics",
       "coverage_status": "partial_or_unported",
-      "gap": "SQLite retains current states/events and filtered history, but the recorder worker/queue, schema ecosystem, purge/retention, statistics, repair, export/backup and other database backends are not ported.",
+      "gap": "Native SQLite state/event/private-metadata recording, multi-entity boundary history, purge/retention and actual repack have fixtures. Complete ingestion/filter pipelines, long-term statistics, repairs, upstream migrations and other database backends remain open.",
       "id": "recorder_history_statistics",
       "local_evidence_paths": [
         "crates/hass-storage/src/lib.rs",
@@ -1072,7 +1072,7 @@
     {
       "area": "Automation, script, scene and template engines",
       "coverage_status": "partial_or_unported",
-      "gap": "Automation and rendering cover subsets; script/scene execution and all full HA trigger/condition/action/template/config surfaces require separate evidence. Script source currently remains absent or incomplete until a real implementation is accepted.",
+      "gap": "Native scripts/scenes and shared action execution, state/event/numeric/template/time/MQTT/notification/lifecycle triggers, modes and reactive template entities have fixtures. Remaining trigger/condition/action/template surfaces, blueprints, traces and exhaustive acceptance remain open.",
       "id": "automation_scripts_scenes_templates",
       "local_evidence_paths": [
         "crates/hass-automation/src/lib.rs",
@@ -1832,7 +1832,7 @@
     {
       "area": "Backup, repairs, diagnostics, onboarding and system-level services",
       "coverage_status": "partial_or_unported",
-      "gap": "The process has basic startup/shutdown and local SQLite persistence; it does not implement these Core operating workflows or their UI/API contracts.",
+      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. Backup/restore, repairs, diagnostics and remaining system/frontend operating workflows are unported.",
       "id": "backup_repairs_diagnostics_and_system_services",
       "local_evidence_paths": [
         "crates/hass/src/main.rs",
@@ -53835,7 +53835,11 @@
         "GroupConfigFlowHandler"
       ],
       "domain": "group",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-group/src/lib.rs",
+        "crates/hass-group/README.md",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "categories": [
           "helpers.calculate_value"
@@ -53853,7 +53857,7 @@
       },
       "manifest_blob_oid": "ad3bca128dff1799d91dfdb7c229db2f8d4d7bff",
       "manifest_path": "homeassistant/components/group/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Native legacy YAML groups, source-ordered aggregation, dynamic set/remove, restart cleanup and group expansion are implemented. Modern platform groups, YAML reload and exhaustive pinned integration acceptance remain open.",
       "platform_expressions": [
         {
           "path": "const.py",
@@ -53885,7 +53889,7 @@
         "switch",
         "valve"
       ],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -58082,7 +58086,10 @@
       "component_directory": "homeassistant/components/homeassistant/",
       "config_flow_classes": [],
       "domain": "homeassistant",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass/src/homeassistant.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -58095,10 +58102,10 @@
       },
       "manifest_blob_oid": "c10e99e845466af084100ace7aad05ce5309020a",
       "manifest_path": "homeassistant/components/homeassistant/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Native generic turn_on/turn_off/toggle delegation, group expansion and explicit entity exclusions are implemented. Other core services, full exclusion selectors, loader/dependency behavior and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -105285,7 +105292,14 @@
       "component_directory": "homeassistant/components/persistent_notification/",
       "config_flow_classes": [],
       "domain": "persistent_notification",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-notifications/src/lib.rs",
+        "crates/hass-notifications/README.md",
+        "crates/hass-api/src/subscriptions.rs",
+        "crates/hass-api/tests/notifications_protocol.rs",
+        "crates/hass-automation/src/lib.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -105299,10 +105313,10 @@
       },
       "manifest_blob_oid": "e1839e28f3a5c14e4e65fa15d49165b2d0a27c2a",
       "manifest_path": "homeassistant/components/persistent_notification/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Native bounded process-local feed, scalar services, authenticated WebSocket get/subscription and private automation trigger fanout have acceptance fixtures. Remaining loader/schema details, translations and exhaustive pinned fixture acceptance stay open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -162260,7 +162274,14 @@
         "ZoneConfigFlow"
       ],
       "domain": "zone",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-zone/src/lib.rs",
+        "crates/hass-zone/README.md",
+        "crates/hass/src/zones.rs",
+        "crates/hass-api/src/zones.rs",
+        "crates/hass-api/tests/zones_protocol.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -162274,10 +162295,10 @@
       },
       "manifest_blob_oid": "e0c6607c903c9134172a99185b10e8041afbdff3",
       "manifest_path": "homeassistant/components/zone/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Native home/YAML/storage zones, WGS-84 geometry, person/tracker occupancy, authorized live collection CRUD, actual YAML reload and saved core-location propagation have fixtures. Zone conditions/triggers, Unicode entity-registry identity, translations/UI flows and exhaustive pinned fixture acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -167824,6 +167845,37 @@
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
       {
+        "domain": "group",
+        "local_evidence": [
+          {
+            "path": "crates/hass-group/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-group/README.md"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Native legacy YAML groups, source-ordered aggregation, dynamic set/remove, restart cleanup and group expansion are implemented. Modern platform groups, YAML reload and exhaustive pinned integration acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary focused and protocol acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
+      },
+      {
+        "domain": "homeassistant",
+        "local_evidence": [
+          {
+            "path": "crates/hass/src/homeassistant.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Native generic turn_on/turn_off/toggle delegation, group expansion and explicit entity exclusions are implemented. Other core services, full exclusion selectors, loader/dependency behavior and exhaustive pinned acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary focused and protocol acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
+      },
+      {
         "domain": "http",
         "local_evidence": [
           {
@@ -168031,6 +168083,32 @@
         "remaining": "MQTT wire/config behavior is a partial integration; discovery platforms, full HA entity/service semantics, reload/config flow, and all upstream test behavior remain open.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+      },
+      {
+        "domain": "persistent_notification",
+        "local_evidence": [
+          {
+            "path": "crates/hass-notifications/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-notifications/README.md"
+          },
+          {
+            "path": "crates/hass-api/src/subscriptions.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/notifications_protocol.rs"
+          },
+          {
+            "path": "crates/hass-automation/src/lib.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Native bounded process-local feed, scalar services, authenticated WebSocket get/subscription and private automation trigger fanout have acceptance fixtures. Remaining loader/schema details, translations and exhaustive pinned fixture acceptance stay open.",
+        "status": "partial",
+        "verification": "Primary focused and protocol acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       },
       {
         "domain": "recorder",
@@ -168254,12 +168332,38 @@
         "remaining": "Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, and feature event payloads remain open.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+      },
+      {
+        "domain": "zone",
+        "local_evidence": [
+          {
+            "path": "crates/hass-zone/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-zone/README.md"
+          },
+          {
+            "path": "crates/hass/src/zones.rs"
+          },
+          {
+            "path": "crates/hass-api/src/zones.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/zones_protocol.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Native home/YAML/storage zones, WGS-84 geometry, person/tracker occupancy, authorized live collection CRUD, actual YAML reload and saved core-location propagation have fixtures. Zone conditions/triggers, Unicode entity-registry identity, translations/UI flows and exhaustive pinned fixture acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 22,
+    "partial": 26,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1543
+    "unported": 1539
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

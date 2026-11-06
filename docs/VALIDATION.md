@@ -1,12 +1,18 @@
 # Validation evidence
 
-Status: the current integrated Rust wave passed **228 workspace tests**, formatting, strict full-workspace Clippy, and its optimized build on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Publication checks are recorded below as they finish. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
+Status: the current integrated Rust wave passed **304 workspace tests**, formatting, strict full-workspace Clippy, and its optimized build on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Publication checks are recorded below as they finish. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
 
 ## Current integrated acceptance
 
-`cargo test --workspace --locked` passed 228 tests across the 14-crate workspace and every doc-test target. `cargo clippy --workspace --all-targets --locked -- -D warnings` passed. Cargo.lock pins all resolved dependencies. The exhaustive upstream inventory reconciles 1,565 unique integration manifests across 32 disjoint batches: 22 partial native domains, 1,543 unported, zero claimed complete.
+`cargo test --workspace --locked --no-fail-fast` passed 304 tests across the 17-crate workspace and every doc-test target, with no failures or ignored tests. `cargo clippy --workspace --all-targets --locked -- -D warnings` passed. Cargo.lock pins all resolved dependencies. The exhaustive upstream inventory reconciles 1,565 unique integration manifests across 32 disjoint batches: 26 partial native domains, 1,539 unported, zero claimed complete. Every partial-domain evidence path exists.
 
 `cargo fmt --all --check` and `cargo build --release --locked` also passed. The optimized executable successfully validates `examples/configuration.yaml` with `--check`.
+
+The current optimized macOS executable SHA-256 is `1dabe8a70a716bc2df0d93f0d44a28a4eff78426633ccc4361391ebdd2dd432c`. The pending person crate is outside the workspace and excluded from this checkpoint.
+
+The new wave includes legacy group aggregation and provider delegation; process-local notifications with real authenticated live feeds and private automation triggers; provider-ready, one-shot startup triggers; source-correct helper initial/restore, select options and numerical precision; and native YAML/home/editable zones with WGS-84 geometry, collection CRUD, occupancy, actual reload and live persisted core location updates. The executable fixtures now cover both HTTP notification-to-automation execution and zone behavior through hard restart. Internal zone reload authorization and same-process writer-lease release also pass. Independent automation review found no confirmed discrepancy in the requested private-signal/causality/startup paths against the exact pinned source.
+
+Primary review caught and corrected stale owned zone states after changed-YAML restart, collisions with foreign manual zones, and fixed-decimal formatting that could erase small helper values. The first full run found an invalid minimum-step value in the added precision fixture; the fixture was corrected while retaining the pinned step constraint. The final full run above passes. Zone state/metadata failures attempt compensation; individual state writes do not provide a multi-state transaction or retract events already observed by subscribers.
 
 Actual transport fixtures cover native onboarding/password login, one-use authorization codes, JWT identity, refresh rotation/revocation, user-bound TOTP enrollment/QR and replay rejection, signed paths, proxy origin/local-only policy, public/private subscription separation, config/options flows and actual lifecycle callbacks. History fixtures exercise boundary snapshots, significant/minimal/no-attribute flags and compressed WebSocket output. Internal calls, HTTP and WebSocket services use the same live registry selector resolution.
 
@@ -20,7 +26,9 @@ These receipts establish the implemented subset. They do not verify complete int
 
 ## Linux checkpoint CI
 
-Implementation `2250d4780f44b4837766fba31b2e150078575c39` is published on the fork. [Linux run 42165900082](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42165900082) passed formatting and strict workspace Clippy, then exposed a timing-dependent automation queue test. Its fixed one-second wait began shutdown before a busy runner had drained initialization events and observed queue overflow. The regression now waits for actual listener termination, then checks the specific pending-queue error. The focused case passed five consecutive local runs; all 14 automation tests and strict automation Clippy passed after the correction. Follow-up Linux verification remains pending.
+Implementation `2250d4780f44b4837766fba31b2e150078575c39` is published on the fork. [Linux run 42165900082](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42165900082) passed formatting and strict workspace Clippy, then exposed a timing-dependent automation queue test. Its fixed one-second wait began shutdown before a busy runner had drained initialization events and observed queue overflow. The regression now waits for actual listener termination, then checks the specific pending-queue error. The focused case passed five consecutive local runs; all 14 automation tests and strict automation Clippy passed after the correction.
+
+Published correction `89ef0e3907a39a6152c883343ccf3721a9e08850` passed [Linux run 42167148335](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42167148335): formatting, strict full-workspace Clippy, all workspace tests and example configuration validation. This CI evidence applies to that immutable revision, not subsequent dirty group/control work.
 
 ## Initial published milestone (historical)
 

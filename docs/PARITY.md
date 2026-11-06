@@ -31,10 +31,10 @@ Protocol tags are evidence-led: each needs a matching manifest selector/dependen
 | Status | Integrations | Meaning |
 | --- | ---: | --- |
 | Complete | 0 | No entire upstream integration is accepted as full parity. |
-| Partial | 22 | Rust source implements an identifiable subset; the full upstream behavior and acceptance remain open. |
-| Unported | 1,543 | No behaviorally accepted native adapter is evidenced for the manifest domain. |
+| Partial | 26 | Rust source implements an identifiable subset; the full upstream behavior and acceptance remain open. |
+| Unported | 1,539 | No behaviorally accepted native adapter is evidenced for the manifest domain. |
 
-The partial domains are api, auth, automation, config, counter, http, input_boolean, input_button, input_datetime, input_number, input_select, input_text, mqtt, recorder, rest, rest_command, scene, schedule, script, template, timer, and websocket_api. Native template entities, MQTT config-entry/registry lifecycle, REST lifecycle, and recorder maintenance now have focused acceptance evidence. The JSON retains initial source-export/line-count snapshots alongside updated port status and evidence paths; exact primary checks and revisions are recorded in [PORTING.md](PORTING.md) and [VALIDATION.md](VALIDATION.md). Source presence alone is never full acceptance.
+The partial domains are api, auth, automation, config, counter, group, homeassistant, http, input_boolean, input_button, input_datetime, input_number, input_select, input_text, mqtt, persistent_notification, recorder, rest, rest_command, scene, schedule, script, template, timer, websocket_api, and zone. Native groups, generic controls, notification transport/triggers, zone geometry/collections, template entities, MQTT config-entry/registry lifecycle, REST lifecycle, and recorder maintenance have focused acceptance evidence. The JSON retains initial source-export/line-count snapshots alongside updated port status and evidence paths; exact primary checks and revisions are recorded in [PORTING.md](PORTING.md) and [VALIDATION.md](VALIDATION.md). Source presence alone is never full acceptance.
 
 ## Core work that gates the integration waves
 
@@ -42,12 +42,12 @@ These shared systems need pinned-source behavior and acceptance evidence before 
 
 | Order | Core subsystem | Remaining work |
 | --- | --- | --- |
-| 0 | Startup, loader, configuration entries and discovery | Implement manifest-aware validation and dependency ordering, config flows, options/reconfigure/migration, discovery handoff, rollback, unload and reload. The current YAML startup accepts a limited native subset. |
+| 0 | Startup, loader, configuration entries and discovery | Extend accepted native config/options flows and setup/unload/retry/migration with manifest-aware validation, dependency ordering, remaining discovery/subentry flows and complete rollback/reload contracts. YAML startup accepts a limited native subset. |
 | 1 | Entities and platform lifecycle | Add entity identity and capabilities, platform setup, add/remove/restore/update, polling/coordinator ownership, registry linkage and unload cleanup. A state row or helper-created entity does not cover this lifecycle. |
-| 2 | Registries | Complete entity, device, area, floor and label CRUD, stable identity, foreign-reference checks, atomic persistence, websocket command shapes and registry-updated events. The native registry source still needs its scoped acceptance evidence. |
-| 3 | Users, auth providers and permissions | Finish password/session/token behavior, providers, permission checks across commands/services, MFA boundaries, revocation and restart behavior against pinned auth tests. |
-| 4 | Runtime, storage and recorder | Preserve state/event/service ordering while adding recorder ingestion, retention/purge, statistics, repairs, migration coverage and the full history/query contract. SQLite history is only a subset of recorder. |
-| 5 | REST, HTTP security and WebSocket APIs | Port exact endpoint, middleware, proxy-trust, error and message behavior; enumerate all WebSocket commands and authorization. Event-listener inventory currently returns 501. |
+| 2 | Registries | Extend accepted native CRUD/identity/events to remaining pinned payloads, child/composite devices, categories and other registries, retaining atomic foreign-reference and persistence checks. |
+| 3 | Users, auth providers and permissions | Extend accepted local password/session/JWT/TOTP behavior with remaining providers, custom permissions and all pinned command/service authorization cases. |
+| 4 | Runtime, storage and recorder | Extend accepted history/purge/repack with complete recorder ingestion/filtering, statistics, repairs, migrations and every pinned query contract. Native SQLite recording remains a subset of recorder. |
+| 5 | REST, HTTP security and WebSocket APIs | Complete endpoint, middleware, error, message and authorization parity. Native inventory now counts actual public wildcard receivers; consumer filters are local. |
 | 6 | Automation, scripts, scenes, templates and native helpers | Expand behavior from pinned tests for triggers, conditions, actions, execution modes, scenes, template helpers, resource limits, timers, buttons, datetimes and schedule transitions. |
 | 7 | Frontend, voice/media and system workflows | The frontend/API assets, Assist and media pipelines, backups, repairs, diagnostics and onboarding remain separate Core gaps. |
 

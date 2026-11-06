@@ -1,8 +1,7 @@
 //! Authenticated HTTP and WebSocket API for the native Home Assistant runtime.
 //!
-//! The listener inventory endpoint (`GET /api/events`) returns HTTP 501 because
-//! `hass-core` does not expose the event-bus listener registry. Event firing and
-//! WebSocket event subscriptions remain available.
+//! Event inventory reports actual public wildcard receivers; integration
+//! dispatcher traffic stays private. Consumers apply narrower filters locally.
 //!
 //! Applications that use Axum graceful shutdown should call [`router_with_shutdown`]
 //! and signal its `watch::Receiver` when shutdown begins. Axum waits for active
@@ -17,6 +16,7 @@ mod login;
 pub mod network;
 mod subscriptions;
 mod websocket;
+mod zones;
 
 use std::sync::Arc;
 
@@ -49,6 +49,8 @@ pub struct ApiFeatures {
     pub registries: Option<hass_registry::Registries>,
     pub templates: Option<hass_template::TemplateEngine>,
     pub config_entries: Option<hass_config::ConfigEntries>,
+    pub notifications: Option<hass_notifications::NotificationManager>,
+    pub zones: Option<hass_zone::ZoneManager>,
 }
 
 #[derive(Clone)]

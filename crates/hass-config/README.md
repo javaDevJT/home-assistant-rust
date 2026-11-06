@@ -59,3 +59,7 @@ debug output also redacts those maps. Trusted driver callbacks and typed
 - Core configuration validates the location, IANA time zone, unit system, and
   optional HTTP(S) URLs. It seeds from YAML only until a persisted API update
   exists, and applies the saved time zone to Runtime.
+- Successful core updates emit `core_config_updated` after persistence, with
+  accepted request fields and no WebSocket envelope fields. Invalid or
+  unsupported fields produce no update event. The app uses this event to
+  refresh the home zone from the latest saved core settings.

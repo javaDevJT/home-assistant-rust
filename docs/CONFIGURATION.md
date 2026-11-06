@@ -43,3 +43,12 @@ Supported integration options are defined by the strict native configuration
 types and each crate's README in the [project index](../README.md). Unknown
 integrations and options fail validation. Loader support does not imply that
 every integration referenced by an upstream configuration has been ported.
+
+The native zone component always creates `zone.home` from the accepted core
+name and coordinates. A `zone:` list, one zone mapping, or an empty section
+adds YAML zones. Editable zones use the authenticated `zone/*` WebSocket
+collection separately from YAML definitions. The administrator-only
+`zone.reload` service resolves the current YAML and its includes again and
+replaces only the YAML zone collection. It does not reconfigure other domains.
+Saved `config/core/update` settings update the home zone and take precedence
+over startup YAML on subsequent restarts.
