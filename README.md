@@ -2,7 +2,7 @@
 
 An independent native Rust rewrite of [Home Assistant Core](https://github.com/home-assistant/core), forked to [javaDevJT/home-assistant-rust](https://github.com/javaDevJT/home-assistant-rust). The `rust-rewrite` branch contains the new implementation; `dev` preserves upstream.
 
-**Full Home Assistant compatibility is not implemented.** This first milestone implements the runtime, persistence, helper services, automation subset, and selected REST/WebSocket protocols. Upstream device integrations, the official frontend, OAuth/user management, and existing Home Assistant databases are not supported. No Python bridge is used.
+**The entire rewrite is still in progress.** The native implementation includes the runtime, persistence, user authentication, registries, configuration entries, MQTT and REST integrations, templates, scripts, scenes, automations, and helpers described below. Full integration coverage, the official frontend, and existing Home Assistant database compatibility remain open. No Python bridge is used.
 
 ## Run
 
@@ -13,7 +13,7 @@ cargo build --release --locked
 cargo run --locked -p hass -- --config examples/configuration.yaml --check
 ```
 
-Generate a local token file, then start the server:
+Start without a token to use native onboarding and password-provider login, or generate an administrator token file for local API work:
 
 ```sh
 umask 077
@@ -35,17 +35,22 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 
 ## Implemented surface
 
-| Area | First milestone |
+| Area | Current native implementation |
 | --- | --- |
 | Runtime | Typed states, attributes, contexts, ordered events, service registry |
-| Storage | SQLite current states, history, event recording, restart restore |
-| Native helpers | input_boolean, input_number, input_text, input_select, counter |
-| Automation | State/event triggers, state/numeric conditions, services, bounded delays |
-| REST | Authenticated states, config, services, event firing, history |
-| WebSocket | Token handshake, states/config/services, event subscriptions, service calls, ping |
-| Process | YAML validation, local listener, token file/env, Ctrl-C/SIGTERM shutdown |
+| Storage | SQLite states/history/events/private metadata, migration, restart, single writer |
+| Authentication | Password users, roles, JWT access, rotating refresh sessions, TOTP MFA, signed paths |
+| Registries | Persistent entity/device/area/floor/label identity and CRUD |
+| Configuration | Persistent entries, native driver flows/setup/unload/retry, core settings |
+| Native helpers | input_boolean/number/text/select/button/datetime, counter, timer, schedule |
+| Automation | State/event/numeric/template/time/MQTT/lifecycle triggers, conditions, execution modes |
+| Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
+| Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
+| REST API | Authenticated states, config, services, events, templates, history |
+| WebSocket | Native auth, live entity/config/template/event subscriptions, services, registries |
+| Process | YAML validation, trusted proxy origin checks, local-user policy, joined shutdown |
 
-This is protocol compatibility for the documented subset, not a drop-in replacement. Unsupported configuration keys fail validation. Unknown WebSocket commands and services return errors. `/api/events` listener inventory returns 501; history requires `filter_entity_id`. The token represents one administrator; upstream permission roles and refresh/login flows are unported. Jinja templates, external YAML includes/secrets, discovery/config entries, physical integrations, frontend assets, recorder statistics, and upstream database migrations remain unimplemented. This recorder currently grows without automatic purge. Synchronous service handlers must terminate; shutdown waits for in-flight handlers.
+Every integration remains subject to the detailed [parity inventory](docs/PARITY.md); no complete upstream integration is claimed. Unsupported options and commands fail explicitly. The official frontend, additional auth providers and custom permissions, most device integrations, recorder statistics, and upstream database migrations remain open. `/api/events` listener inventory currently returns 501; history currently requires `filter_entity_id`. Synchronous service handlers must terminate; shutdown waits for in-flight handlers.
 
 ## Checks and project index
 
@@ -56,10 +61,20 @@ cargo test --workspace --locked
 ```
 
 - [Rewrite status, baseline inventory, and task ledger](docs/REWRITE.md)
+- [Active full-rewrite execution ledger](docs/PORTING.md)
+- [Exhaustive upstream integration and subsystem parity](docs/PARITY.md)
 - [Module contracts and ownership](docs/CONTRACT.md)
 - [Automation YAML and execution limits](crates/hass-automation/README.md)
 - [API endpoints, protocol bounds, and shutdown](crates/hass-api/README.md)
+- [Native users, sessions, and authentication](crates/hass-auth/README.md)
+- [MQTT broker, discovery, and device commands](crates/hass-mqtt/README.md)
+- [RESTful sensors and commands](crates/hass-rest/README.md)
+- [Scripts and scenes](crates/hass-script/README.md)
+- [Reactive template sensors and action-backed controls](crates/hass-template-entities/README.md)
+- [Timers, dates, buttons, and schedules](crates/hass-native/README.md)
+- [Config entries, native drivers, and core settings](crates/hass-config/README.md)
 - [Supported configuration example](examples/configuration.yaml)
+- [YAML includes, secrets, packages, and loading limits](docs/CONFIGURATION.md)
 - [Validation evidence](docs/VALIDATION.md)
 - [Apache 2.0 license](LICENSE.md)
 

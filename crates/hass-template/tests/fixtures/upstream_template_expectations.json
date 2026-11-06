@@ -1,0 +1,16 @@
+{
+  "source": "home-assistant/core cbf2c02c9bff331537c19bff69da8dc11c3fbfbf; tests/helpers/template/extensions/test_state.py and tests/helpers/template/test_states.py",
+  "cases": [
+    {"template": "{{ states('sensor.temperature') }}", "expected": "21.5"},
+    {"template": "{{ states('sensor.missing') }}", "expected": "unknown"},
+    {"template": "{{ states.sensor.temperature.state }}", "expected": "21.5"},
+    {"template": "{{ is_state('light.desk', 'on') }}", "expected": "True"},
+    {"template": "{{ is_state('light.desk', ['off', 'on']) }}", "expected": "True"},
+    {"template": "{{ state_attr('sensor.temperature', 'unit_of_measurement') }}", "expected": "°C"},
+    {"template": "{{ is_state_attr('sensor.temperature', 'unit_of_measurement', '°C') }}", "expected": "True"},
+    {"template": "{{ has_value('sensor.temperature') }}", "expected": "True"},
+    {"template": "{{ has_value('sensor.missing') }}", "expected": "False"},
+    {"template": "{{ 'bad' | float(7) }}", "expected": "7"},
+    {"template": "{{ int('bad', default=7) }}", "expected": "7"}
+  ]
+}

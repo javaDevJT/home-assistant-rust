@@ -2,6 +2,9 @@
 
 mod config;
 mod helpers;
+mod integration_drivers;
+mod recorder;
+mod yaml;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Parser;
@@ -47,8 +50,11 @@ fn read_token(path: Option<&Path>) -> Result<String> {
     let value = if let Some(path) = path {
         std::fs::read_to_string(path).context("cannot read token file")?
     } else {
-        std::env::var("HASS_TOKEN")
-            .context("set HASS_TOKEN or supply --token-file before starting the server")?
+        match std::env::var("HASS_TOKEN") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => return Ok(String::new()),
+            Err(error) => return Err(error).context("HASS_TOKEN is not valid text"),
+        }
     };
     let token = value.trim().to_owned();
     if token.len() < 32 || token.len() > 4096 || !token.bytes().all(|c| c.is_ascii_graphic()) {
@@ -90,45 +96,133 @@ async fn main() -> Result<()> {
             .join(&config.recorder.db_path)
     });
     let helper_config = config.helpers.clone();
-    let runtime = tokio::task::spawn_blocking(move || -> Result<Runtime> {
-        if let Some(parent) = db_path.parent().filter(|path| !path.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).context("cannot create database directory")?;
-        }
-        let store = SqliteStore::open(&db_path)?;
-        let runtime = Runtime::new(Arc::new(store))?;
-        helpers::setup(&runtime, &helper_config)?;
-        Ok(runtime)
-    })
-    .await
-    .context("runtime initialization failed")??;
     let api_config = config.api_config();
-    let automations = hass_automation::start(runtime.clone(), config.automation)?;
+    let seed_config = serde_json::json!({
+        "name":config.homeassistant.name,
+        "latitude":config.homeassistant.latitude,
+        "longitude":config.homeassistant.longitude,
+        "elevation":config.homeassistant.elevation,
+        "time_zone":config.homeassistant.time_zone,
+        "unit_system":config.homeassistant.unit_system,
+    });
+    let network = hass_api::network::NetworkPolicy::new(
+        config.http.use_x_forwarded_for,
+        &config.http.trusted_proxies,
+    )?;
+    let (runtime, auth, registries, config_entries) =
+        tokio::task::spawn_blocking(move || -> Result<_> {
+            if let Some(parent) = db_path.parent().filter(|path| !path.as_os_str().is_empty()) {
+                let mut directory = std::fs::DirBuilder::new();
+                directory.recursive(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt;
+                    directory.mode(0o700);
+                }
+                directory
+                    .create(parent)
+                    .context("cannot create database directory")?;
+            }
+            let store = SqliteStore::open(&db_path)?;
+            let runtime = Runtime::new(Arc::new(store))?;
+            helpers::setup(&runtime, &helper_config)?;
+            let auth = hass_auth::AuthManager::new(runtime.clone())?;
+            let registries = hass_registry::Registries::new(runtime.clone())?;
+            let config_entries = hass_config::ConfigEntries::new(runtime.clone())?;
+            config_entries.initialize_core_config(&seed_config)?;
+            Ok((runtime, auth, registries, config_entries))
+        })
+        .await
+        .context("runtime initialization failed")??;
+    let target_registries = registries.clone();
+    let _service_targets =
+        runtime.install_service_target_resolver_if_absent(Arc::new(move |runtime, call| {
+            Ok(!matches!(
+                hass_registry::targets::resolve_entity_service_targets(
+                    runtime,
+                    Some(&target_registries),
+                    call
+                )?,
+                hass_registry::targets::TargetResolution::NoMatches
+            ))
+        }));
+    let recorder = recorder::RecorderMaintenance::start(
+        runtime.clone(),
+        auth.clone(),
+        config.recorder.clone(),
+    )?;
+    let mut native_config = config.native_config();
+    native_config.time_zone = runtime.time_zone();
+    let native = hass_native::NativeIntegrations::start(runtime.clone(), native_config).await?;
+    let scripts = hass_script::ScriptEngine::start(runtime.clone(), config.script, config.scene)?;
+    let template_entities = hass_template_entities::TemplateEntities::start_with_registries(
+        runtime.clone(),
+        config.template,
+        registries.clone(),
+    )
+    .await?;
+    let mqtt_topics = hass_automation::mqtt_topics(&config.automation);
+    let automations = hass_automation::start_with_timezone(
+        runtime.clone(),
+        config.automation,
+        runtime.time_zone(),
+    )?;
+    let rest = hass_rest::RestIntegration::start(runtime.clone(), config.rest, config.rest_command)
+        .await?;
+    let drivers = integration_drivers::NativeDrivers::start(
+        runtime.clone(),
+        config_entries.clone(),
+        registries.clone(),
+        mqtt_topics,
+        config.mqtt,
+    )
+    .await?;
+    let templates = hass_template::TemplateEngine::new(runtime.clone());
     let started_runtime = runtime.clone();
     tokio::task::spawn_blocking(move || {
         started_runtime.fire_event("homeassistant_started", Map::new(), Context::default())
     })
     .await??;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let app = hass_api::router_with_shutdown(
+    let app = hass_api::router_with_features(
         hass_api::ApiState {
             runtime: runtime.clone(),
             access_token,
             config: api_config,
         },
-        shutdown_rx,
+        hass_api::ApiFeatures {
+            network,
+            auth: Some(auth),
+            registries: Some(registries),
+            templates: Some(templates),
+            config_entries: Some(config_entries),
+        },
+        Some(shutdown_rx),
     );
     info!(%bound_address, version = hass_core::VERSION, "Rust runtime listening");
     warn!(
-        "Partial compatibility: native helpers only; upstream integrations and frontend are not ported"
+        "Rust rewrite in progress; consult docs/upstream-parity.json for verified integration coverage"
     );
     let result = axum_serve(listener, app, shutdown_tx).await;
+    let recorder_result = recorder.shutdown().await;
     let automation_result = automations.shutdown().await;
+    let template_entity_result = template_entities.shutdown().await;
+    let driver_result = drivers.shutdown().await;
+    let script_result = scripts.shutdown().await;
+    let rest_result = rest.shutdown().await;
+    let native_result = native.shutdown().await;
     let stop_result = tokio::task::spawn_blocking(move || {
         runtime.fire_event("homeassistant_stop", Map::new(), Context::default())
     })
     .await?;
     result?;
+    recorder_result?;
     automation_result?;
+    template_entity_result?;
+    driver_result?;
+    script_result?;
+    rest_result?;
+    native_result?;
     stop_result?;
     Ok(())
 }
@@ -138,13 +232,16 @@ async fn axum_serve(
     app: axum::Router,
     shutdown: tokio::sync::watch::Sender<bool>,
 ) -> Result<()> {
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            let _ = shutdown.send(true);
-        })
-        .await
-        .context("HTTP server failed")
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        let _ = shutdown.send(true);
+    })
+    .await
+    .context("HTTP server failed")
 }
 
 async fn shutdown_signal() {

@@ -5,8 +5,9 @@ use anyhow::{Context, Result, bail};
 use hass_automation::Automation;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{net::IpAddr, path::Path};
+use std::{collections::BTreeMap, net::IpAddr, path::Path};
 
+#[cfg(test)]
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 
 #[derive(Debug, Deserialize, Default)]
@@ -19,6 +20,26 @@ pub struct Config {
     pub recorder: RecorderConfig,
     #[serde(default)]
     pub automation: Vec<Automation>,
+    #[serde(default)]
+    pub script: BTreeMap<String, hass_script::ScriptConfig>,
+    #[serde(default)]
+    pub scene: Vec<hass_script::SceneConfig>,
+    #[serde(default)]
+    pub mqtt: Option<hass_mqtt::MqttConfig>,
+    #[serde(default)]
+    pub rest: Vec<hass_rest::RestConfig>,
+    #[serde(default)]
+    pub rest_command: BTreeMap<String, hass_rest::RestCommandConfig>,
+    #[serde(default)]
+    pub template: Vec<hass_template_entities::TemplateBlock>,
+    #[serde(default)]
+    pub timer: BTreeMap<String, hass_native::TimerConfig>,
+    #[serde(default)]
+    pub input_button: BTreeMap<String, hass_native::InputButtonConfig>,
+    #[serde(default)]
+    pub input_datetime: BTreeMap<String, hass_native::InputDatetimeConfig>,
+    #[serde(default)]
+    pub schedule: BTreeMap<String, hass_native::ScheduleConfig>,
     #[serde(flatten)]
     pub helpers: Helpers,
 }
@@ -52,6 +73,8 @@ impl Default for HomeConfig {
 pub struct HttpConfig {
     pub server_host: IpAddr,
     pub server_port: u16,
+    pub use_x_forwarded_for: bool,
+    pub trusted_proxies: Vec<String>,
 }
 
 impl Default for HttpConfig {
@@ -59,40 +82,55 @@ impl Default for HttpConfig {
         Self {
             server_host: "127.0.0.1".parse().expect("literal IP"),
             server_port: 8123,
+            use_x_forwarded_for: false,
+            trusted_proxies: Vec::new(),
         }
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RecorderConfig {
     pub db_path: String,
+    pub purge_keep_days: u64,
+    pub auto_purge: bool,
+    pub auto_repack: bool,
 }
 
 impl Default for RecorderConfig {
     fn default() -> Self {
         Self {
             db_path: "data/hass.sqlite".into(),
+            purge_keep_days: 10,
+            auto_purge: true,
+            auto_repack: true,
         }
     }
 }
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
-        let metadata = std::fs::metadata(path)
-            .with_context(|| format!("cannot read configuration {}", path.display()))?;
-        if metadata.len() > MAX_CONFIG_BYTES {
-            bail!("configuration exceeds the 1 MiB limit");
-        }
-        Self::parse(&std::fs::read_to_string(path)?)
+        Self::from_value(crate::yaml::load(path)?)
     }
 
+    #[cfg(test)]
     pub fn parse(source: &str) -> Result<Self> {
         if source.len() as u64 > MAX_CONFIG_BYTES {
             bail!("configuration exceeds the 1 MiB limit");
         }
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(source).context("invalid configuration YAML")?;
+        Self::from_value(crate::yaml::parse(source)?)
+    }
+
+    fn from_value(mut value: serde_yaml::Value) -> Result<Self> {
+        // Packages have already been merged by the loader. They are not a
+        // second integration configuration or public/debug settings payload.
+        if let Some(home) = value
+            .as_mapping_mut()
+            .and_then(|root| root.get_mut(serde_yaml::Value::String("homeassistant".into())))
+            .and_then(serde_yaml::Value::as_mapping_mut)
+        {
+            home.remove(serde_yaml::Value::String("packages".into()));
+        }
         let mapping = value
             .as_mapping()
             .context("configuration must be a mapping")?;
@@ -109,6 +147,16 @@ impl Config {
                 "input_number",
                 "input_text",
                 "input_select",
+                "script",
+                "scene",
+                "mqtt",
+                "rest",
+                "rest_command",
+                "template",
+                "timer",
+                "input_button",
+                "input_datetime",
+                "schedule",
                 "counter",
             ]
             .contains(&key)
@@ -116,13 +164,22 @@ impl Config {
                 bail!("unsupported configuration key: {key}");
             }
         }
-        let config: Self =
-            serde_yaml::from_value(value).context("unsupported or invalid configuration option")?;
+        let config: Self = serde_path_to_error::deserialize(value).map_err(|error| {
+            // A typed decoding error can quote an invalid scalar. Preserve
+            // its configuration path without printing resolved secret values.
+            anyhow::anyhow!(
+                "unsupported or invalid configuration option at {}",
+                error.path()
+            )
+        })?;
         config.validate()?;
         Ok(config)
     }
 
     fn validate(&self) -> Result<()> {
+        if !(1..=365_000).contains(&self.recorder.purge_keep_days) {
+            bail!("recorder.purge_keep_days must be between 1 and 365000");
+        }
         let home = &self.homeassistant;
         if home.name.trim().is_empty() {
             bail!("homeassistant.name must not be empty");
@@ -146,8 +203,29 @@ impl Config {
             bail!("recorder.db_path must be a persistent filesystem path");
         }
         self.helpers.validate()?;
+        hass_api::network::NetworkPolicy::new(
+            self.http.use_x_forwarded_for,
+            &self.http.trusted_proxies,
+        )?;
         hass_automation::validate(&self.automation)?;
+        hass_script::validate_config(&self.script, &self.scene)?;
+        self.native_config().validate()?;
+        if let Some(mqtt) = &self.mqtt {
+            mqtt.validate()?;
+        }
+        hass_rest::validate_config(&self.rest, &self.rest_command)?;
+        hass_template_entities::validate(&self.template)?;
         Ok(())
+    }
+
+    pub fn native_config(&self) -> hass_native::NativeConfig {
+        hass_native::NativeConfig {
+            timer: self.timer.clone(),
+            input_button: self.input_button.clone(),
+            input_datetime: self.input_datetime.clone(),
+            schedule: self.schedule.clone(),
+            time_zone: self.homeassistant.time_zone.clone(),
+        }
     }
 
     pub fn api_config(&self) -> Value {
@@ -156,7 +234,37 @@ impl Config {
         } else {
             json!({"length":"mi", "mass":"lb", "temperature":"°F", "volume":"gal", "pressure":"psi", "wind_speed":"mph", "accumulated_precipitation":"in"})
         };
-        let mut components = vec!["api", "websocket_api", "recorder"];
+        let mut components = vec!["api", "websocket_api", "recorder", "auth", "template"];
+        if !self.script.is_empty() {
+            components.push("script");
+        }
+        if !self.scene.is_empty() {
+            components.push("scene");
+        }
+        if self.mqtt.is_some() {
+            components.push("mqtt");
+        }
+        if !self.rest.is_empty() {
+            components.push("rest");
+        }
+        if !self.rest_command.is_empty() {
+            components.push("rest_command");
+        }
+        if !self.timer.is_empty() {
+            components.push("timer");
+        }
+        if !self.input_button.is_empty() {
+            components.push("input_button");
+        }
+        if !self.input_datetime.is_empty() {
+            components.push("input_datetime");
+        }
+        if !self.schedule.is_empty() {
+            components.push("schedule");
+        }
+        if !self.template.is_empty() {
+            components.push("template");
+        }
         if !self.automation.is_empty() {
             components.push("automation");
         }
@@ -197,8 +305,8 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_configuration_instead_of_ignoring_it() {
-        assert!(Config::parse("mqtt: {}\n").is_err());
-        assert!(Config::parse("http:\n  use_x_forwarded_for: true\n").is_err());
+        assert!(Config::parse("not_a_real_integration: {}\n").is_err());
+        assert!(Config::parse("http:\n  unknown_proxy_setting: true\n").is_err());
         assert!(Config::parse("homeassistant:\n  time_zone: Mars/Olympus\n").is_err());
         assert!(Config::parse("homeassistant:\n  latitude: .nan\n").is_err());
         assert!(Config::parse("http: {}\nhttp: {}\n").is_err());
@@ -219,5 +327,32 @@ mod tests {
         std::fs::write(&path, "recorder:\n  db_path: missing/database.sqlite\n").unwrap();
         Config::load(&path).unwrap();
         assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn included_packages_merge_before_validation_and_typed_errors_hide_secret_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("configuration.yaml");
+        std::fs::write(
+            directory.path().join("packages.yaml"),
+            "helpers:\n  input_boolean:\n    packaged:\n      name: From package\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            "homeassistant:\n  packages: !include packages.yaml\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert!(config.helpers.input_boolean.contains_key("packaged"));
+        std::fs::write(
+            directory.path().join("secrets.yaml"),
+            "bad_port: credential-that-must-not-appear\n",
+        )
+        .unwrap();
+        std::fs::write(&path, "http:\n  server_port: !secret bad_port\n").unwrap();
+        let error = format!("{:#}", Config::load(&path).unwrap_err());
+        assert!(error.contains("http.server_port"));
+        assert!(!error.contains("credential-that-must-not-appear"));
     }
 }

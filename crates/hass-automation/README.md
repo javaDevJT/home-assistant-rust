@@ -1,31 +1,34 @@
 # hass-automation
 
-This crate implements a strict, bounded subset of Home Assistant YAML
-automations. It supports state and event triggers, state and numeric-state
-conditions, service actions, and delays up to 30 seconds. Unknown fields and
-unsupported options are errors.
+This crate runs bounded Home Assistant automations against `hass_core::Runtime`.
+It accepts both `triggers`/`actions` and legacy `trigger`/`action` lists, and
+both modern `trigger:` and legacy `platform:` trigger names. Unknown fields and
+unsupported trigger platforms are rejected.
 
 ```yaml
-- id: announce_arrival
-  alias: Announce arrival
+- id: warm_arrival
+  alias: Warm arrival
+  mode: restart
+  variables:
+    message: "{{ 'Welcome home' }}"
   triggers:
     - trigger: state
       entity_id: person.josh
-      from: not_home
+      from: away
       to: home
+      for: 2
   conditions:
-    - condition: state
-      entity_id: input_boolean.quiet_mode
-      state: "off"
-    - condition: numeric_state
-      entity_id: sensor.outdoor_temperature
-      above: 10
-      below: 30
+    - condition: template
+      value_template: "{{ is_state('input_boolean.quiet_mode', 'off') }}"
   actions:
+    - action: light.turn_on
+      target:
+        entity_id: light.entry
+      data:
+        brightness: 180
     - action: notify.phone
       data:
-        message: Someone arrived home
-    - delay: "00:00:02"
+        message: "{{ message }}"
 
 - id: react_to_door_event
   triggers:
@@ -37,28 +40,45 @@ unsupported options are errors.
     - action: light.turn_on
       target:
         entity_id: light.entry
-      data:
-        brightness: 180
 ```
 
-`entity_id` on a state trigger accepts one entity or a list. A state trigger
-matches only changes in the state's value; attribute-only updates do not
-match. `from` and `to` are exact strings. Event data matching requires every
-configured top-level key/value to match, while additional event data is
-allowed. All configured conditions must pass. Numeric bounds are exclusive.
+Triggers include state, numeric state, template, local `time`, `time_pattern`,
+Home Assistant startup/shutdown, event, and MQTT message signals. State,
+numeric-state, and template triggers accept `for` durations up to 24 hours.
+State triggers can observe an attribute; numeric thresholds are exclusive.
+Template triggers fire on false-to-true transitions. The time trigger accepts
+`HH:MM` or `HH:MM:SS`; time-pattern fields accept an integer, `*`, or `/step`.
+The time trigger currently supports fixed local clock values, not entity-backed
+times or weekday selectors.
 
-Service actions accept `action: domain.service`, and optional object-valued
-`data` and `target`. Delays accept a number of seconds, `HH:MM:SS` text, or an
-object with `hours`, `minutes`, `seconds`, and/or `milliseconds`. Each delay
-is limited to 30 seconds. An automation may have at most 32 actions, 16
-triggers, and 16 conditions. The engine runs at most 16 automations at once,
-queues at most 128 additional runs, and bounds each run to 60 seconds.
+Conditions include state, numeric-state, template, and nested `and`, `or`, and
+`not`. Automation and trigger variables are available to the shared template
+renderer. Actions are validated and executed by `hass-script`'s shared
+sequence runner, including its service, delay, condition, choose, repeat, and
+variable actions. Each automation has at most 16 triggers, 16 conditions, and
+32 top-level actions. Runs are bounded by the shared executor, and the engine
+keeps at most 16 active runs, 128 queued runs, and 128 delayed triggers.
+Queued and parallel `max` limits skip excess triggers with a warning; overflow
+of the engine-wide pending queue stops the listener and is returned from
+`shutdown`.
 
-Automation-generated service contexts preserve the triggering user and set
-their parent to the triggering context ID. Context lineage prevents an
-automation from re-entering itself through chains of other automations. The
-engine reports broadcast lag and queue overflow as errors instead of
-silently dropping work. Shutdown cancels delays and joins active work. Since
-the runtime service handler API is synchronous and has no cancellation
-contract, shutdown waits for any in-flight handler to return; the 60-second
-run limit cannot forcibly terminate a handler that blocks indefinitely.
+The engine publishes `automation.<id>` states (`on` or `off`) and registers
+`automation.turn_on`, `automation.turn_off`, `automation.toggle`, and
+`automation.trigger`. Enable state is stored through Runtime metadata and
+restored when the engine starts again. `initial_state` sets the first value;
+persisted state takes precedence on later starts.
+
+Use `start_with_timezone(runtime, automations, "America/New_York")` for wall
+clock triggers. `start` uses the timezone already configured in Runtime.
+`mqtt_topics(&automations)` returns the static broker filters needed by the
+root MQTT integration. MQTT triggers consume only private native
+`mqtt_message` signals dispatched from real broker traffic; this crate does
+not create broker traffic or subscribe directly.
+
+Automation service contexts preserve the triggering user and link to the
+triggering context ID. Context lineage prevents an automation from re-entering
+itself through chains of other automations. Broadcast lag and queue overflow
+are reported as engine errors. Shutdown cancels delayed triggers and active
+actions, joins every task, then runs configured Home Assistant shutdown
+triggers. Synchronous Runtime service handlers cannot be forcibly interrupted,
+so shutdown waits for an in-flight handler to return.

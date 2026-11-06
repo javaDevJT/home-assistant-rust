@@ -1,0 +1,23 @@
+[package]
+name = "hass-mqtt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hass-core.workspace = true
+hass-template.workspace = true
+rumqttc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+regex = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+hass-storage.workspace = true
+serde_yaml.workspace = true

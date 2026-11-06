@@ -4,15 +4,22 @@
 //! `tokio::task::spawn_blocking`.
 
 use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use hass_core::{Error, Event, Result, State, Store};
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use hass_core::{
+    Error, Event, EventHistoryQuery, HistoryQuery, HistorySeries, MAX_HISTORY_QUERY_RESULTS,
+    PurgeResult, Result, State, Store,
+};
+use rusqlite::types::Value as SqlValue;
+use rusqlite::{
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter,
+};
+use serde_json::Value;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A synchronous SQLite implementation of [`hass_core::Store`].
@@ -22,6 +29,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct SqliteStore {
     connection: Mutex<Connection>,
     _writer_lock: Option<File>,
+    database_path: Option<PathBuf>,
 }
 
 impl SqliteStore {
@@ -52,15 +60,24 @@ impl SqliteStore {
         let canonical = path
             .canonicalize()
             .map_err(|error| storage_error("resolve SQLite database path", error))?;
-        let mut lock_path = canonical.into_os_string();
+        protect_database_files(&canonical)?;
+        let mut lock_path = canonical.as_os_str().to_os_string();
         lock_path.push(".lock");
-        let writer_lock = OpenOptions::new()
+        let mut lock_options = OpenOptions::new();
+        lock_options
             .read(true)
             .write(true)
             .create(true)
-            .truncate(false)
+            .truncate(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            lock_options.mode(0o600);
+        }
+        let writer_lock = lock_options
             .open(Path::new(&lock_path))
             .map_err(|error| storage_error("open database writer lock", error))?;
+        protect_private_file(Path::new(&lock_path), false)?;
         writer_lock.try_lock().map_err(|error| {
             storage_error("database already has a writer or cannot be locked", error)
         })?;
@@ -74,13 +91,15 @@ impl SqliteStore {
             ));
         }
         connection
-            .pragma_update(None, "synchronous", "NORMAL")
+            .pragma_update(None, "synchronous", "FULL")
             .map_err(|error| storage_error("configure SQLite synchronous mode", error))?;
 
         initialize_schema(&mut connection)?;
+        protect_database_files(&canonical)?;
         Ok(Self {
             connection: Mutex::new(connection),
             _writer_lock: Some(writer_lock),
+            database_path: Some(canonical),
         })
     }
 
@@ -99,6 +118,7 @@ impl SqliteStore {
         Ok(Self {
             connection: Mutex::new(connection),
             _writer_lock: None,
+            database_path: None,
         })
     }
 
@@ -107,6 +127,40 @@ impl SqliteStore {
             .lock()
             .map_err(|_| Error::Storage("SQLite connection lock was poisoned".to_owned()))
     }
+}
+
+// Authentication keys, TOTP secrets and broker credentials share this owned
+// store. Restrict files only after schema preflight; never chmod a foreign DB.
+#[cfg(unix)]
+fn protect_private_file(path: &Path, optional: bool) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if optional && error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(storage_error("inspect private store file", error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(Error::Storage(
+            "private store file must be a regular file".into(),
+        ));
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|error| storage_error("restrict private store file", error))
+}
+
+#[cfg(not(unix))]
+fn protect_private_file(_path: &Path, _optional: bool) -> Result<()> {
+    Ok(())
+}
+
+fn protect_database_files(path: &Path) -> Result<()> {
+    protect_private_file(path, false)?;
+    for suffix in ["-wal", "-shm"] {
+        let mut sidecar = path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        protect_private_file(Path::new(&sidecar), true)?;
+    }
+    Ok(())
 }
 
 impl Store for SqliteStore {
@@ -198,6 +252,46 @@ impl Store for SqliteStore {
             .map_err(|error| storage_error("commit event transaction", error))
     }
 
+    fn get_data(&self, key: &str) -> Result<Option<Value>> {
+        let connection = self.connection()?;
+        let encoded = connection
+            .query_row(
+                "SELECT value_json FROM metadata WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| storage_error("read metadata", error))?;
+        encoded
+            .map(|encoded| {
+                serde_json::from_str(&encoded)
+                    .map_err(|error| Error::Storage(format!("corrupt metadata JSON: {error}")))
+            })
+            .transpose()
+    }
+
+    fn set_data(&self, key: &str, value: &Value) -> Result<()> {
+        let encoded = serde_json::to_string(value).map_err(|error| {
+            Error::InvalidInput(format!("metadata cannot be represented as JSON: {error}"))
+        })?;
+        self.connection()?
+            .execute(
+                "INSERT INTO metadata(key, value_json) VALUES (?1, ?2) \
+                 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json",
+                params![key, encoded],
+            )
+            .map_err(|error| storage_error("persist metadata", error))?;
+        Ok(())
+    }
+
+    fn delete_data(&self, key: &str) -> Result<bool> {
+        let deleted = self
+            .connection()?
+            .execute("DELETE FROM metadata WHERE key = ?1", [key])
+            .map_err(|error| storage_error("delete metadata", error))?;
+        Ok(deleted != 0)
+    }
+
     fn history(
         &self,
         entity_id: &str,
@@ -249,6 +343,300 @@ impl Store for SqliteStore {
         }
         Ok(states)
     }
+
+    fn history_query(&self, query: &HistoryQuery) -> Result<Vec<HistorySeries>> {
+        query.validate()?;
+        if query.entity_ids.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(Vec::new());
+        }
+        let (start_seconds, start_nanoseconds) = timestamp_parts(&query.start);
+        let (end_seconds, end_nanoseconds) = timestamp_parts(&query.end);
+        let mut values = Vec::new();
+        let mut sql = String::from(
+            "SELECT entity_id, time_seconds, time_nanoseconds, id, state_json, is_boundary \
+             FROM (SELECT h.entity_id, h.time_seconds, h.time_nanoseconds, h.id, h.state_json, 0 AS is_boundary \
+                   FROM history h \
+             WHERE (h.time_seconds > ? OR (h.time_seconds = ? AND h.time_nanoseconds > ?)) \
+                     AND (h.time_seconds < ? OR (h.time_seconds = ? AND h.time_nanoseconds < ?))",
+        );
+        values.extend([
+            SqlValue::Integer(start_seconds),
+            SqlValue::Integer(start_seconds),
+            SqlValue::Integer(start_nanoseconds),
+            SqlValue::Integer(end_seconds),
+            SqlValue::Integer(end_seconds),
+            SqlValue::Integer(end_nanoseconds),
+        ]);
+        append_history_entity_filters(&mut sql, "h", query, &mut values);
+        if query.include_start_time_state {
+            sql.push_str(
+                " UNION ALL SELECT h.entity_id, h.time_seconds, h.time_nanoseconds, h.id, h.state_json, 1 AS is_boundary \
+                   FROM history h \
+                   WHERE (h.time_seconds < ? OR (h.time_seconds = ? AND h.time_nanoseconds <= ?))",
+            );
+            values.extend([
+                SqlValue::Integer(start_seconds),
+                SqlValue::Integer(start_seconds),
+                SqlValue::Integer(start_nanoseconds),
+            ]);
+            append_history_entity_filters(&mut sql, "h", query, &mut values);
+            sql.push_str(
+                " AND h.id = (SELECT p.id FROM history p \
+                         WHERE p.entity_id = h.entity_id \
+                           AND (p.time_seconds < ? OR (p.time_seconds = ? AND p.time_nanoseconds <= ?)) \
+                         ORDER BY p.time_seconds DESC, p.time_nanoseconds DESC, p.id DESC LIMIT 1)",
+            );
+            values.extend([
+                SqlValue::Integer(start_seconds),
+                SqlValue::Integer(start_seconds),
+                SqlValue::Integer(start_nanoseconds),
+            ]);
+        }
+        sql.push_str(") ORDER BY entity_id, time_seconds, time_nanoseconds, id LIMIT ?");
+        values.push(SqlValue::Integer((MAX_HISTORY_QUERY_RESULTS + 1) as i64));
+
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| storage_error("prepare multi-entity history query", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, bool>(5)?,
+                ))
+            })
+            .map_err(|error| storage_error("query multi-entity history", error))?;
+
+        let mut by_entity = std::collections::BTreeMap::<String, Vec<State>>::new();
+        let mut rows_seen = 0usize;
+        for row in rows {
+            rows_seen += 1;
+            if rows_seen > MAX_HISTORY_QUERY_RESULTS {
+                return Err(Error::InvalidInput(format!(
+                    "history query exceeds the {MAX_HISTORY_QUERY_RESULTS} row limit"
+                )));
+            }
+            let (entity_id, seconds, nanoseconds, encoded, is_boundary) =
+                row.map_err(|error| storage_error("read multi-entity history row", error))?;
+            let state = decode_state(&encoded, "history state")?;
+            if state.entity_id != entity_id {
+                return Err(Error::Storage(
+                    "history state JSON disagrees with its entity key".into(),
+                ));
+            }
+            if timestamp_parts(&state.last_updated) != (seconds, nanoseconds) {
+                return Err(Error::Storage(
+                    "history state timestamp disagrees with its index key".into(),
+                ));
+            }
+            let mut state = state;
+            if is_boundary {
+                state.last_changed = query.start;
+                state.last_updated = query.start;
+                state.last_reported = query.start;
+            } else if query.significant_changes_only && !is_significant_history_state(&state) {
+                continue;
+            }
+            by_entity.entry(entity_id).or_default().push(state);
+        }
+
+        if let Some(entity_ids) = &query.entity_ids {
+            let excluded: std::collections::HashSet<&str> =
+                query.exclude_entities.iter().map(String::as_str).collect();
+            let mut seen = std::collections::HashSet::new();
+            Ok(entity_ids
+                .iter()
+                .filter(|entity_id| seen.insert(entity_id.as_str()))
+                .map(|entity_id| HistorySeries {
+                    entity_id: entity_id.clone(),
+                    states: if excluded.contains(entity_id.as_str()) {
+                        Vec::new()
+                    } else {
+                        by_entity.remove(entity_id).unwrap_or_default()
+                    },
+                })
+                .collect())
+        } else {
+            Ok(by_entity
+                .into_iter()
+                .filter(|(entity_id, _)| {
+                    !query
+                        .exclude_entities
+                        .iter()
+                        .any(|excluded| excluded == entity_id)
+                })
+                .map(|(entity_id, states)| HistorySeries { entity_id, states })
+                .collect())
+        }
+    }
+
+    fn event_history_query(&self, query: &EventHistoryQuery) -> Result<Vec<Event>> {
+        query.validate()?;
+        if query.event_types.as_ref().is_some_and(Vec::is_empty) {
+            return Ok(Vec::new());
+        }
+        let (start_seconds, start_nanoseconds) = timestamp_parts(&query.start);
+        let (end_seconds, end_nanoseconds) = timestamp_parts(&query.end);
+        let mut values = vec![
+            SqlValue::Integer(start_seconds),
+            SqlValue::Integer(start_seconds),
+            SqlValue::Integer(start_nanoseconds),
+            SqlValue::Integer(end_seconds),
+            SqlValue::Integer(end_seconds),
+            SqlValue::Integer(end_nanoseconds),
+        ];
+        let mut sql = String::from(
+            "SELECT event_type, time_seconds, time_nanoseconds, event_json FROM events \
+             WHERE (time_seconds > ? OR (time_seconds = ? AND time_nanoseconds > ?)) \
+               AND (time_seconds < ? OR (time_seconds = ? AND time_nanoseconds < ?))",
+        );
+        if let Some(event_types) = &query.event_types {
+            let placeholders = std::iter::repeat_n("?", event_types.len())
+                .collect::<Vec<_>>()
+                .join(", ");
+            sql.push_str(&format!(" AND event_type IN ({placeholders})"));
+            values.extend(event_types.iter().cloned().map(SqlValue::Text));
+        }
+        sql.push_str(" ORDER BY time_seconds, time_nanoseconds, id LIMIT ?");
+        values.push(SqlValue::Integer((MAX_HISTORY_QUERY_RESULTS + 1) as i64));
+
+        let connection = self.connection()?;
+        let mut statement = connection
+            .prepare(&sql)
+            .map_err(|error| storage_error("prepare event history query", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values.iter()), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|error| storage_error("query event history", error))?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            if events.len() == MAX_HISTORY_QUERY_RESULTS {
+                return Err(Error::InvalidInput(format!(
+                    "event history query exceeds the {MAX_HISTORY_QUERY_RESULTS} row limit"
+                )));
+            }
+            let (event_type, seconds, nanoseconds, encoded) =
+                row.map_err(|error| storage_error("read event history row", error))?;
+            let event = decode_event(&encoded)?;
+            if event.event_type != event_type {
+                return Err(Error::Storage(
+                    "event JSON disagrees with its event-type key".into(),
+                ));
+            }
+            if timestamp_parts(&event.time_fired) != (seconds, nanoseconds) {
+                return Err(Error::Storage(
+                    "event JSON timestamp disagrees with its index key".into(),
+                ));
+            }
+            events.push(event);
+        }
+        Ok(events)
+    }
+
+    fn purge_before(&self, cutoff: DateTime<Utc>) -> Result<PurgeResult> {
+        let (seconds, nanoseconds) = timestamp_parts(&cutoff);
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| storage_error("begin retention purge", error))?;
+        let states_deleted = transaction
+            .execute(
+                "DELETE FROM history WHERE time_seconds < ?1 \
+                 OR (time_seconds = ?1 AND time_nanoseconds < ?2)",
+                params![seconds, nanoseconds],
+            )
+            .map_err(|error| storage_error("purge historical states", error))?;
+        let events_deleted = transaction
+            .execute(
+                "DELETE FROM events WHERE time_seconds < ?1 \
+                 OR (time_seconds = ?1 AND time_nanoseconds < ?2)",
+                params![seconds, nanoseconds],
+            )
+            .map_err(|error| storage_error("purge historical events", error))?;
+        transaction
+            .commit()
+            .map_err(|error| storage_error("commit retention purge", error))?;
+        Ok(PurgeResult {
+            states_deleted,
+            events_deleted,
+        })
+    }
+
+    fn repack(&self) -> Result<()> {
+        let connection = self.connection()?;
+        if self.database_path.is_some() {
+            let (busy, _, _): (i64, i64, i64) = connection
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(|error| storage_error("checkpoint WAL before repack", error))?;
+            if busy != 0 {
+                return Err(Error::Storage(
+                    "SQLite WAL checkpoint was busy during repack".into(),
+                ));
+            }
+        }
+        connection
+            .execute_batch("PRAGMA optimize; VACUUM; PRAGMA optimize;")
+            .map_err(|error| storage_error("repack SQLite database", error))?;
+        connection
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(|error| storage_error("restore SQLite full durability", error))?;
+        if let Some(path) = &self.database_path {
+            protect_database_files(path)?;
+        }
+        Ok(())
+    }
+}
+
+fn append_history_entity_filters(
+    sql: &mut String,
+    alias: &str,
+    query: &HistoryQuery,
+    values: &mut Vec<SqlValue>,
+) {
+    if let Some(entity_ids) = &query.entity_ids {
+        let placeholders = std::iter::repeat_n("?", entity_ids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" AND {alias}.entity_id IN ({placeholders})"));
+        values.extend(entity_ids.iter().cloned().map(SqlValue::Text));
+    }
+    if !query.exclude_entities.is_empty() {
+        let placeholders = std::iter::repeat_n("?", query.exclude_entities.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        sql.push_str(&format!(" AND {alias}.entity_id NOT IN ({placeholders})"));
+        values.extend(query.exclude_entities.iter().cloned().map(SqlValue::Text));
+    }
+}
+
+fn is_significant_history_state(state: &State) -> bool {
+    const SIGNIFICANT_DOMAINS: &[&str] = &[
+        "climate",
+        "device_tracker",
+        "humidifier",
+        "thermostat",
+        "water_heater",
+    ];
+    state.last_changed == state.last_updated
+        || SIGNIFICANT_DOMAINS.contains(
+            &state
+                .entity_id
+                .split_once('.')
+                .map_or("", |(domain, _)| domain),
+        )
 }
 
 fn initialize_schema(connection: &mut Connection) -> Result<()> {
@@ -290,7 +678,11 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
                                      CHECK (time_nanoseconds BETWEEN 0 AND 999999999),
                                  event_json TEXT NOT NULL
                              );
-                             PRAGMA user_version = 1;",
+                             CREATE TABLE metadata (
+                                 key TEXT PRIMARY KEY NOT NULL,
+                                 value_json TEXT NOT NULL
+                             );
+                             PRAGMA user_version = 2;",
                         )
                         .map_err(|error| storage_error("create SQLite schema", error))?;
                 }
@@ -305,6 +697,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
                 .commit()
                 .map_err(|error| storage_error("commit SQLite schema migration", error))?;
         }
+        1 => migrate_v1_to_v2(connection)?,
         SCHEMA_VERSION => {}
         other => {
             return Err(Error::Storage(format!(
@@ -313,15 +706,58 @@ fn initialize_schema(connection: &mut Connection) -> Result<()> {
         }
     }
 
-    validate_schema(connection)
+    validate_schema_v2(connection)
+}
+
+fn migrate_v1_to_v2(connection: &mut Connection) -> Result<()> {
+    migrate_v1_to_v2_with(connection, || Ok(()))
+}
+
+fn migrate_v1_to_v2_with(
+    connection: &mut Connection,
+    after_metadata_table: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| storage_error("begin SQLite v1-to-v2 migration", error))?;
+    let locked_version: i64 = transaction
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|error| storage_error("read locked SQLite schema version", error))?;
+    match locked_version {
+        1 => {
+            validate_schema_v1(&transaction)?;
+            transaction
+                .execute_batch(
+                    "CREATE TABLE metadata (
+                         key TEXT PRIMARY KEY NOT NULL,
+                         value_json TEXT NOT NULL
+                     );",
+                )
+                .map_err(|error| storage_error("create SQLite metadata table", error))?;
+            after_metadata_table()?;
+            transaction
+                .pragma_update(None, "user_version", SCHEMA_VERSION)
+                .map_err(|error| storage_error("set SQLite schema version", error))?;
+        }
+        SCHEMA_VERSION => {}
+        other => {
+            return Err(Error::Storage(format!(
+                "unsupported SQLite schema version {other}; expected 1 or {SCHEMA_VERSION}"
+            )));
+        }
+    }
+    transaction
+        .commit()
+        .map_err(|error| storage_error("commit SQLite v1-to-v2 migration", error))
 }
 
 fn check_schema_compatibility(connection: &Connection) -> Result<()> {
     match schema_version(connection)? {
         0 => ensure_unversioned_database_is_empty(connection),
-        SCHEMA_VERSION => validate_schema(connection),
+        1 => validate_schema_v1(connection),
+        SCHEMA_VERSION => validate_schema_v2(connection),
         other => Err(Error::Storage(format!(
-            "unsupported SQLite schema version {other}; expected {SCHEMA_VERSION}"
+            "unsupported SQLite schema version {other}; expected 0, 1, or {SCHEMA_VERSION}"
         ))),
     }
 }
@@ -350,7 +786,15 @@ fn ensure_unversioned_database_is_empty(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn validate_schema(connection: &Connection) -> Result<()> {
+fn validate_schema_v1(connection: &Connection) -> Result<()> {
+    validate_schema_version(connection, 1)
+}
+
+fn validate_schema_v2(connection: &Connection) -> Result<()> {
+    validate_schema_version(connection, 2)
+}
+
+fn validate_schema_version(connection: &Connection, version: i64) -> Result<()> {
     let mut statement = connection
         .prepare(
             "SELECT type, name FROM sqlite_master \
@@ -368,12 +812,15 @@ fn validate_schema(connection: &Connection) -> Result<()> {
     for row in rows {
         objects.push(row.map_err(|error| storage_error("read SQLite schema object", error))?);
     }
-    let expected = vec![
+    let mut expected = vec![
         ("index".to_owned(), "history_entity_time_idx".to_owned()),
         ("table".to_owned(), "events".to_owned()),
         ("table".to_owned(), "history".to_owned()),
-        ("table".to_owned(), "states".to_owned()),
     ];
+    if version == 2 {
+        expected.push(("table".to_owned(), "metadata".to_owned()));
+    }
+    expected.push(("table".to_owned(), "states".to_owned()));
     if objects != expected {
         return Err(Error::Storage(
             "SQLite schema does not match the supported storage schema".to_owned(),
@@ -407,6 +854,13 @@ fn validate_schema(connection: &Connection) -> Result<()> {
             ("event_json", "TEXT"),
         ],
     )?;
+    if version == 2 {
+        validate_table_columns(
+            connection,
+            "metadata",
+            &[("key", "TEXT"), ("value_json", "TEXT")],
+        )?;
+    }
     validate_history_index(connection)
 }
 
@@ -419,6 +873,7 @@ fn validate_table_columns(
         "states" => "PRAGMA table_info(states)",
         "history" => "PRAGMA table_info(history)",
         "events" => "PRAGMA table_info(events)",
+        "metadata" => "PRAGMA table_info(metadata)",
         _ => {
             return Err(Error::Storage(
                 "internal request for an unknown SQLite table".to_owned(),
@@ -446,15 +901,15 @@ fn validate_table_columns(
     let expected = expected
         .iter()
         .map(|(name, kind)| {
-            let primary = if table == "states" {
-                *name == "entity_id"
-            } else {
-                *name == "id"
+            let primary = match table {
+                "states" => *name == "entity_id",
+                "metadata" => *name == "key",
+                _ => *name == "id",
             };
             (
                 (*name).to_owned(),
                 (*kind).to_owned(),
-                table == "states" || *name != "id",
+                table == "states" || table == "metadata" || *name != "id",
                 None,
                 i64::from(primary),
             )
@@ -465,7 +920,7 @@ fn validate_table_columns(
             "SQLite table {table} has an unsupported column layout"
         )));
     }
-    if table != "states" {
+    if table == "history" || table == "events" {
         let definition: String = connection
             .query_row(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
@@ -547,6 +1002,15 @@ fn decode_state(encoded: &str, record_kind: &str) -> Result<State> {
     Ok(state)
 }
 
+fn decode_event(encoded: &str) -> Result<Event> {
+    let event: Event = serde_json::from_str(encoded)
+        .map_err(|error| Error::Storage(format!("corrupt event JSON: {error}")))?;
+    if event.event_type.is_empty() || event.event_type.chars().count() > 255 {
+        return Err(Error::Storage("invalid persisted event type".into()));
+    }
+    Ok(event)
+}
+
 fn validate_state(state: &State) -> Result<()> {
     validate_entity_id(&state.entity_id)?;
     if state.state.chars().count() > 255 {
@@ -584,4 +1048,68 @@ fn timestamp_parts(timestamp: &DateTime<Utc>) -> (i64, i64) {
 
 fn storage_error(action: &str, error: impl std::fmt::Display) -> Error {
     Error::Storage(format!("{action}: {error}"))
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn v1_migration_failure_rolls_back_schema_version_and_all_rows() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE states (
+                     entity_id TEXT PRIMARY KEY NOT NULL,
+                     state_json TEXT NOT NULL
+                 );
+                 CREATE TABLE history (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     entity_id TEXT NOT NULL,
+                     time_seconds INTEGER NOT NULL,
+                     time_nanoseconds INTEGER NOT NULL
+                         CHECK (time_nanoseconds BETWEEN 0 AND 999999999),
+                     state_json TEXT NOT NULL
+                 );
+                 CREATE INDEX history_entity_time_idx
+                     ON history(entity_id, time_seconds, time_nanoseconds, id);
+                 CREATE TABLE events (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     event_type TEXT NOT NULL,
+                     time_seconds INTEGER NOT NULL,
+                     time_nanoseconds INTEGER NOT NULL
+                         CHECK (time_nanoseconds BETWEEN 0 AND 999999999),
+                     event_json TEXT NOT NULL
+                 );
+                 INSERT INTO states VALUES ('sensor.temperature', '{}');
+                 INSERT INTO history(entity_id, time_seconds, time_nanoseconds, state_json)
+                     VALUES ('sensor.temperature', 10, 20, '{}');
+                 INSERT INTO events(event_type, time_seconds, time_nanoseconds, event_json)
+                     VALUES ('state_changed', 10, 20, '{}');
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+
+        let result = migrate_v1_to_v2_with(&mut connection, || {
+            Err(Error::Storage("injected migration failure".to_owned()))
+        });
+        assert!(matches!(result, Err(Error::Storage(_))));
+        assert_eq!(schema_version(&connection).unwrap(), 1);
+        let metadata_tables: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'metadata'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(metadata_tables, 0);
+        for table in ["states", "history", "events"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 1, "v1 {table} rows must survive rollback");
+        }
+    }
 }

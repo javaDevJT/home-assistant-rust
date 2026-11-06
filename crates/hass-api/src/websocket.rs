@@ -1,6 +1,13 @@
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    pin::Pin,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use axum::{
+    Extension,
     extract::{
         State,
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -8,11 +15,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use hass_core::{
-    Context, Error as CoreError, Event, ServiceCall, ServiceResult, State as HassState,
-};
+use hass_core::{Error as CoreError, Event, ServiceCall, ServiceResult, State as HassState};
 use serde_json::{Map, Value, json};
-use subtle::ConstantTimeEq;
 use tokio::{
     sync::{OwnedSemaphorePermit, broadcast},
     time::timeout,
@@ -29,9 +33,10 @@ const MAX_PRE_SUBSCRIPTION_DRAIN: usize = 4096;
 
 pub(crate) async fn upgrade(
     State(state): State<Arc<AppState>>,
+    Extension(origin): Extension<crate::network::ClientOrigin>,
     websocket: WebSocketUpgrade,
 ) -> Response {
-    if state.api.access_token.is_empty() {
+    if state.api.access_token.is_empty() && state.features.auth.is_none() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(json!({ "message": "API access token is not configured" })),
@@ -53,11 +58,16 @@ pub(crate) async fn upgrade(
     websocket
         .max_message_size(MAX_WEBSOCKET_MESSAGE_BYTES)
         .max_frame_size(MAX_WEBSOCKET_FRAME_BYTES)
-        .on_upgrade(move |socket| handle_socket(socket, state, permit))
+        .on_upgrade(move |socket| handle_socket(socket, state, permit, origin))
         .into_response()
 }
 
-async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, _permit: OwnedSemaphorePermit) {
+async fn handle_socket(
+    mut socket: WebSocket,
+    state: Arc<AppState>,
+    _permit: OwnedSemaphorePermit,
+    origin: crate::network::ClientOrigin,
+) {
     let shutdown_wait: Pin<Box<dyn Future<Output = ()> + Send>> = match state.shutdown.clone() {
         Some(mut receiver) => Box::pin(async move {
             loop {
@@ -73,9 +83,12 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, _permit: Own
     };
     tokio::pin!(shutdown_wait);
 
-    if send_json(&mut socket, &json!({ "type": "auth_required" }))
-        .await
-        .is_err()
+    if send_json(
+        &mut socket,
+        &json!({ "type": "auth_required", "ha_version": hass_core::VERSION }),
+    )
+    .await
+    .is_err()
     {
         return;
     }
@@ -95,7 +108,13 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, _permit: Own
         }
     };
 
-    if !token_matches(&state.api.access_token, &token) {
+    let mut identity = crate::extensions::authenticate_token(&state, &token)
+        .await
+        .ok();
+    if identity
+        .as_ref()
+        .is_none_or(|identity| identity.local_only && !origin.is_local)
+    {
         let _ = send_json(
             &mut socket,
             &json!({
@@ -108,22 +127,52 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, _permit: Own
         return;
     }
 
+    let mut identity = identity.take().expect("authentication was checked");
     // The receiver exists before auth_ok, so any event emitted before the first
     // subscribe command can be discarded deliberately before acknowledging that
     // subscription. Events emitted after that point are retained for delivery.
     let mut event_receiver = state.api.runtime.subscribe();
-    if send_json(&mut socket, &json!({ "type": "auth_ok" }))
-        .await
-        .is_err()
+    if send_json(
+        &mut socket,
+        &json!({ "type": "auth_ok", "ha_version": hass_core::VERSION }),
+    )
+    .await
+    .is_err()
     {
         return;
     }
 
     let mut subscriptions = HashMap::<u64, Option<String>>::new();
     let mut last_command_id: Option<u64> = None;
+    let mut native = crate::subscriptions::NativeSubscriptions::new(
+        state.api.runtime.clone(),
+        state.features.config_entries.clone(),
+        state.features.templates.clone(),
+    );
+    native.set_state_read_access(identity.can_read_states);
+    let native = Arc::new(Mutex::new(native));
+    let mut stream_tick = tokio::time::interval(Duration::from_millis(100));
+    stream_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    loop {
+    'connection: loop {
         tokio::select! {
+            _ = stream_tick.tick() => {
+                let native = native.clone();
+                let frames = run_blocking(move || {
+                    let mut native=native.lock().map_err(|_|CoreError::Service("Subscription lock failed".into()))?;
+                    if native.is_empty() { Ok(Vec::new()) } else { native.drain_events() }
+                }).await;
+                let frames=match frames {Ok(frames)=>frames,Err(_)=>{close_socket(&mut socket).await;break;}};
+                if !frames.is_empty() && identity.user_id.is_some() {
+                    match crate::extensions::authenticate_token(&state,&token).await {
+                        Ok(current) if crate::extensions::same_authority(&identity,&current) && (!current.local_only || origin.is_local) => {},
+                        _ => {close_socket(&mut socket).await;break;}
+                    }
+                }
+                for frame in frames {
+                    if send_json(&mut socket,&frame).await.is_err() {break 'connection;}
+                }
+            }
             _ = &mut shutdown_wait => {
                 close_socket(&mut socket).await;
                 break;
@@ -173,14 +222,50 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>, _permit: Own
                             }
                             continue;
                         };
+                        if identity.user_id.is_some() {
+                            match crate::extensions::authenticate_token(&state, &token).await {
+                                Ok(current) if (!current.local_only || origin.is_local) && crate::extensions::same_authority(&identity,&current) => identity = current,
+                                Ok(_) => {
+                                    let _ = send_json(&mut socket, &json!({"type":"auth_invalid","message":"Invalid access token"})).await;
+                                    close_socket(&mut socket).await;
+                                    break;
+                                }
+                                Err(_) => {
+                                    let _ = send_json(&mut socket, &json!({"type":"auth_invalid","message":"Access token revoked or expired"})).await;
+                                    close_socket(&mut socket).await;
+                                    break;
+                                }
+                            }
+                        }
+                        if !crate::extensions::websocket_allowed(&identity,command_type,object) {
+                            if send_error(&mut socket,id,WsError::new("unauthorized","Unauthorized")).await.is_err() {break;}
+                            continue;
+                        }
+                        if crate::subscriptions::is_subscription_command(command_type) {
+                            let manager=native.clone();let command=value.clone();
+                            match run_blocking(move || manager.lock().map_err(|_|CoreError::Service("Subscription lock failed".into()))?.handle_command(&command)).await {
+                                Ok(Some(response)) => {
+                                    if send_success(&mut socket,id,response.result).await.is_err() {break;}
+                                    for frame in response.events {
+                                        if send_json(&mut socket,&frame).await.is_err() {break 'connection;}
+                                    }
+                                    continue;
+                                },
+                                Ok(None)=>{},
+                                Err(error)=>{
+                                    if send_error(&mut socket,id,error).await.is_err() {break;}
+                                    continue;
+                                }
+                            }
+                        }
                         if !handle_command(
                             &mut socket,
                             &state,
                             &mut event_receiver,
                             &mut subscriptions,
-                            id,
-                            command_type,
+                            (id, command_type),
                             object,
+                            &identity,
                         )
                         .await
                         {
@@ -273,15 +358,33 @@ async fn handle_command(
     state: &AppState,
     event_receiver: &mut broadcast::Receiver<Event>,
     subscriptions: &mut HashMap<u64, Option<String>>,
-    id: u64,
-    command_type: &str,
+    command: (u64, &str),
     message: &serde_json::Map<String, Value>,
+    identity: &crate::extensions::Identity,
 ) -> bool {
+    let (id, command_type) = command;
+    if (crate::extensions::command_requires_admin(command_type) && !identity.is_admin)
+        || (identity.read_only && matches!(command_type, "call_service" | "fire_event"))
+    {
+        return send_error(socket, id, WsError::new("unauthorized", "Unauthorized"))
+            .await
+            .is_ok();
+    }
+    if let Some(result) =
+        crate::extensions::handle_ws(state, identity, &Value::Object(message.clone())).await
+    {
+        return send_core_result(socket, id, result.map_err(map_core_error))
+            .await
+            .is_ok();
+    }
     match command_type {
         "ping" => send_json(socket, &json!({ "id": id, "type": "pong" }))
             .await
             .is_ok(),
         "get_states" => {
+            if !identity.can_read_states {
+                return send_success(socket, id, json!([])).await.is_ok();
+            }
             let runtime = state.api.runtime.clone();
             let result = run_blocking(move || Ok(runtime.states())).await;
             send_core_result(
@@ -407,8 +510,9 @@ async fn handle_command(
             };
             let runtime = state.api.runtime.clone();
             let event_type = event_type.to_owned();
+            let identity_context = identity.context();
             let result =
-                run_blocking(move || runtime.fire_event(&event_type, data, Context::default()))
+                run_blocking(move || runtime.fire_event(&event_type, data, identity_context))
                     .await
                     .map(|event| json!({ "context": event.context }));
             send_core_result(socket, id, result).await.is_ok()
@@ -463,7 +567,7 @@ async fn handle_command(
                 service: service.to_owned(),
                 data,
                 target,
-                context: Context::default(),
+                context: identity.context(),
             };
             let runtime = state.api.runtime.clone();
             let check_runtime = runtime.clone();
@@ -608,13 +712,6 @@ async fn send_message(socket: &mut WebSocket, message: Message) -> Result<(), ()
 
 async fn close_socket(socket: &mut WebSocket) {
     let _ = send_message(socket, Message::Close(None)).await;
-}
-
-fn token_matches(expected: &str, candidate: &str) -> bool {
-    if expected.is_empty() {
-        return false;
-    }
-    expected.as_bytes().ct_eq(candidate.as_bytes()).unwrap_u8() == 1
 }
 
 async fn run_blocking<T, F>(operation: F) -> Result<T, WsError>

@@ -7,6 +7,14 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+ipnet.workspace = true
+qrcode.workspace = true
+url.workspace = true
+uuid.workspace = true
+hass-auth.workspace = true
+hass-registry.workspace = true
+hass-template.workspace = true
+hass-config.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
@@ -17,6 +25,8 @@ subtle.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
+totp-rs = "6"
+reqwest.workspace = true
 http-body-util.workspace = true
 tokio-tungstenite.workspace = true
 tower.workspace = true

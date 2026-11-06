@@ -68,6 +68,7 @@ impl Server {
     }
 
     async fn wait_state(&self, entity_id: &str, expected: &str) {
+        let mut last = Value::Null;
         for _ in 0..100 {
             let state: Value = self
                 .get(&format!("/api/states/{entity_id}"))
@@ -78,19 +79,31 @@ impl Server {
             if state["state"] == expected {
                 return;
             }
+            last = state;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("{entity_id} did not reach {expected}");
+        panic!("{entity_id} did not reach {expected}; last response: {last}");
     }
 }
 
 fn write_config(dir: &Path) -> std::path::PathBuf {
     let config = dir.join("configuration.yaml");
     std::fs::write(
+        dir.join("templates.yaml"),
+        r#"
+- sensor:
+    - name: Doubled
+      unique_id: process_doubled_count
+      state: "{{ states('counter.presses') | int(0) * 2 }}"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
         &config,
         r#"
 recorder:
   db_path: state.sqlite
+template: !include templates.yaml
 input_boolean:
   demo:
     initial: false
@@ -128,6 +141,7 @@ async fn real_process_auth_services_automation_history_and_crash_restore() {
         .unwrap();
     assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
     server.wait_state("input_boolean.demo", "off").await;
+    server.wait_state("sensor.doubled", "0").await;
     let created = server
         .post(
             "/api/states/sensor.example",
@@ -162,6 +176,7 @@ async fn real_process_auth_services_automation_history_and_crash_restore() {
         StatusCode::OK
     );
     server.wait_state("counter.presses", "1").await;
+    server.wait_state("sensor.doubled", "2").await;
     server.wait_state("input_boolean.demo", "off").await;
     let history_response = server
         .get("/api/history/period?filter_entity_id=input_boolean.demo")
@@ -179,6 +194,7 @@ async fn real_process_auth_services_automation_history_and_crash_restore() {
     server.child.wait().await.unwrap();
     let mut restarted = Server::start(&config).await;
     restarted.wait_state("counter.presses", "1").await;
+    restarted.wait_state("sensor.doubled", "2").await;
     restarted.wait_state("input_boolean.demo", "off").await;
     restarted.wait_state("sensor.example", "43").await;
     restarted.child.kill().await.unwrap();
@@ -209,7 +225,7 @@ fn check_validates_without_creating_data_or_requiring_a_token() {
 fn unsupported_integration_is_a_validation_error() {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("configuration.yaml");
-    std::fs::write(&config, "mqtt: {}\n").unwrap();
+    std::fs::write(&config, "not_a_real_integration: {}\n").unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_hass"))
         .arg("--config")
         .arg(&config)

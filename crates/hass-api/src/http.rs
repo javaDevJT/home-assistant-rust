@@ -4,7 +4,7 @@ use std::{
 };
 
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, Query, State},
     http::{Request, StatusCode, header},
@@ -12,35 +12,45 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration, Utc};
-use hass_core::{Context, Error as CoreError, ServiceCall, State as HassState};
+use hass_core::{Error as CoreError, ServiceCall, State as HassState};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
+#[cfg(test)]
 use subtle::ConstantTimeEq;
 
-use crate::AppState;
+use crate::{
+    AppState,
+    extensions::{Identity, authenticate_token},
+};
 
 #[derive(Debug)]
 pub(crate) struct ApiError {
-    status: StatusCode,
-    message: String,
+    pub(crate) status: StatusCode,
+    pub(crate) message: String,
 }
 
 impl ApiError {
-    fn invalid(message: impl Into<String>) -> Self {
+    pub(crate) fn forbidden() -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: "Forbidden".into(),
+        }
+    }
+    pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
         }
     }
 
-    fn internal() -> Self {
+    pub(crate) fn internal() -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "Internal server error".to_owned(),
         }
     }
 
-    fn not_found(message: impl Into<String>) -> Self {
+    pub(crate) fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
@@ -67,31 +77,65 @@ impl IntoResponse for ApiError {
 
 pub(crate) async fn authenticate(
     State(state): State<Arc<AppState>>,
-    request: Request<axum::body::Body>,
+    mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    if state.api.access_token.is_empty() {
+    if state.api.access_token.is_empty() && state.features.auth.is_none() {
         return ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "API access token is not configured".to_owned(),
+            message: "API access token is not configured".into(),
         }
         .into_response();
     }
-
-    let token = request
+    let bearer = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| {
             let (scheme, token) = value.split_once(' ')?;
-            scheme.eq_ignore_ascii_case("bearer").then_some(token)
+            scheme
+                .eq_ignore_ascii_case("bearer")
+                .then(|| token.to_owned())
         });
-
-    match token {
-        Some(token) if token_matches(&state.api.access_token, token) => next.run(request).await,
-        _ => (
+    let identity = match bearer {
+        Some(token) => authenticate_token(&state, &token).await,
+        None if request.headers().contains_key(header::AUTHORIZATION) => Err(
+            CoreError::InvalidInput("Invalid authorization header".into()),
+        ),
+        None => crate::extensions::authenticate_signed_request(&state, &mut request).await,
+    };
+    match identity {
+        Ok(identity) => {
+            if request.uri().path().starts_with("/api/history/") && !identity.can_read_states {
+                return ApiError::forbidden().into_response();
+            }
+            if identity.local_only
+                && !request
+                    .extensions()
+                    .get::<crate::network::ClientOrigin>()
+                    .is_some_and(|origin| origin.is_local)
+            {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"message":"Unauthorized"})),
+                )
+                    .into_response();
+            }
+            if identity.read_only
+                && !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS")
+            {
+                return (StatusCode::FORBIDDEN, Json(json!({"message":"Forbidden"})))
+                    .into_response();
+            }
+            request.extensions_mut().insert(identity);
+            next.run(request).await
+        }
+        Err(CoreError::Storage(_)) | Err(CoreError::Service(_)) => {
+            ApiError::internal().into_response()
+        }
+        Err(_) => (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "message": "Unauthorized" })),
+            Json(json!({"message":"Unauthorized"})),
         )
             .into_response(),
     }
@@ -105,13 +149,19 @@ pub(crate) async fn api_root() -> Json<Value> {
     Json(json!({ "message": "API running." }))
 }
 
-pub(crate) async fn get_config(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(state.api.config.clone())
+pub(crate) async fn get_config(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(crate::extensions::configuration(&state).await?))
 }
 
 pub(crate) async fn get_states(
     State(state): State<Arc<AppState>>,
+    Extension(identity): Extension<Identity>,
 ) -> Result<Json<Vec<HassState>>, ApiError> {
+    if !identity.can_read_states {
+        return Ok(Json(Vec::new()));
+    }
     let runtime = state.api.runtime.clone();
     let states = run_blocking(move || Ok(runtime.states())).await?;
     Ok(Json(states))
@@ -120,7 +170,11 @@ pub(crate) async fn get_states(
 pub(crate) async fn get_state(
     State(state): State<Arc<AppState>>,
     Path(entity_id): Path<String>,
+    Extension(identity): Extension<Identity>,
 ) -> Result<Json<HassState>, ApiError> {
+    if !identity.can_read_states {
+        return Err(ApiError::forbidden());
+    }
     let runtime = state.api.runtime.clone();
     let entity_state = run_blocking(move || {
         runtime
@@ -144,8 +198,12 @@ struct StateRequest {
 pub(crate) async fn set_state(
     State(state): State<Arc<AppState>>,
     Path(entity_id): Path<String>,
+    Extension(identity): Extension<Identity>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    if !identity.is_admin {
+        return Err(ApiError::forbidden());
+    }
     let request: StateRequest = parse_json(&body)?;
     let location = format!("/api/states/{entity_id}");
     let runtime = state.api.runtime.clone();
@@ -154,7 +212,7 @@ pub(crate) async fn set_state(
             &entity_id,
             &request.state,
             request.attributes,
-            Context::default(),
+            identity.context(),
             request.force_update,
         )
     })
@@ -176,10 +234,14 @@ pub(crate) async fn set_state(
 pub(crate) async fn delete_state(
     State(state): State<Arc<AppState>>,
     Path(entity_id): Path<String>,
+    Extension(identity): Extension<Identity>,
 ) -> Result<Json<Value>, ApiError> {
+    if !identity.is_admin {
+        return Err(ApiError::forbidden());
+    }
     let runtime = state.api.runtime.clone();
     let removed =
-        run_blocking(move || runtime.remove_state(&entity_id, Context::default())).await?;
+        run_blocking(move || runtime.remove_state(&entity_id, identity.context())).await?;
     if !removed {
         return Err(ApiError::not_found("Entity not found."));
     }
@@ -207,8 +269,12 @@ pub(crate) async fn call_service(
     State(state): State<Arc<AppState>>,
     Path((domain, service)): Path<(String, String)>,
     Query(query): Query<HashMap<String, String>>,
+    Extension(identity): Extension<Identity>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
+    if domain == "recorder" && !identity.is_admin {
+        return Err(ApiError::forbidden());
+    }
     if query.keys().any(|key| key != "return_response") {
         return Err(ApiError::invalid("Unsupported query parameter"));
     }
@@ -220,7 +286,7 @@ pub(crate) async fn call_service(
         service,
         data,
         target,
-        context: Context::default(),
+        context: identity.context(),
     };
     let runtime = state.api.runtime.clone();
     let check_runtime = runtime.clone();
@@ -289,13 +355,17 @@ pub(crate) async fn get_events() -> Response {
 pub(crate) async fn fire_event(
     State(state): State<Arc<AppState>>,
     Path(event_type): Path<String>,
+    Extension(identity): Extension<Identity>,
     body: Bytes,
 ) -> Result<Json<Value>, ApiError> {
+    if !identity.is_admin {
+        return Err(ApiError::forbidden());
+    }
     validate_event_type(&event_type)?;
     let data = parse_object(&body, true)?;
     let response_event_type = event_type.clone();
     let runtime = state.api.runtime.clone();
-    run_blocking(move || runtime.fire_event(&event_type, data, Context::default())).await?;
+    run_blocking(move || runtime.fire_event(&event_type, data, identity.context())).await?;
     Ok(Json(
         json!({ "message": format!("Event {response_event_type} fired.") }),
     ))
@@ -304,7 +374,7 @@ pub(crate) async fn fire_event(
 pub(crate) async fn get_history(
     State(state): State<Arc<AppState>>,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<Vec<HassState>>>, ApiError> {
+) -> Result<Json<Vec<Vec<Value>>>, ApiError> {
     history_response(state, None, query).await
 }
 
@@ -312,7 +382,7 @@ pub(crate) async fn get_history_from(
     State(state): State<Arc<AppState>>,
     Path(timestamp): Path<String>,
     Query(query): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<Vec<HassState>>>, ApiError> {
+) -> Result<Json<Vec<Vec<Value>>>, ApiError> {
     history_response(state, Some(timestamp), query).await
 }
 
@@ -320,21 +390,31 @@ async fn history_response(
     state: Arc<AppState>,
     path_start: Option<String>,
     query: HashMap<String, String>,
-) -> Result<Json<Vec<Vec<HassState>>>, ApiError> {
-    if query
-        .keys()
-        .any(|key| key != "filter_entity_id" && key != "end_time")
-    {
+) -> Result<Json<Vec<Vec<Value>>>, ApiError> {
+    if query.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "filter_entity_id"
+                | "end_time"
+                | "skip_initial_state"
+                | "significant_changes_only"
+                | "minimal_response"
+                | "no_attributes"
+        )
+    }) {
         return Err(ApiError::invalid("Unsupported history query parameter"));
     }
 
-    let end = match query.get("end_time") {
-        Some(value) => parse_timestamp(value)?,
-        None => Utc::now(),
-    };
+    let now = Utc::now();
     let start = match path_start {
         Some(value) => parse_timestamp(&value)?,
-        None => end - Duration::days(1),
+        None => now - Duration::days(1),
+    };
+    let end = match query.get("end_time") {
+        Some(value) => parse_timestamp(value)?,
+        None => start
+            .checked_add_signed(Duration::days(1))
+            .ok_or_else(|| ApiError::invalid("History time is out of range"))?,
     };
     if start > end {
         return Err(ApiError::invalid(
@@ -345,25 +425,53 @@ async fn history_response(
     let value = query
         .get("filter_entity_id")
         .ok_or_else(|| ApiError::invalid("filter_entity_id is required"))?;
+    if value
+        .split(',')
+        .any(|entity_id| entity_id.trim().is_empty())
+    {
+        return Err(ApiError::invalid(
+            "filter_entity_id contains an empty entity",
+        ));
+    }
     let entity_ids = value
         .split(',')
         .map(str::trim)
         .filter(|id| !id.is_empty())
-        .map(str::to_owned)
+        .map(str::to_ascii_lowercase)
         .collect::<BTreeSet<_>>();
     if entity_ids.is_empty() {
         return Err(ApiError::invalid("filter_entity_id must not be empty"));
     }
 
     let runtime = state.api.runtime.clone();
-    let history = run_blocking(move || {
-        entity_ids
+    let minimal = query.contains_key("minimal_response");
+    let no_attributes = query.contains_key("no_attributes");
+    let history_query = hass_core::HistoryQuery {
+        entity_ids: Some(entity_ids.into_iter().collect()),
+        start,
+        end,
+        include_start_time_state: !query.contains_key("skip_initial_state"),
+        significant_changes_only: query
+            .get("significant_changes_only")
+            .is_none_or(|value| value != "0"),
+        minimal_response: minimal,
+        no_attributes,
+        exclude_entities: Vec::new(),
+    };
+    history_query.validate()?;
+    if start > now {
+        return Ok(Json(Vec::new()));
+    }
+    let history = run_blocking(move || runtime.history_query(&history_query)).await?;
+    Ok(Json(
+        history
             .into_iter()
-            .map(|entity_id| runtime.history(&entity_id, start, end))
-            .collect::<hass_core::Result<Vec<_>>>()
-    })
-    .await?;
-    Ok(Json(history))
+            .filter(|series| !series.states.is_empty())
+            .map(|series| {
+                crate::history::serialize_series(&series.states, minimal, no_attributes, false)
+            })
+            .collect(),
+    ))
 }
 
 fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, ApiError> {
@@ -405,6 +513,7 @@ where
         .map_err(ApiError::from)
 }
 
+#[cfg(test)]
 fn token_matches(expected: &str, candidate: &str) -> bool {
     if expected.is_empty() {
         return false;

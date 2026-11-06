@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass"]
+members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +11,7 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 anyhow = "1"
+argon2 = "0.5"
 axum = { version = "0.8", features = ["ws", "json"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
@@ -20,12 +21,28 @@ hass-core = { path = "crates/hass-core" }
 hass-storage = { path = "crates/hass-storage" }
 hass-automation = { path = "crates/hass-automation" }
 hass-api = { path = "crates/hass-api" }
+hass-registry = { path = "crates/hass-registry" }
+hass-auth = { path = "crates/hass-auth" }
+hass-template = { path = "crates/hass-template" }
+hass-script = { path = "crates/hass-script" }
+hass-mqtt = { path = "crates/hass-mqtt" }
+hass-native = { path = "crates/hass-native" }
+hass-config = { path = "crates/hass-config" }
+hass-rest = { path = "crates/hass-rest" }
+hass-template-entities = { path = "crates/hass-template-entities" }
 http-body-util = "0.1"
+ipnet = "2"
+jsonwebtoken = "9"
+minijinja = { version = "2", features = ["fuel", "json", "builtins"] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rumqttc = { version = "0.25", default-features = false, features = ["use-rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+serde_path_to_error = "0.1"
+sha2 = "0.10"
 subtle = "2"
 tempfile = "3"
 thiserror = "2"
@@ -35,6 +52,7 @@ tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
 
 [profile.release]
 lto = "thin"

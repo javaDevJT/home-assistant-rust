@@ -10,6 +10,9 @@ http:
 
 recorder:
   db_path: data/hass.sqlite
+  purge_keep_days: 10
+  auto_purge: true
+  auto_repack: true
 
 input_boolean:
   demo:
@@ -41,6 +44,59 @@ counter:
     name: Press count
     initial: 0
     step: 1
+
+timer:
+  demo:
+    name: Demo countdown
+    duration: "00:00:05"
+    restore: true
+
+input_button:
+  demo:
+    name: Demo button
+
+input_datetime:
+  reminder:
+    name: Reminder
+    has_date: true
+    has_time: true
+    initial: "2026-11-05 12:00:00"
+
+schedule:
+  weekday:
+    name: Monday work hours
+    monday:
+      - from: "09:00"
+        to: "17:00"
+
+script:
+  demo_sequence:
+    alias: Delayed demo toggle
+    mode: restart
+    sequence:
+      - action: counter.increment
+        target:
+          entity_id: counter.presses
+      - delay: "00:00:01"
+      - action: input_boolean.toggle
+        target:
+          entity_id: input_boolean.demo
+
+scene:
+  - name: Demo On
+    id: demo_on
+    entities:
+      input_boolean.demo: "on"
+
+template:
+  - sensor:
+      - name: Double press count
+        unique_id: demo_double_press_count
+        state: "{{ states('counter.presses') | int(0) * 2 }}"
+    binary_sensor:
+      - name: Demo enabled
+        unique_id: demo_enabled
+        state: "{{ is_state('input_boolean.demo', 'on') }}"
 
 automation:
   - id: demo_toggle

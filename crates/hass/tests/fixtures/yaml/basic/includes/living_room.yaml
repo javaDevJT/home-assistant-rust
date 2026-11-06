@@ -1,0 +1,2 @@
+token: !secret fixture_token
+details: !include nested/details.yaml
