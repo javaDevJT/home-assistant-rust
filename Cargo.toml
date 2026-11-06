@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker"]
+members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker", "crates/hass-image-upload"]
 
 [workspace.package]
 version = "0.1.0"
@@ -12,7 +12,7 @@ rust-version = "1.99"
 [workspace.dependencies]
 anyhow = "1"
 argon2 = "0.5"
-axum = { version = "0.8", features = ["ws", "json"] }
+axum = { version = "0.8", features = ["ws", "json", "multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
@@ -35,6 +35,8 @@ hass-notifications = { path = "crates/hass-notifications" }
 hass-zone = { path = "crates/hass-zone" }
 hass-person = { path = "crates/hass-person" }
 hass-device-tracker = { path = "crates/hass-device-tracker" }
+hass-image-upload = { path = "crates/hass-image-upload" }
+image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png"] }
 http-body-util = "0.1"
 ipnet = "2"
 jsonwebtoken = "9"
@@ -42,7 +44,8 @@ minijinja = { version = "2", features = ["fuel", "json", "builtins"] }
 md-5 = "=0.10.6"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+regex = "1"
 rumqttc = { version = "0.25", default-features = false, features = ["use-rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -55,6 +58,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.28"
 tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "=0.6.11", features = ["fs"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }

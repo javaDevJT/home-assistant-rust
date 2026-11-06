@@ -152,6 +152,82 @@ automation:
 }
 
 #[tokio::test]
+async fn real_process_image_upload_and_public_asset_survive_hard_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = write_config(directory.path());
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        32,
+        16,
+        image::Rgb([10, 100, 200]),
+    ))
+    .write_to(&mut encoded, image::ImageFormat::Png)
+    .unwrap();
+    let original = encoded.into_inner();
+    let mut server = Server::start(&config).await;
+    let part = reqwest::multipart::Part::bytes(original.clone())
+        .file_name("process.png")
+        .mime_str("image/png")
+        .unwrap();
+    let uploaded = server
+        .client
+        .post(format!("{}/api/image/upload", server.url))
+        .bearer_auth(TOKEN)
+        .multipart(reqwest::multipart::Form::new().part("file", part))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(uploaded.status(), StatusCode::OK);
+    let metadata: Value = uploaded.json().await.unwrap();
+    let id = metadata["id"].as_str().unwrap();
+    let path = format!("/api/image/serve/{id}/original");
+    let response = server
+        .client
+        .get(format!("{}{path}", server.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        original.as_slice()
+    );
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+    let mut restored = Server::start(&config).await;
+    let response = restored
+        .client
+        .get(format!("{}{path}", restored.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.bytes().await.unwrap().as_ref(),
+        original.as_slice()
+    );
+    let thumb = restored
+        .client
+        .get(format!("{}/api/image/serve/{id}/512x512", restored.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(thumb.status(), StatusCode::OK);
+    let decoded = image::load_from_memory(&thumb.bytes().await.unwrap()).unwrap();
+    assert_eq!((decoded.width(), decoded.height()), (32, 16));
+    assert!(
+        directory
+            .path()
+            .join("image")
+            .join(id)
+            .join("original")
+            .is_file()
+    );
+    restored.child.kill().await.unwrap();
+    restored.child.wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn real_process_tracker_reports_drive_person_and_zone_occupancy() {
     let dir = tempfile::tempdir().unwrap();
     let config = write_config(dir.path());

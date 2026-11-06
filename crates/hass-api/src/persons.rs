@@ -5,6 +5,7 @@ use hass_auth::AuthManager;
 use hass_core::{Error, Result};
 use hass_person::{FieldUpdate, PersonCreate, PersonManager, PersonUpdate};
 use serde_json::{Map, Value, json};
+use std::sync::OnceLock;
 
 pub(crate) async fn handle(
     state: &AppState,
@@ -18,8 +19,9 @@ pub(crate) async fn handle(
         .ok_or_else(|| Error::NotFound("Person integration is not configured".into()))?;
     let auth = state.features.auth.clone();
     let user_id = identity.user_id.clone();
+    let images = state.features.images.clone();
     let command = command.clone();
-    tokio::task::spawn_blocking(move || handle_sync(manager, auth, user_id, &command))
+    tokio::task::spawn_blocking(move || handle_sync(manager, auth, user_id, images, &command))
         .await
         .map_err(|_| Error::Service("Person task failed".into()))?
 }
@@ -28,6 +30,7 @@ fn handle_sync(
     manager: PersonManager,
     auth: Option<AuthManager>,
     user_id: Option<String>,
+    images: Option<hass_image_upload::ImageManager>,
     command: &Value,
 ) -> Result<Value> {
     let object = command
@@ -61,7 +64,7 @@ fn handle_sync(
             manager.delete(&id)?;
             Ok(Value::Null)
         }
-        "person/update_own_profile" => update_own_profile(&manager, auth, user_id, fields),
+        "person/update_own_profile" => update_own_profile(&manager, auth, user_id, images, fields),
         _ => Err(Error::InvalidInput("Unsupported person command".into())),
     }
 }
@@ -100,6 +103,7 @@ fn update_own_profile(
     manager: &PersonManager,
     auth: Option<AuthManager>,
     user_id: Option<String>,
+    images: Option<hass_image_upload::ImageManager>,
     mut fields: Map<String, Value>,
 ) -> Result<Value> {
     let id = user_id.ok_or_else(|| {
@@ -148,10 +152,8 @@ fn update_own_profile(
                 ));
             }
         }
-        if picture.is_some() {
-            return Err(Error::InvalidInput(
-                "Profile picture uploads are unavailable".into(),
-            ));
+        if let Some(picture) = picture {
+            validate_uploaded_picture(images.as_ref(), picture)?;
         }
     }
     if let Some(name) = &name
@@ -177,6 +179,28 @@ fn update_own_profile(
         None
     };
     Ok(json!({"user_name":user.name,"person":person}))
+}
+
+fn validate_uploaded_picture(
+    images: Option<&hass_image_upload::ImageManager>,
+    picture: &str,
+) -> Result<()> {
+    static PICTURE: OnceLock<regex::Regex> = OnceLock::new();
+    let pattern = PICTURE.get_or_init(|| {
+        regex::Regex::new(r"^/api/image/serve/(?P<image_id>[0-9a-f]{32})/(original|\d+x\d+)$")
+            .expect("constant person picture URL pattern")
+    });
+    let captures = pattern
+        .captures(picture)
+        .ok_or_else(|| Error::InvalidInput("Picture must reference an uploaded image".into()))?;
+    let images = images
+        .ok_or_else(|| Error::InvalidInput("Profile picture uploads are unavailable".into()))?;
+    if !images.contains(&captures["image_id"])? {
+        return Err(Error::InvalidInput(
+            "Picture must reference an uploaded image".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn trackers(value: Value) -> Result<Vec<String>> {

@@ -137,6 +137,17 @@ async fn main() -> Result<()> {
         })
         .await
         .context("runtime initialization failed")??;
+    let image_runtime = runtime.clone();
+    let image_directory = args
+        .config
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_owned();
+    let images = tokio::task::spawn_blocking(move || {
+        hass_image_upload::ImageIntegration::start(image_runtime, image_directory)
+    })
+    .await??;
+    let image_manager = images.manager();
     let mut notifications = hass_notifications::NotificationIntegration::start(runtime.clone())?;
     let notification_manager = notifications.manager();
     let zones = zones::Zones::start(
@@ -258,6 +269,7 @@ async fn main() -> Result<()> {
             notifications: Some(notification_manager),
             zones: Some(zone_manager),
             persons: Some(person_manager),
+            images: Some(image_manager),
         },
         Some(shutdown_rx),
     );
@@ -276,6 +288,7 @@ async fn main() -> Result<()> {
     let tracker_result = trackers.shutdown().await;
     let homeassistant_result = homeassistant.shutdown();
     let person_result = persons.shutdown().await;
+    let image_result = images.shutdown();
     let zone_result = zones.shutdown().await;
     let group_result = groups.shutdown().await;
     let notification_result = notifications.shutdown();
@@ -294,6 +307,7 @@ async fn main() -> Result<()> {
     tracker_result?;
     homeassistant_result?;
     person_result?;
+    image_result?;
     zone_result?;
     group_result?;
     notification_result?;

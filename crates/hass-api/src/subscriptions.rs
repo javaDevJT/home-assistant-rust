@@ -34,9 +34,13 @@ pub(crate) struct NativeSubscriptions {
     notifications: Option<hass_notifications::NotificationManager>,
     zones: Option<hass_zone::ZoneManager>,
     persons: Option<hass_person::PersonManager>,
+    images: Option<hass_image_upload::ImageManager>,
 }
 
 enum ActiveSubscription {
+    Images {
+        receiver: broadcast::Receiver<Event>,
+    },
     Persons {
         receiver: broadcast::Receiver<Event>,
     },
@@ -103,6 +107,7 @@ impl NativeSubscriptions {
             notifications: None,
             zones: None,
             persons: None,
+            images: None,
         }
     }
 
@@ -125,6 +130,10 @@ impl NativeSubscriptions {
         self.persons = manager;
     }
 
+    pub(crate) fn set_images(&mut self, manager: Option<hass_image_upload::ImageManager>) {
+        self.images = manager;
+    }
+
     /// Handle a subscription-related WebSocket command, if this manager owns it.
     pub(crate) fn handle_command(
         &mut self,
@@ -139,6 +148,7 @@ impl NativeSubscriptions {
             .ok_or_else(|| Error::InvalidInput("WebSocket command type must be a string".into()))?;
 
         match command_type {
+            "image/subscribe" => self.subscribe_images(object).map(Some),
             "person/subscribe" => self.subscribe_persons(object).map(Some),
             "zone/subscribe" => self.subscribe_zones(object).map(Some),
             "persistent_notification/subscribe" => self.subscribe_notifications(object).map(Some),
@@ -269,6 +279,40 @@ impl NativeSubscriptions {
             },
         );
         Ok(success_result(Vec::new()))
+    }
+
+    fn subscribe_images(
+        &mut self,
+        object: &Map<String, Value>,
+    ) -> Result<SubscriptionCommandResult> {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "id" | "type"))
+        {
+            return Err(Error::InvalidInput(
+                "Invalid image subscription command".into(),
+            ));
+        }
+        let id = command_id(object)?;
+        self.ensure_capacity(id)?;
+        let manager = self
+            .images
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("Image collection is not configured".into()))?;
+        let (snapshot, receiver) = manager.snapshot_and_subscribe()?;
+        let initial = snapshot
+            .storage
+            .into_iter()
+            .map(
+                |image| serde_json::json!({"change_type":"added","image_id":image.id,"item":image}),
+            )
+            .collect::<Vec<_>>();
+        self.subscriptions
+            .insert(id, ActiveSubscription::Images { receiver });
+        Ok(success_result(vec![event_envelope(
+            id,
+            serde_json::json!(initial),
+        )]))
     }
 
     fn subscribe_persons(
@@ -594,6 +638,13 @@ impl NativeSubscriptions {
             return Ok(());
         };
         match subscription {
+            ActiveSubscription::Images { .. } => {
+                if event.event_type == hass_image_upload::IMAGE_COLLECTION_UPDATED_SIGNAL
+                    && let Some(changes) = event.data.get("changes")
+                {
+                    output.push(event_envelope(id, changes.clone()));
+                }
+            }
             ActiveSubscription::Persons { .. } => {
                 if event.event_type == hass_person::PERSON_COLLECTION_UPDATED_SIGNAL
                     && let Some(changes) = event.data.get("changes")
@@ -806,6 +857,7 @@ impl ActiveSubscription {
             | Self::Notifications { receiver }
             | Self::Zones { receiver }
             | Self::Persons { receiver }
+            | Self::Images { receiver }
             | Self::Entities { receiver, .. }
             | Self::ConfigEntries { receiver, .. }
             | Self::ConfigFlowProgress { receiver, .. }

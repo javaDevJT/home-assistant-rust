@@ -64862,7 +64862,14 @@
       "component_directory": "homeassistant/components/image_upload/",
       "config_flow_classes": [],
       "domain": "image_upload",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-image-upload/src/lib.rs",
+        "crates/hass-image-upload/README.md",
+        "crates/hass-api/src/images.rs",
+        "crates/hass-api/tests/images_protocol.rs",
+        "crates/hass-api/src/persons.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -64882,10 +64889,10 @@
       },
       "manifest_blob_oid": "0afa75bafa3d832abaa53e32f05c13ce97af592a",
       "manifest_path": "homeassistant/components/image_upload/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Native JPEG/PNG/GIF file validation/storage, ordered private collection feeds, multipart upload, public original/thumbnail serving, profile binding and hard-restart persistence have fixtures. Media-source integration, import of upstream storage, complete static-response parity, exact Pillow resampling and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "15_cloud_http_auth_webhook",
       "protocol_families": [
         "cloud_http_auth_webhook"
@@ -105387,7 +105394,7 @@
       },
       "manifest_blob_oid": "46ccf85db4a69e3bb745d8025526b719dd9e3da5",
       "manifest_path": "homeassistant/components/person/manifest.json",
-      "outstanding_acceptance": "Native YAML/editable people, registry-resolved identity, tracker priority/restore, private collection feeds, account unlinking and caller-bound profile naming/picture clearing have fixtures. Uploaded image validation, registry display overrides, translations/UI flows, remaining recorder/entity-platform details and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "Native YAML/editable people, registry-resolved identity, tracker priority/restore, private collection feeds, account unlinking, caller-bound profile naming and actual uploaded-picture validation have fixtures. Registry display overrides, translations/UI flows, remaining recorder/entity-platform details and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -167940,6 +167947,32 @@
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
       {
+        "domain": "image_upload",
+        "local_evidence": [
+          {
+            "path": "crates/hass-image-upload/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-image-upload/README.md"
+          },
+          {
+            "path": "crates/hass-api/src/images.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/images_protocol.rs"
+          },
+          {
+            "path": "crates/hass-api/src/persons.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Native JPEG/PNG/GIF file validation/storage, ordered private collection feeds, multipart upload, public original/thumbnail serving, profile binding and hard-restart persistence have fixtures. Media-source integration, import of upstream storage, complete static-response parity, exact Pillow resampling and exhaustive pinned acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary actual transport and compiled-process checks are recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
+      },
+      {
         "domain": "input_boolean",
         "local_evidence": [
           {
@@ -168168,7 +168201,7 @@
             "path": "crates/hass/tests/end_to_end.rs"
           }
         ],
-        "remaining": "Native YAML/editable people, registry-resolved identity, tracker priority/restore, private collection feeds, account unlinking and caller-bound profile naming/picture clearing have fixtures. Uploaded image validation, registry display overrides, translations/UI flows, remaining recorder/entity-platform details and exhaustive pinned acceptance remain open.",
+        "remaining": "Native YAML/editable people, registry-resolved identity, tracker priority/restore, private collection feeds, account unlinking, caller-bound profile naming and actual uploaded-picture validation have fixtures. Registry display overrides, translations/UI flows, remaining recorder/entity-platform details and exhaustive pinned acceptance remain open.",
         "status": "partial",
         "verification": "Primary scoped, transport and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       },
@@ -168422,10 +168455,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 28,
+    "partial": 29,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1537
+    "unported": 1536
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

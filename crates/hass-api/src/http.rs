@@ -123,6 +123,8 @@ pub(crate) async fn authenticate(
             }
             if identity.read_only
                 && !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS")
+                && !(request.method() == axum::http::Method::POST
+                    && request.uri().path() == "/api/image/upload")
             {
                 return (StatusCode::FORBIDDEN, Json(json!({"message":"Forbidden"})))
                     .into_response();

@@ -9,7 +9,7 @@ state writes update the runtime and do not control devices.
 Construct **ApiState** with the runtime, optional static administrator token,
 and base configuration JSON. **router_with_features** also accepts native auth,
 registry, template and config-entry managers, plus a network-origin policy.
-Optional native notification and zone managers supply their private feeds.
+Optional native notification, zone, person and image managers supply their private feeds.
 Protected requests accept the static token or native session JWT. **/health**
 returns **{"status":"ok"}**. WebSocket authentication follows **auth_required**
 with an **auth** message. Handshakes expose the native **ha_version** value
@@ -19,7 +19,7 @@ Protected HTTP requests with a missing or wrong token return 401. An empty
 configured token is supported when native auth is configured; without either
 auth mechanism protected routes fail. Static tokens use constant-time equality;
 native JWTs validate signatures, expiry, active user and persisted session.
-HTTP request bodies are limited to 1 MiB. Trusted forwarding chains must begin
+HTTP request bodies are limited to 1 MiB, except image uploads described below. Trusted forwarding chains must begin
 at a configured proxy; actual client origin enforces local-only users.
 
 Native onboarding uses **/api/onboarding** and **/api/onboarding/users**.
@@ -59,6 +59,8 @@ This closes active WebSockets so they do not hold the server drain open.
 | GET /api/history/period | Query history with filter_entity_id and optional end_time |
 | GET /api/history/period/{timestamp} | Query history from an RFC 3339 timestamp, with filter_entity_id and optional end_time |
 | GET /api/events | Actual public event listener counts in event/listener_count objects |
+| POST /api/image/upload | Authenticated multipart file upload, including read-only users |
+| GET/HEAD /api/image/serve/{image_id}/{filename} | Public original or cached thumbnail, with range and cache preconditions |
 
 History requires **filter_entity_id**, matching the pinned HTTP adapter. A
 comma-separated list is accepted. The default start is 24 hours before the
@@ -123,3 +125,23 @@ precedes its initial **added** array; later items use **added**, **updated** or
 **removed** with **zone_id** and **item**. Generic **unsubscribe_events** removes
 the private receiver. The app's **zone.reload** service checks administrator
 authority for both internal user contexts and HTTP/WebSocket transport calls.
+
+The person collection provides **person/list** and **person/subscribe** to
+authenticated users, and administrator create/update/delete commands. A caller's
+**person/update_own_profile** can change their own name and linked editable
+person's picture, preserving tracker assignments. Non-null pictures must match
+an existing native image's relative serve path; arbitrary URLs are rejected.
+
+Image upload requires one multipart **file** field with a filename and JPEG,
+PNG or GIF content type. Files are limited to 10 MiB; the route allows another
+64 KiB for multipart overhead. Serving accepts **original**, **256x256** and
+**512x512**, with optional thumbnail cache-busting suffixes. Thumbnails contain
+the image without cropping or upscaling. Responses stream files and support
+HEAD, byte ranges, Last-Modified and ETag preconditions. Uploaded file URLs are
+public, as in the pinned source.
+
+**image/list** and **image/subscribe** are authenticated; **image/update** and
+**image/delete** require an administrator and identify records with **image_id**.
+Creation uses the HTTP upload route. Subscription ACK precedes the initial
+**added** array; live **added**, **updated** and **removed** arrays remain on the
+private dispatcher. Generic **unsubscribe_events** removes the receiver.

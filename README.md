@@ -47,6 +47,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Notifications | Internal feed, create/dismiss services, authenticated current/live WebSocket updates and automation triggers |
 | Zones | Home, YAML and editable zones, WGS-84 distance, occupancy, live collection feeds and YAML reload |
 | Presence | Native tracker reports/expiry, registry-backed people, tracker priority, account linkage and caller-only name edits |
+| Images | Authenticated JPEG/PNG/GIF uploads, public originals/thumbnails, private collection feeds and caller-bound profile pictures |
 | Automation | State/event/numeric/template/time/MQTT/notification/lifecycle triggers, conditions, execution modes |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
@@ -81,6 +82,7 @@ cargo test --workspace --locked
 - [Location zones, editable collection and geometry](crates/hass-zone/README.md)
 - [Device tracker reports and known-device configuration](crates/hass-device-tracker/README.md)
 - [People, tracker selection and account links](crates/hass-person/README.md)
+- [Uploaded images, thumbnails and profile pictures](crates/hass-image-upload/README.md)
 - [Config entries, native drivers, and core settings](crates/hass-config/README.md)
 - [Supported configuration example](examples/configuration.yaml)
 - [YAML includes, secrets, packages, and loading limits](docs/CONFIGURATION.md)

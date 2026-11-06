@@ -1,14 +1,22 @@
 # Validation evidence
 
-The current 19-crate checkpoint passed **366 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Publication is recorded below as it completes. The previous published 17-crate checkpoint and its green Linux run remain separately pinned. Image-upload work is outside this receipt. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
+The current 20-crate image checkpoint passed **393 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Its Linux CI is pending publication. Earlier published checkpoints remain separately pinned below. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
 
-## Current 19-crate acceptance
+## Current 20-crate acceptance
+
+`cargo test --workspace --locked --no-fail-fast` passed 393 tests across 52 unit/integration/doc-test targets, with zero failures or ignored cases. Workspace formatting, strict all-target Clippy, `cargo build --release --locked` and optimized example `--check` passed. Optimized executable SHA-256: `d4943948c5626d3becda0026689db9a9eef6d897e4a58222d4b6296d9164ae48`.
+
+The actual HTTP/WebSocket fixture covers authenticated upload larger than 1 MiB by a read-only user, private current/live collection feeds, administrator mutation, public original/thumbnail/HEAD/range responses, ETag/cache preconditions, caller-bound person picture selection, deletion, oversized/invalid multipart rollback and private/public isolation. The compiled process proves original bytes and metadata through hard restart and no thumbnail upscaling. The image crate contributes 25 validation, codec, EXIF, file, metadata, order and lifecycle cases. The primary caught missing ETag behavior in the locked streaming dependency and verified its wrapper through actual requests.
+
+Inventory readback reconciles all 1,565 unique manifest domains across 32 disjoint batches: 29 partial, 1,536 unported, zero complete. All accepted evidence paths exist. Image media-source integration, import of upstream storage, exact Pillow resampling, complete static-response parity and exhaustive upstream acceptance remain open. New entity-lifecycle and webhook source is excluded from this checkpoint and its checks.
+
+## Published 19-crate acceptance
 
 `cargo test --workspace --locked --no-fail-fast` passed 366 tests across 49 unit/integration/doc-test targets, with no failed or ignored tests. Workspace formatting, strict all-target Clippy, `cargo build --release --locked`, and optimized executable example `--check` passed. Optimized executable SHA-256: `22fcac39e7f83aa7d2bc14b5445b2b6e49ffa52c244ccad4e9e7971f39124839`.
 
 The compiled process now verifies actual `device_tracker.see` reports flowing through registry-backed person selection to zone occupancy and surviving a hard restart. A real authenticated WebSocket fixture verifies person config/storage lists, ordinary-user administration denial, private current/live updates, caller-only profile edits, tracker preservation on profile changes, and actual auth deletion/unlinking. Auth regression covers persisted self-name updates without privilege changes, disabled-account rejection, user event payloads and revocation. App fixtures prove secret-aware read-only known-device import, empty/default YAML, duplicate person identity preflight and writer-lease release after person host shutdown. Gravatar URLs are hashed locally with pinned precedence and require no external request.
 
-The full inventory remains a partition of all 1,565 manifests over 32 batches: 28 partial native domains, 1,537 unported, zero complete. Source conditions, translations, scanner platforms, complete registry/provider lifecycle and other listed gaps remain open. Non-null person picture uploads remain unavailable until the excluded image component is integrated; arbitrary URLs are not accepted as uploaded pictures.
+This historical checkpoint partitioned all 1,565 manifests over 32 batches: 28 partial native domains, 1,537 unported, zero complete. Its non-null person picture uploads were unavailable until the subsequent image component integration. Source conditions, translations, scanner platforms, complete registry/provider lifecycle and other listed gaps remain open.
 
 ## Published 17-crate acceptance
 
@@ -16,7 +24,7 @@ The full inventory remains a partition of all 1,565 manifests over 32 batches: 2
 
 `cargo fmt --all --check` and `cargo build --release --locked` also passed. The optimized executable successfully validates `examples/configuration.yaml` with `--check`.
 
-The current optimized macOS executable SHA-256 is `1dabe8a70a716bc2df0d93f0d44a28a4eff78426633ccc4361391ebdd2dd432c`. The pending person crate is outside the workspace and excluded from this checkpoint.
+This checkpoint's optimized macOS executable SHA-256 is `1dabe8a70a716bc2df0d93f0d44a28a4eff78426633ccc4361391ebdd2dd432c`. Person was outside the workspace and excluded from that checkpoint.
 
 The new wave includes legacy group aggregation and provider delegation; process-local notifications with real authenticated live feeds and private automation triggers; provider-ready, one-shot startup triggers; source-correct helper initial/restore, select options and numerical precision; and native YAML/home/editable zones with WGS-84 geometry, collection CRUD, occupancy, actual reload and live persisted core location updates. The executable fixtures now cover both HTTP notification-to-automation execution and zone behavior through hard restart. Internal zone reload authorization and same-process writer-lease release also pass. Independent automation review found no confirmed discrepancy in the requested private-signal/causality/startup paths against the exact pinned source.
 
@@ -33,6 +41,8 @@ Storage tests verify owned v1→v2 migration, rollback/foreign-schema rejection,
 These receipts establish the implemented subset. They do not verify complete integrations, frontend/browser use, upstream database compatibility, custom authorization policies, hardware operation, or full Home Assistant parity. Synchronous handlers already running must terminate before joined shutdown can complete.
 
 ## Linux checkpoint CI
+
+Checkpoint `76aa09afc13e4a1f36051e9f4e1107d2db6d807b` passed [Linux run 42189652679](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42189652679), including formatting, strict all-target Clippy, all tests and CLI example validation. The separate documentation commit `d5d7727905c895acdbd47213c9ab300eca7db074` also passed [run 42181402458](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42181402458). Neither run contains subsequent image integration work.
 
 Checkpoint `7e093fc2bdc5f0a521f932a46f65f9df9a828b5d` passed [Linux run 42180581797](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42180581797): workspace formatting, strict all-target Clippy, all workspace tests, and actual CLI example validation. This immutable run includes groups, notifications, zones and helper corrections; it does not cover subsequent person/tracker/auth-bridge changes.
 

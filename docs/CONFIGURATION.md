@@ -77,5 +77,8 @@ person fields, starts the providers, then selects the current trackers before
 running `homeassistant_started` automations. The administrator-only
 `person.reload` service rereads only YAML people; editable people use the
 authenticated `person/*` collection. Ordinary users can edit their own name
-and clear their linked editable person's picture. New picture uploads await
-the native image collection and are not accepted as arbitrary URLs.
+and set or clear their linked editable person's picture. Picture references
+must name an existing native image uploaded through `POST /api/image/upload`;
+arbitrary URLs are rejected. JPEG, PNG and GIF uploads are limited to 10 MiB.
+Files live under the configuration directory's `image/` folder, with metadata
+in the native database. Keep both when moving this installation's data.

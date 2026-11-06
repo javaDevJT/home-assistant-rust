@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 ipnet.workspace = true
 qrcode.workspace = true
+regex.workspace = true
 url.workspace = true
 uuid.workspace = true
 hass-auth.workspace = true
@@ -18,6 +19,7 @@ hass-config.workspace = true
 hass-notifications.workspace = true
 hass-zone.workspace = true
 hass-person.workspace = true
+hass-image-upload.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
@@ -26,8 +28,12 @@ serde.workspace = true
 serde_json.workspace = true
 subtle.workspace = true
 tokio.workspace = true
+tower.workspace = true
+tower-http.workspace = true
 
 [dev-dependencies]
+image.workspace = true
+tempfile.workspace = true
 totp-rs = "6"
 reqwest.workspace = true
 http-body-util.workspace = true

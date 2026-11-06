@@ -1,6 +1,8 @@
 /target/
 /data/
 /examples/data/
+/image/
+/examples/image/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

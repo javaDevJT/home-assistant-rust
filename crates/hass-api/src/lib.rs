@@ -12,6 +12,7 @@ mod config_entries;
 mod extensions;
 mod history;
 mod http;
+mod images;
 mod login;
 pub mod network;
 mod persons;
@@ -53,6 +54,7 @@ pub struct ApiFeatures {
     pub notifications: Option<hass_notifications::NotificationManager>,
     pub zones: Option<hass_zone::ZoneManager>,
     pub persons: Option<hass_person::PersonManager>,
+    pub images: Option<hass_image_upload::ImageManager>,
 }
 
 #[derive(Clone)]
@@ -168,6 +170,10 @@ fn build_router(
         .route("/api/events", get(http::get_events))
         .route("/api/events/{event_type}", post(http::fire_event))
         .route("/api/template", post(extensions::render_template))
+        .route(
+            "/api/image/upload",
+            post(images::upload).layer(DefaultBodyLimit::max(images::MAX_UPLOAD_BODY)),
+        )
         .route("/api/history/period", get(http::get_history))
         .route(
             "/api/history/period/{timestamp}",
@@ -180,6 +186,7 @@ fn build_router(
 
     Router::new()
         .route("/health", get(http::health))
+        .route("/api/image/serve/{image_id}/{filename}", get(images::serve))
         .route("/api/websocket", get(websocket::upgrade))
         .route("/auth/providers", get(login::providers))
         .route("/auth/login_flow", post(login::create_flow))

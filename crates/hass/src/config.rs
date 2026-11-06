@@ -40,6 +40,8 @@ pub struct Config {
     pub person: Vec<hass_person::PersonConfig>,
     #[serde(default)]
     pub device_tracker: hass_device_tracker::TrackerConfig,
+    #[serde(default)]
+    pub image_upload: serde_yaml::Value,
     #[serde(skip)]
     pub group_order: Vec<String>,
     #[serde(default)]
@@ -225,6 +227,7 @@ impl Config {
                 "zone",
                 "person",
                 "device_tracker",
+                "image_upload",
                 "timer",
                 "input_button",
                 "input_datetime",
@@ -300,6 +303,14 @@ impl Config {
             }
         }
         self.device_tracker.validate()?;
+        if !self.image_upload.is_null()
+            && self
+                .image_upload
+                .as_mapping()
+                .is_none_or(|mapping| !mapping.is_empty())
+        {
+            bail!("image_upload accepts only an empty configuration section");
+        }
         Ok(())
     }
 
@@ -331,6 +342,7 @@ impl Config {
             "zone",
             "person",
             "device_tracker",
+            "image_upload",
         ];
         if !self.script.is_empty() {
             components.push("script");

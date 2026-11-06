@@ -189,6 +189,7 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
         || kind == "config/core/update"
         || matches!(kind, "zone/create" | "zone/update" | "zone/delete")
         || matches!(kind, "person/create" | "person/update" | "person/delete")
+        || matches!(kind, "image/create" | "image/update" | "image/delete")
         || kind.starts_with("config/auth_provider/")
         || matches!(
             kind,
@@ -266,6 +267,14 @@ pub(crate) async fn handle_ws(
     command: &Value,
 ) -> Option<Result<Value>> {
     let kind = command.get("type")?.as_str()?;
+    if kind.starts_with("image/") {
+        let Some(manager) = state.features.images.clone() else {
+            return Some(Err(Error::NotFound(
+                "Image collection is not configured".into(),
+            )));
+        };
+        return Some(crate::images::handle_ws(manager, command).await);
+    }
     if kind.starts_with("person/") {
         return Some(crate::persons::handle(state, identity, command).await);
     }
