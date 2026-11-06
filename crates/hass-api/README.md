@@ -10,6 +10,7 @@ Construct **ApiState** with the runtime, optional static administrator token,
 and base configuration JSON. **router_with_features** also accepts native auth,
 registry, template and config-entry managers, plus a network-origin policy.
 Optional native notification, zone, person and image managers supply their private feeds.
+An optional webhook manager supplies process-local inbound callbacks.
 Protected requests accept the static token or native session JWT. **/health**
 returns **{"status":"ok"}**. WebSocket authentication follows **auth_required**
 with an **auth** message. Handshakes expose the native **ha_version** value
@@ -61,6 +62,7 @@ This closes active WebSockets so they do not hold the server drain open.
 | GET /api/events | Actual public event listener counts in event/listener_count objects |
 | POST /api/image/upload | Authenticated multipart file upload, including read-only users |
 | GET/HEAD /api/image/serve/{image_id}/{filename} | Public original or cached thumbnail, with range and cache preconditions |
+| GET/HEAD/POST/PUT /api/webhook/{webhook_id} | Public capability callback after trusted client-origin resolution |
 
 History requires **filter_entity_id**, matching the pinned HTTP adapter. A
 comma-separated list is accepted. The default start is 24 hours before the
@@ -145,3 +147,14 @@ public, as in the pinned source.
 Creation uses the HTTP upload route. Subscription ACK precedes the initial
 **added** array; live **added**, **updated** and **removed** arrays remain on the
 private dispatcher. Generic **unsubscribe_events** removes the receiver.
+
+The webhook endpoint accepts registered methods and enforces each callback's
+local-only policy using the resolved peer/proxy origin. Unknown callbacks,
+remote requests rejected by local policy, malformed JSON and callback errors
+return an empty 200; disallowed methods return 405 except HEAD, which remains
+silent. Bodies are limited to 1 MiB. JSON, URL-encoded fields and first duplicate
+query values are normalized for the callback. Multipart decoding remains open.
+**webhook/list** is administrator-only because it exposes callback IDs;
+**webhook/handle** follows the pinned authenticated capability-dispatch policy,
+including read-only users. Callback payloads travel privately to automations
+and are absent from public event subscriptions and recorder entries.

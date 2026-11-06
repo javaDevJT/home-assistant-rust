@@ -647,6 +647,23 @@ impl ConfigEntries {
         Ok(())
     }
 
+    /// Unregister only this exact driver instance. Hosts must stop its work
+    /// and unload its entries first; this does not run unload callbacks.
+    /// A stale host cannot remove a later driver's registration.
+    pub fn unregister_driver(&self, expected: &Arc<dyn ConfigEntryDriver>) -> bool {
+        let domain = expected.domain().to_owned();
+        let mut drivers = self.drivers.write().unwrap_or_else(PoisonError::into_inner);
+        if drivers
+            .get(&domain)
+            .is_some_and(|driver| Arc::ptr_eq(driver, expected))
+        {
+            drivers.remove(&domain);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Return a registered integration driver by domain.
     pub fn driver(&self, domain: &str) -> Option<Arc<dyn ConfigEntryDriver>> {
         self.drivers
@@ -2189,6 +2206,26 @@ mod tests {
         let mut seed = NewConfigEntry::new("fixture", "Fixture account", data);
         seed.unique_id = Some("fixture-device-1".into());
         seed
+    }
+
+    #[test]
+    fn driver_cleanup_matches_instance_and_preserves_replacements() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let first: Arc<dyn ConfigEntryDriver> = Arc::new(FixtureDriver::new());
+        let replacement: Arc<dyn ConfigEntryDriver> = Arc::new(FixtureDriver::new());
+        manager.register_driver(first.clone()).unwrap();
+        assert!(!manager.unregister_driver(&replacement));
+        assert_eq!(manager.flow_handlers(), ["fixture"]);
+        assert!(manager.unregister_driver(&first));
+        assert!(manager.driver("fixture").is_none());
+        manager.register_driver(replacement.clone()).unwrap();
+        assert!(!manager.unregister_driver(&first));
+        assert!(Arc::ptr_eq(
+            &manager.driver("fixture").unwrap(),
+            &replacement
+        ));
+        assert!(manager.unregister_driver(&replacement));
+        assert!(!manager.unregister_driver(&replacement));
     }
 
     #[test]

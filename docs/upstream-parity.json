@@ -935,14 +935,19 @@
     {
       "area": "Entity model, platforms and add/remove lifecycle",
       "coverage_status": "partial_or_unported",
-      "gap": "The current runtime stores state rows and helper-created entities; it does not implement HA entity objects/platform lifecycle, polling/coordinator ownership, restore/state attributes, or platform unload semantics.",
+      "gap": "Shared native provider identity, metadata refresh, weak leases, registry rename/disable/remove, restore and unload are exercised by actual template and clock providers. Generic platform setup, polling/coordinator ownership, complete attribute/capability/domain semantics, translation and exhaustive failure/parity coverage remain open.",
       "id": "entities_platforms_and_lifecycle",
       "local_evidence_paths": [
+        "crates/hass-entity/src/lib.rs",
+        "crates/hass-entity/README.md",
+        "crates/hass-registry/src/provider.rs",
+        "crates/hass-template-entities/src/lib.rs",
+        "crates/hass-system-sensors/src/lib.rs",
         "crates/hass-core/src/lib.rs",
         "crates/hass-native/src/lib.rs",
         "crates/hass/src/helpers.rs"
       ],
-      "next_acceptance": "Implement typed entity identity/capabilities, platform registration, add/remove/restore/update, coordinator refresh, event and service mapping, and unload cleanup against pinned entity tests.",
+      "next_acceptance": "Complete provider replacement and failed-cleanup recovery checks, then extend the shared lifecycle to generic platform setup, coordinator refresh, source-complete attributes/capabilities and remaining providers against pinned entity tests.",
       "pinned_upstream_sources": [
         "homeassistant/helpers/entity.py",
         "homeassistant/helpers/entity_platform.py",
@@ -956,7 +961,7 @@
     {
       "area": "Entity, device, area, floor and label registries",
       "coverage_status": "partial_or_unported",
-      "gap": "Native entity/device/area/floor/label CRUD, durable identity, invalid-reference checks, live selectors and registry events have fixtures. Child/composite devices, categories, remaining registries and exhaustive payload acceptance remain open.",
+      "gap": "Native entity/device/area/floor/label CRUD, durable identity, trusted provider metadata refresh preserving user overrides, service-device types, invalid-reference checks, live selectors and registry events have fixtures. Child/composite devices, categories, remaining registries and exhaustive payload acceptance remain open.",
       "id": "registries",
       "local_evidence_paths": [
         "crates/hass-registry/src/lib.rs",
@@ -141004,7 +141009,13 @@
         "TimeDateConfigFlowHandler"
       ],
       "domain": "time_date",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-system-sensors/src/lib.rs",
+        "crates/hass-system-sensors/README.md",
+        "crates/hass/src/system_sensors.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "categories": [
           "helpers.calculate_value"
@@ -141022,7 +141033,7 @@
       },
       "manifest_blob_oid": "09c9ac8e1b8eca05ef72c32b962841ed01ec139e",
       "manifest_path": "homeassistant/components/time_date/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Seven source clock formats, UTC/local minute and DST midnight scheduling, YAML/config-entry setup, live timezone refresh, stable identity and hard restart have native fixtures. Complete sensor/platform semantics, localized naming, upstream storage/config-entry import and exhaustive pinned acceptance remain open.",
       "platform_expressions": [
         {
           "path": "const.py",
@@ -141034,7 +141045,7 @@
       "platforms_static": [
         "sensor"
       ],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -148082,7 +148093,13 @@
         "UptimeConfigFlow"
       ],
       "domain": "uptime",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-system-sensors/src/lib.rs",
+        "crates/hass-system-sensors/README.md",
+        "crates/hass/src/system_sensors.rs",
+        "crates/hass-registry/src/tests.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "categories": [
           "computers_network.monitoring"
@@ -148101,7 +148118,7 @@
       },
       "manifest_blob_oid": "06306603cd7abb7c849f2d8e27925393a550bbae",
       "manifest_path": "homeassistant/components/uptime/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Actual fixed setup-time UTC state, singleton config flow, registry-linked service device, stable identity, unload and hard restart have native fixtures. Complete sensor/device naming and translation, upstream storage/config-entry import and exhaustive pinned acceptance remain open.",
       "platform_expressions": [
         {
           "path": "const.py",
@@ -148113,7 +148130,7 @@
       "platforms_static": [
         "sensor"
       ],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -154682,7 +154699,14 @@
       "component_directory": "homeassistant/components/webhook/",
       "config_flow_classes": [],
       "domain": "webhook",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-webhook/src/lib.rs",
+        "crates/hass-webhook/README.md",
+        "crates/hass-api/src/webhooks.rs",
+        "crates/hass-api/tests/webhooks_protocol.rs",
+        "crates/hass-automation/src/lib.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -154698,10 +154722,10 @@
       },
       "manifest_blob_oid": "43f5321d9f636f6bb9735db586aea448b27f39ba",
       "manifest_path": "homeassistant/components/webhook/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Native process-local callbacks, method/locality policy, public HTTP and authenticated WebSocket dispatch, private automation delivery and lifecycle cleanup have real transport/process fixtures. Multipart form/file handling, cloud URL helpers, complete callback response serialization and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "15_cloud_http_auth_webhook",
       "protocol_families": [
         "cloud_http_auth_webhook"
@@ -168376,6 +168400,29 @@
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
       {
+        "domain": "time_date",
+        "local_evidence": [
+          {
+            "path": "crates/hass-system-sensors/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-system-sensors/README.md"
+          },
+          {
+            "path": "crates/hass/src/system_sensors.rs"
+          },
+          {
+            "path": "crates/hass/src/config.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Seven source clock formats, UTC/local minute and DST midnight scheduling, YAML/config-entry setup, live timezone refresh, stable identity and hard restart have native fixtures. Complete sensor/platform semantics, localized naming, upstream storage/config-entry import and exhaustive pinned acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary actual transport/process acceptance and ongoing full-wave checks are recorded in docs/PORTING.md; published immutable full-workspace receipts are in docs/VALIDATION.md."
+      },
+      {
         "domain": "timer",
         "local_evidence": [
           {
@@ -168402,6 +168449,55 @@
         "remaining": "Timer lifecycle behavior exists in the native helper crate; upstream setup/configuration, service/event payloads, pause/restore semantics, and focused native-time tests still require acceptance.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+      },
+      {
+        "domain": "uptime",
+        "local_evidence": [
+          {
+            "path": "crates/hass-system-sensors/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-system-sensors/README.md"
+          },
+          {
+            "path": "crates/hass/src/system_sensors.rs"
+          },
+          {
+            "path": "crates/hass-registry/src/tests.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Actual fixed setup-time UTC state, singleton config flow, registry-linked service device, stable identity, unload and hard restart have native fixtures. Complete sensor/device naming and translation, upstream storage/config-entry import and exhaustive pinned acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary actual transport/process acceptance and ongoing full-wave checks are recorded in docs/PORTING.md; published immutable full-workspace receipts are in docs/VALIDATION.md."
+      },
+      {
+        "domain": "webhook",
+        "local_evidence": [
+          {
+            "path": "crates/hass-webhook/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-webhook/README.md"
+          },
+          {
+            "path": "crates/hass-api/src/webhooks.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/webhooks_protocol.rs"
+          },
+          {
+            "path": "crates/hass-automation/src/lib.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs"
+          }
+        ],
+        "remaining": "Native process-local callbacks, method/locality policy, public HTTP and authenticated WebSocket dispatch, private automation delivery and lifecycle cleanup have real transport/process fixtures. Multipart form/file handling, cloud URL helpers, complete callback response serialization and exhaustive pinned acceptance remain open.",
+        "status": "partial",
+        "verification": "Primary actual transport/process acceptance and ongoing full-wave checks are recorded in docs/PORTING.md; published immutable full-workspace receipts are in docs/VALIDATION.md."
       },
       {
         "domain": "websocket_api",
@@ -168455,10 +168551,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 29,
+    "partial": 32,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1536
+    "unported": 1533
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

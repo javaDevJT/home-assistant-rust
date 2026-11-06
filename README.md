@@ -38,6 +38,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Area | Current native implementation |
 | --- | --- |
 | Runtime | Typed states, attributes, contexts, ordered events, service registry |
+| Entities | Shared provider leases, stable identity, registry overrides, rename/disable/remove, restore and owned cleanup |
 | Storage | SQLite states/history/events/private metadata, migration, restart, single writer |
 | Authentication | Password users, roles, JWT access, rotating refresh sessions, TOTP MFA, signed paths |
 | Registries | Persistent entity/device/area/floor/label identity and CRUD |
@@ -48,7 +49,8 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Zones | Home, YAML and editable zones, WGS-84 distance, occupancy, live collection feeds and YAML reload |
 | Presence | Native tracker reports/expiry, registry-backed people, tracker priority, account linkage and caller-only name edits |
 | Images | Authenticated JPEG/PNG/GIF uploads, public originals/thumbnails, private collection feeds and caller-bound profile pictures |
-| Automation | State/event/numeric/template/time/MQTT/notification/lifecycle triggers, conditions, execution modes |
+| Automation | State/event/numeric/template/time/MQTT/notification/webhook/lifecycle triggers, conditions, execution modes |
+| Clock sensors | Time/date formats, timezone and DST scheduling, fixed setup-time uptime, YAML and config-entry flows |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -69,12 +71,14 @@ cargo test --workspace --locked
 - [Active full-rewrite execution ledger](docs/PORTING.md)
 - [Exhaustive upstream integration and subsystem parity](docs/PARITY.md)
 - [Module contracts and ownership](docs/CONTRACT.md)
+- [Shared entity identity, provider leases and lifecycle](crates/hass-entity/README.md)
 - [Automation YAML and execution limits](crates/hass-automation/README.md)
 - [API endpoints, protocol bounds, and shutdown](crates/hass-api/README.md)
 - [Native users, sessions, and authentication](crates/hass-auth/README.md)
 - [MQTT broker, discovery, and device commands](crates/hass-mqtt/README.md)
 - [RESTful sensors and commands](crates/hass-rest/README.md)
 - [Scripts and scenes](crates/hass-script/README.md)
+- [Bounded native template rendering](crates/hass-template/README.md)
 - [Reactive template sensors and action-backed controls](crates/hass-template-entities/README.md)
 - [Timers, dates, buttons, and schedules](crates/hass-native/README.md)
 - [Groups, membership, and aggregate states](crates/hass-group/README.md)
@@ -83,6 +87,8 @@ cargo test --workspace --locked
 - [Device tracker reports and known-device configuration](crates/hass-device-tracker/README.md)
 - [People, tracker selection and account links](crates/hass-person/README.md)
 - [Uploaded images, thumbnails and profile pictures](crates/hass-image-upload/README.md)
+- [Webhooks, callback authority and private automation delivery](crates/hass-webhook/README.md)
+- [Native time/date and uptime sensors](crates/hass-system-sensors/README.md)
 - [Config entries, native drivers, and core settings](crates/hass-config/README.md)
 - [Supported configuration example](examples/configuration.yaml)
 - [YAML includes, secrets, packages, and loading limits](docs/CONFIGURATION.md)

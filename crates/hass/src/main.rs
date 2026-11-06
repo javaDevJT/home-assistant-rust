@@ -6,6 +6,7 @@ mod homeassistant;
 mod integration_drivers;
 mod persons;
 mod recorder;
+mod system_sensors;
 mod yaml;
 mod zones;
 
@@ -219,17 +220,28 @@ async fn main() -> Result<()> {
     native_config.time_zone = runtime.time_zone();
     let native = hass_native::NativeIntegrations::start(runtime.clone(), native_config).await?;
     let scripts = hass_script::ScriptEngine::start(runtime.clone(), config.script, config.scene)?;
-    let template_entities = hass_template_entities::TemplateEntities::start_with_registries(
+    let entity_lifecycle = hass_entity::EntityLifecycle::new(runtime.clone(), registries.clone())?;
+    let system_sensors = system_sensors::SystemSensors::start(
+        runtime.clone(),
+        registries.clone(),
+        entity_lifecycle.clone(),
+        config_entries.clone(),
+        config.sensor,
+    )
+    .await?;
+    let template_entities = hass_template_entities::TemplateEntities::start_with_lifecycle(
         runtime.clone(),
         config.template,
-        registries.clone(),
+        entity_lifecycle.clone(),
     )
     .await?;
     let mqtt_topics = hass_automation::mqtt_topics(&config.automation);
-    let automations = hass_automation::start_with_timezone(
+    let webhooks = hass_webhook::WebhookManager::new();
+    let automations = hass_automation::start_with_timezone_and_webhooks(
         runtime.clone(),
         config.automation,
         runtime.time_zone(),
+        webhooks.clone(),
     )?;
     let rest = hass_rest::RestIntegration::start(runtime.clone(), config.rest, config.rest_command)
         .await?;
@@ -270,6 +282,7 @@ async fn main() -> Result<()> {
             zones: Some(zone_manager),
             persons: Some(person_manager),
             images: Some(image_manager),
+            webhooks: Some(webhooks),
         },
         Some(shutdown_rx),
     );
@@ -280,6 +293,8 @@ async fn main() -> Result<()> {
     let result = axum_serve(listener, app, shutdown_tx).await;
     let recorder_result = recorder.shutdown().await;
     let automation_result = automations.shutdown().await;
+    let system_sensor_result = system_sensors.shutdown().await;
+    let entity_lifecycle_result = entity_lifecycle.shutdown().await;
     let template_entity_result = template_entities.shutdown().await;
     let driver_result = drivers.shutdown().await;
     let script_result = scripts.shutdown().await;
@@ -299,6 +314,8 @@ async fn main() -> Result<()> {
     result?;
     recorder_result?;
     automation_result?;
+    system_sensor_result?;
+    entity_lifecycle_result?;
     template_entity_result?;
     driver_result?;
     script_result?;

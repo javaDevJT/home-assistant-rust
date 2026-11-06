@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 hass-core.workspace = true
+hass-entity.workspace = true
 hass-registry.workspace = true
 hass-script.workspace = true
 hass-template.workspace = true

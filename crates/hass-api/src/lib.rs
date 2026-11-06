@@ -17,6 +17,7 @@ mod login;
 pub mod network;
 mod persons;
 mod subscriptions;
+mod webhooks;
 mod websocket;
 mod zones;
 
@@ -55,6 +56,7 @@ pub struct ApiFeatures {
     pub zones: Option<hass_zone::ZoneManager>,
     pub persons: Option<hass_person::PersonManager>,
     pub images: Option<hass_image_upload::ImageManager>,
+    pub webhooks: Option<hass_webhook::WebhookManager>,
 }
 
 #[derive(Clone)]
@@ -186,6 +188,12 @@ fn build_router(
 
     Router::new()
         .route("/health", get(http::health))
+        .route(
+            "/api/webhook/{webhook_id}",
+            get(webhooks::handle)
+                .post(webhooks::handle)
+                .put(webhooks::handle),
+        )
         .route("/api/image/serve/{image_id}/{filename}", get(images::serve))
         .route("/api/websocket", get(websocket::upgrade))
         .route("/auth/providers", get(login::providers))

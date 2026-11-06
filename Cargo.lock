@@ -810,6 +810,7 @@ dependencies = [
  "hass-config",
  "hass-core",
  "hass-device-tracker",
+ "hass-entity",
  "hass-group",
  "hass-image-upload",
  "hass-mqtt",
@@ -820,8 +821,10 @@ dependencies = [
  "hass-rest",
  "hass-script",
  "hass-storage",
+ "hass-system-sensors",
  "hass-template",
  "hass-template-entities",
+ "hass-webhook",
  "hass-zone",
  "image",
  "reqwest",
@@ -852,6 +855,7 @@ dependencies = [
  "hass-person",
  "hass-registry",
  "hass-template",
+ "hass-webhook",
  "hass-zone",
  "http-body-util",
  "image",
@@ -901,6 +905,7 @@ dependencies = [
  "hass-notifications",
  "hass-script",
  "hass-template",
+ "hass-webhook",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -952,6 +957,18 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "hass-entity"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "hass-registry",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1113,6 +1130,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-system-sensors"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "hass-template"
 version = "0.1.0"
 dependencies = [
@@ -1136,6 +1169,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hass-core",
+ "hass-entity",
  "hass-registry",
  "hass-script",
  "hass-template",
@@ -1146,6 +1180,16 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hass-webhook"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

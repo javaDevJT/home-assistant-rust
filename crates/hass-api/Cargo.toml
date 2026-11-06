@@ -20,6 +20,7 @@ hass-notifications.workspace = true
 hass-zone.workspace = true
 hass-person.workspace = true
 hass-image-upload.workspace = true
+hass-webhook.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true

@@ -42,6 +42,8 @@ pub struct Config {
     pub device_tracker: hass_device_tracker::TrackerConfig,
     #[serde(default)]
     pub image_upload: serde_yaml::Value,
+    #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
+    pub sensor: Vec<crate::system_sensors::SystemSensorYamlPlatform>,
     #[serde(skip)]
     pub group_order: Vec<String>,
     #[serde(default)]
@@ -228,6 +230,7 @@ impl Config {
                 "person",
                 "device_tracker",
                 "image_upload",
+                "sensor",
                 "timer",
                 "input_button",
                 "input_datetime",
@@ -343,9 +346,15 @@ impl Config {
             "person",
             "device_tracker",
             "image_upload",
+            "webhook",
+            "time_date",
+            "uptime",
         ];
         if !self.script.is_empty() {
             components.push("script");
+        }
+        if !self.sensor.is_empty() {
+            components.push("sensor");
         }
         if !self.scene.is_empty() {
             components.push("scene");
@@ -403,6 +412,21 @@ impl Config {
             "recovery_mode": false,
         })
     }
+}
+
+fn deserialize_sensor_platforms<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<crate::system_sensors::SystemSensorYamlPlatform>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    let values = match value {
+        serde_yaml::Value::Null => Vec::new(),
+        serde_yaml::Value::Sequence(values) => values,
+        other => vec![other],
+    };
+    serde_yaml::from_value(serde_yaml::Value::Sequence(values)).map_err(serde::de::Error::custom)
 }
 
 fn deserialize_zones<'de, D>(

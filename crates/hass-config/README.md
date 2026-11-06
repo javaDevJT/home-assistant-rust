@@ -23,6 +23,12 @@ IO can capture a Tokio handle and block on startup or shutdown from the root
 adapter's `spawn_blocking` task. `SetupOutcome::RetryAfter` records a retry
 deadline; the owner calls `retry_due_entries(now)` to process due retries.
 
+Hosts that register drivers temporarily retain their `Arc<dyn ConfigEntryDriver>`
+and call `unregister_driver(&driver)` after stopping work and unloading entries.
+Removal checks pointer identity, so an old host cannot remove a replacement
+driver. This operation does not invoke unload callbacks. It also allows startup
+rollback to remove only callbacks installed by the failing host.
+
 The manager exposes typed create, get/list, setup, unload, reload, retry,
 disable, removal, options update, reauth, config-flow, and core-config methods.
 Config-flow HTTP adapters can call `init_config_flow_with_input` and
@@ -62,4 +68,4 @@ debug output also redacts those maps. Trusted driver callbacks and typed
 - Successful core updates emit `core_config_updated` after persistence, with
   accepted request fields and no WebSocket envelope fields. Invalid or
   unsupported fields produce no update event. The app uses this event to
-  refresh the home zone from the latest saved core settings.
+  refresh the home zone and clock sensors from the latest saved core settings.

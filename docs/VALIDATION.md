@@ -1,14 +1,26 @@
 # Validation evidence
 
-The current 20-crate image checkpoint passed **393 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Its Linux CI is pending publication. Earlier published checkpoints remain separately pinned below. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
+The current 23-crate entity/webhook/clock checkpoint passed **462 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Linux CI awaits publication. Earlier published checkpoints remain separately pinned below. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
 
-## Current 20-crate acceptance
+## Current 23-crate acceptance
+
+`cargo test --workspace --locked --no-fail-fast` passed 462 tests across 59 unit/integration/doc-test targets, with zero failed or ignored cases. Formatting, strict locked all-target Clippy, optimized build and optimized example `--check` passed. Optimized macOS executable SHA-256: `d27d71f52a0777f56c713462152132417540b979f85eda66c2f288c9ee20f430`.
+
+Actual template providers now use the shared entity lifecycle for identity, registry overrides, rename/disable/remove, service targeting and restore. Primary consumer cases reproduce and then verify the fixed registry-rename defect. Independent failure-path review found receipt orphaning, unsafe cleanup and dropped-lease failures; corrections preserve last-good leases on precommit failure, retain committed identity receipts, guard state writes/removals, retry dropped cleanup with backoff and surface persistent failures. Entity and registry tests include storage faults, namespace isolation, target collisions and reentry.
+
+Actual HTTP/WebSocket and compiled-process tests verify webhook method/locality handling, JSON/form/query metadata, administrator-only inventory, read-only capability dispatch, private automation delivery, cleanup and fresh registration after hard restart. The process fixture retained its valid adjacent template expressions; the shared renderer now supports bounded composite/block output instead of weakening the fixture.
+
+Clock acceptance covers all seven time/date formats, timezone/DST deadlines, actual clocks, namespaced YAML platforms, validated non-polling scan intervals, live timezone refresh and config-entry flows. Uptime records a fixed setup timestamp, uses a registry service device, rejects duplicate entries and gets a fresh timestamp after restart. Host fixtures cover failed startup retry, duplicate-host preservation, exact-driver cleanup and current-thread concurrent shutdown. All ten compiled-process cases pass, including changed-YAML stale cleanup and SIGTERM with an open WebSocket.
+
+The inventory reconciles all 1,565 unique manifests over 32 disjoint batches: 32 partial domains, 1,533 unported, zero complete. Tag source and its pending fixture are excluded from this checkpoint. Full platform/coordinator semantics, translation, multipart webhook fields, complete callback serialization and other inventory gaps remain open. No physical providers or production credentials were used.
+
+## Published 20-crate acceptance
 
 `cargo test --workspace --locked --no-fail-fast` passed 393 tests across 52 unit/integration/doc-test targets, with zero failures or ignored cases. Workspace formatting, strict all-target Clippy, `cargo build --release --locked` and optimized example `--check` passed. Optimized executable SHA-256: `d4943948c5626d3becda0026689db9a9eef6d897e4a58222d4b6296d9164ae48`.
 
 The actual HTTP/WebSocket fixture covers authenticated upload larger than 1 MiB by a read-only user, private current/live collection feeds, administrator mutation, public original/thumbnail/HEAD/range responses, ETag/cache preconditions, caller-bound person picture selection, deletion, oversized/invalid multipart rollback and private/public isolation. The compiled process proves original bytes and metadata through hard restart and no thumbnail upscaling. The image crate contributes 25 validation, codec, EXIF, file, metadata, order and lifecycle cases. The primary caught missing ETag behavior in the locked streaming dependency and verified its wrapper through actual requests.
 
-Inventory readback reconciles all 1,565 unique manifest domains across 32 disjoint batches: 29 partial, 1,536 unported, zero complete. All accepted evidence paths exist. Image media-source integration, import of upstream storage, exact Pillow resampling, complete static-response parity and exhaustive upstream acceptance remain open. New entity-lifecycle and webhook source is excluded from this checkpoint and its checks.
+This checkpoint's inventory reconciled all 1,565 unique manifest domains across 32 disjoint batches: 29 partial, 1,536 unported, zero complete. All accepted evidence paths existed. Image media-source integration, import of upstream storage, exact Pillow resampling, complete static-response parity and exhaustive upstream acceptance remain open. Subsequent entity-lifecycle, webhook and clock source is excluded from that checkpoint and its checks.
 
 ## Published 19-crate acceptance
 
@@ -41,6 +53,8 @@ Storage tests verify owned v1→v2 migration, rollback/foreign-schema rejection,
 These receipts establish the implemented subset. They do not verify complete integrations, frontend/browser use, upstream database compatibility, custom authorization policies, hardware operation, or full Home Assistant parity. Synchronous handlers already running must terminate before joined shutdown can complete.
 
 ## Linux checkpoint CI
+
+Checkpoint `33a67c42d782debc54046f32069b05edaf325d98` passed [Linux run 42202324831](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42202324831), including formatting, strict all-target Clippy, all tests and actual CLI configuration validation. It excludes subsequent entity-lifecycle and webhook work.
 
 Checkpoint `76aa09afc13e4a1f36051e9f4e1107d2db6d807b` passed [Linux run 42189652679](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42189652679), including formatting, strict all-target Clippy, all tests and CLI example validation. The separate documentation commit `d5d7727905c895acdbd47213c9ab300eca7db074` also passed [run 42181402458](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42181402458). Neither run contains subsequent image integration work.
 

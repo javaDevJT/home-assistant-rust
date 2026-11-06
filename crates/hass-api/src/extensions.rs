@@ -190,6 +190,7 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
         || matches!(kind, "zone/create" | "zone/update" | "zone/delete")
         || matches!(kind, "person/create" | "person/update" | "person/delete")
         || matches!(kind, "image/create" | "image/update" | "image/delete")
+        || kind == "webhook/list"
         || kind.starts_with("config/auth_provider/")
         || matches!(
             kind,
@@ -264,9 +265,13 @@ pub(crate) fn same_authority(left: &Identity, right: &Identity) -> bool {
 pub(crate) async fn handle_ws(
     state: &AppState,
     identity: &Identity,
+    origin: crate::network::ClientOrigin,
     command: &Value,
 ) -> Option<Result<Value>> {
     let kind = command.get("type")?.as_str()?;
+    if kind.starts_with("webhook/") {
+        return crate::webhooks::handle_ws(state, identity, origin, command).await;
+    }
     if kind.starts_with("image/") {
         let Some(manager) = state.features.images.clone() else {
             return Some(Err(Error::NotFound(

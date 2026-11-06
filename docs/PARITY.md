@@ -31,10 +31,10 @@ Protocol tags are evidence-led: each needs a matching manifest selector/dependen
 | Status | Integrations | Meaning |
 | --- | ---: | --- |
 | Complete | 0 | No entire upstream integration is accepted as full parity. |
-| Partial | 29 | Rust source implements an identifiable subset; the full upstream behavior and acceptance remain open. |
-| Unported | 1,536 | No behaviorally accepted native adapter is evidenced for the manifest domain. |
+| Partial | 32 | Rust source implements an identifiable subset; the full upstream behavior and acceptance remain open. |
+| Unported | 1,533 | No behaviorally accepted native adapter is evidenced for the manifest domain. |
 
-The partial domains are api, auth, automation, config, counter, device_tracker, group, homeassistant, http, image_upload, input_boolean, input_button, input_datetime, input_number, input_select, input_text, mqtt, persistent_notification, person, recorder, rest, rest_command, scene, schedule, script, template, timer, websocket_api, and zone. Native groups, generic controls, notification transport/triggers, tracker/person/zone pipelines, image upload/serving/profile selection, template entities, MQTT config-entry/registry lifecycle, REST lifecycle, and recorder maintenance have focused acceptance evidence. The JSON retains initial source-export/line-count snapshots alongside updated port status and evidence paths; exact primary checks and revisions are recorded in [PORTING.md](PORTING.md) and [VALIDATION.md](VALIDATION.md). Source presence alone is never full acceptance.
+The partial domains are api, auth, automation, config, counter, device_tracker, group, homeassistant, http, image_upload, input_boolean, input_button, input_datetime, input_number, input_select, input_text, mqtt, persistent_notification, person, recorder, rest, rest_command, scene, schedule, script, template, time_date, timer, uptime, webhook, websocket_api, and zone. Native groups, generic controls, notification and webhook triggers, tracker/person/zone pipelines, image upload/serving/profile selection, shared entity lifecycle, clock providers, template entities, MQTT config-entry/registry lifecycle, REST lifecycle, and recorder maintenance have focused acceptance evidence. The JSON retains initial source-export/line-count snapshots alongside updated port status and evidence paths; exact primary checks and revisions are recorded in [PORTING.md](PORTING.md) and [VALIDATION.md](VALIDATION.md). Source presence alone is never full acceptance.
 
 ## Core work that gates the integration waves
 
@@ -43,7 +43,7 @@ These shared systems need pinned-source behavior and acceptance evidence before 
 | Order | Core subsystem | Remaining work |
 | --- | --- | --- |
 | 0 | Startup, loader, configuration entries and discovery | Extend accepted native config/options flows and setup/unload/retry/migration with manifest-aware validation, dependency ordering, remaining discovery/subentry flows and complete rollback/reload contracts. YAML startup accepts a limited native subset. |
-| 1 | Entities and platform lifecycle | Add entity identity and capabilities, platform setup, add/remove/restore/update, polling/coordinator ownership, registry linkage and unload cleanup. A state row or helper-created entity does not cover this lifecycle. |
+| 1 | Entities and platform lifecycle | Extend shared native identity, metadata, leases, registry linkage, restore and unload with generic platform setup, polling/coordinator ownership, full capabilities/domain behavior and exhaustive failure/parity cases. Actual template and clock providers already use the lifecycle. |
 | 2 | Registries | Extend accepted native CRUD/identity/events to remaining pinned payloads, child/composite devices, categories and other registries, retaining atomic foreign-reference and persistence checks. |
 | 3 | Users, auth providers and permissions | Extend accepted local password/session/JWT/TOTP behavior with remaining providers, custom permissions and all pinned command/service authorization cases. |
 | 4 | Runtime, storage and recorder | Extend accepted history/purge/repack with complete recorder ingestion/filtering, statistics, repairs, migrations and every pinned query contract. Native SQLite recording remains a subset of recorder. |

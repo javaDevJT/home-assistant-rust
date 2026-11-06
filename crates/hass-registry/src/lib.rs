@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+mod provider;
 pub mod targets;
 mod websocket;
+pub use provider::{ProviderEntityInfo, ProviderEntityRegistration};
 
 /// Result type shared with the core runtime.
 pub type Result<T> = hass_core::Result<T>;
@@ -335,6 +337,8 @@ impl DeviceEntry {
 /// Input used by integrations to identify or create a device.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DeviceRegistration {
+    /// Provider device type; Home Assistant currently defines only `service`.
+    pub entry_type: Option<String>,
     pub config_entry_id: Option<String>,
     pub config_subentry_id: Option<String>,
     pub identifiers: BTreeSet<(String, String)>,
@@ -1110,6 +1114,9 @@ impl Registries {
                 if registration.name.is_some() {
                     new.name = registration.name.clone();
                 }
+                if registration.entry_type.is_some() {
+                    new.entry_type = registration.entry_type.clone();
+                }
                 if registration.manufacturer.is_some() {
                     new.manufacturer = registration.manufacturer.clone();
                 }
@@ -1204,6 +1211,9 @@ impl Registries {
                 if registration.name.is_some() {
                     entry.name = registration.name.clone();
                 }
+                if registration.entry_type.is_some() {
+                    entry.entry_type = registration.entry_type.clone();
+                }
                 if registration.manufacturer.is_some() {
                     entry.manufacturer = registration.manufacturer.clone();
                 }
@@ -1268,7 +1278,7 @@ impl Registries {
                 connections: registration.connections.clone(),
                 created_at: now,
                 disabled_by: None,
-                entry_type: None,
+                entry_type: registration.entry_type.clone(),
                 hw_version: registration.hw_version.clone(),
                 identifiers: registration.identifiers.clone(),
                 labels: registration.labels.clone(),
@@ -2156,6 +2166,13 @@ fn validate_registration(input: &EntityRegistration) -> Result<()> {
     Ok(())
 }
 fn validate_device_registration(input: &DeviceRegistration) -> Result<()> {
+    if input
+        .entry_type
+        .as_deref()
+        .is_some_and(|kind| kind != "service")
+    {
+        return Err(invalid("device entry_type must be service or absent"));
+    }
     if input.identifiers.is_empty() && input.connections.is_empty() {
         return Err(invalid(
             "a device requires at least one identifier or connection",

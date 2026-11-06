@@ -12,6 +12,56 @@ use crate::{
 };
 
 #[test]
+fn service_device_type_survives_provider_refresh_removal_and_restore() {
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Runtime::new(store.clone()).unwrap();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let mut registration = DeviceRegistration {
+        entry_type: Some("service".into()),
+        config_entry_id: Some("uptime-entry".into()),
+        identifiers: BTreeSet::from([("uptime".into(), "uptime-entry".into())]),
+        name: Some("Uptime".into()),
+        ..Default::default()
+    };
+    let device = registries
+        .get_or_create_device(registration.clone())
+        .unwrap();
+    assert_eq!(device.entry_type.as_deref(), Some("service"));
+    registries
+        .update_device(
+            &device.id,
+            DeviceUpdate {
+                name_by_user: Some(Some("My service".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    registration.name = Some("Provider refreshed".into());
+    let updated = registries
+        .get_or_create_device(registration.clone())
+        .unwrap();
+    assert_eq!(updated.name_by_user.as_deref(), Some("My service"));
+    assert_eq!(updated.entry_type.as_deref(), Some("service"));
+    registries.remove_device(&device.id).unwrap();
+    drop(registries);
+    drop(runtime);
+    let runtime = Runtime::new(store).unwrap();
+    let registries = Registries::new(runtime).unwrap();
+    let restored = registries
+        .get_or_create_device(registration.clone())
+        .unwrap();
+    assert_eq!(restored.id, device.id);
+    assert_eq!(restored.entry_type.as_deref(), Some("service"));
+    assert_eq!(restored.name_by_user.as_deref(), Some("My service"));
+    registration.entry_type = Some("unsupported-type".into());
+    assert!(matches!(
+        registries.get_or_create_device(registration),
+        Err(Error::InvalidInput(_))
+    ));
+    assert_eq!(registries.devices().len(), 1);
+}
+
+#[test]
 fn persists_registry_state_and_stable_identity_across_restart() {
     let store = Arc::new(MemoryStore::default());
     let runtime = Runtime::new(store.clone()).unwrap();

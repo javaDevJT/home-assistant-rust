@@ -20,7 +20,10 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -29,10 +32,13 @@ use chrono_tz::Tz;
 use hass_core::{Context, Error, Event, Result, Runtime, ServiceCall, ServiceResult, State};
 use hass_script::{run_sequence, validate_sequence};
 use hass_template::TemplateEngine;
+use hass_webhook::{
+    WebhookConfig, WebhookHandlerError, WebhookManager, WebhookRegistration, WebhookRequest,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio::{
-    sync::{broadcast, watch},
+    sync::{broadcast, mpsc, watch},
     task::{JoinHandle, JoinSet},
     time::Instant as TokioInstant,
 };
@@ -43,6 +49,7 @@ const MAX_CONDITIONS: usize = 16;
 const MAX_ACTIONS: usize = 32;
 const MAX_ACTIVE_RUNS: usize = 16;
 const MAX_PENDING_RUNS: usize = 128;
+const MAX_WEBHOOK_DELIVERIES: usize = 128;
 const MAX_SCHEDULED_RUNS: usize = 128;
 const MAX_TRIGGER_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_LINEAGE_DEPTH: usize = 32;
@@ -181,6 +188,56 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_data: Option<Map<String, Value>>,
     },
+    /// Match an inbound Home Assistant webhook.
+    Webhook {
+        webhook_id: String,
+        #[serde(default = "default_webhook_local_only")]
+        local_only: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allowed_methods: Option<WebhookAllowedMethods>,
+        #[serde(default = "default_webhook_enabled")]
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+    },
+}
+
+fn default_webhook_local_only() -> bool {
+    true
+}
+
+fn default_webhook_enabled() -> bool {
+    true
+}
+
+/// A single method or list of methods accepted by a webhook trigger.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum WebhookAllowedMethods {
+    /// One allowed method, as in `allowed_methods: PUT`.
+    One(String),
+    /// Several allowed methods, as in `allowed_methods: [GET, POST]`.
+    Many(Vec<String>),
+}
+
+impl WebhookAllowedMethods {
+    fn into_vec(self) -> Vec<String> {
+        let methods = match self {
+            Self::One(method) => vec![method],
+            Self::Many(methods) => methods,
+        };
+        methods
+            .into_iter()
+            .map(|method| method.to_ascii_uppercase())
+            .collect()
+    }
+}
+
+fn webhook_method_supported(method: &str) -> bool {
+    let method = method.to_ascii_uppercase();
+    hass_webhook::SUPPORTED_METHODS.contains(&method.as_str())
 }
 
 /// Update types emitted by Home Assistant's persistent notification trigger.
@@ -310,6 +367,19 @@ enum TriggerRepr {
         #[serde(default)]
         event_data: Option<Map<String, Value>>,
     },
+    Webhook {
+        webhook_id: String,
+        #[serde(default = "default_webhook_local_only")]
+        local_only: bool,
+        #[serde(default)]
+        allowed_methods: Option<WebhookAllowedMethods>,
+        #[serde(default = "default_webhook_enabled")]
+        enabled: bool,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        alias: Option<String>,
+    },
 }
 
 impl From<TriggerRepr> for Trigger {
@@ -387,6 +457,21 @@ impl From<TriggerRepr> for Trigger {
             } => Self::Event {
                 event_type,
                 event_data,
+            },
+            TriggerRepr::Webhook {
+                webhook_id,
+                local_only,
+                allowed_methods,
+                enabled,
+                id,
+                alias,
+            } => Self::Webhook {
+                webhook_id,
+                local_only,
+                allowed_methods,
+                enabled,
+                id,
+                alias,
             },
         }
     }
@@ -762,6 +847,25 @@ pub fn validate(automations: &[Automation]) -> Result<()> {
                     )));
                 }
                 Trigger::Event { .. } => {}
+                Trigger::Webhook {
+                    allowed_methods, ..
+                } => {
+                    let supported = match allowed_methods {
+                        None => true,
+                        Some(WebhookAllowedMethods::One(method)) => {
+                            webhook_method_supported(method)
+                        }
+                        Some(WebhookAllowedMethods::Many(methods)) => methods
+                            .iter()
+                            .all(|method| webhook_method_supported(method)),
+                    };
+                    if !supported {
+                        return Err(Error::InvalidInput(format!(
+                            "automation `{}` has an invalid webhook allowed_methods value",
+                            automation.id
+                        )));
+                    }
+                }
             }
         }
         for condition in &automation.conditions {
@@ -1122,6 +1226,9 @@ fn handle_automation_service(
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id, new_enabled);
+        if let Some(webhooks) = control.webhooks.as_ref().and_then(Weak::upgrade) {
+            webhooks.reconcile()?;
+        }
         changed_states.push(publish_automation_state(
             runtime,
             automation,
@@ -1235,6 +1342,84 @@ fn homeassistant_trigger_variables(
     )
 }
 
+fn webhook_setup_variables(
+    template: &TemplateEngine,
+    runtime: &Runtime,
+    automation: &Automation,
+) -> Option<Map<String, Value>> {
+    let entity_id = automation_entity_id(&automation.id);
+    let this = runtime
+        .get_state(&entity_id)
+        .and_then(|state| serde_json::to_value(state).ok())
+        .unwrap_or(Value::Null);
+    let mut variables = Map::new();
+    variables.insert("this".into(), this);
+    for (name, value) in &automation.trigger_variables {
+        variables
+            .entry(name.clone())
+            .or_insert_with(|| value.clone());
+    }
+    let raw_variables = variables.clone();
+    for (name, value) in raw_variables {
+        if name == "this" {
+            continue;
+        }
+        match render_config_value(template, &value, &variables) {
+            Ok(value) => {
+                variables.insert(name, value);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    automation_id = %automation.id,
+                    "webhook trigger variables could not be rendered"
+                );
+                return None;
+            }
+        }
+    }
+    Some(variables)
+}
+
+fn webhook_trigger_fields(request: &WebhookRequest, target: &WebhookTarget) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert(
+        "webhook_id".into(),
+        Value::String(request.webhook_id().to_owned()),
+    );
+    fields.insert("description".into(), Value::String("webhook".into()));
+    fields.insert("id".into(), Value::String(target.id.clone()));
+    fields.insert("idx".into(), Value::String(target.idx.clone()));
+    fields.insert(
+        "alias".into(),
+        target.alias.clone().map_or(Value::Null, Value::String),
+    );
+    if let Some(json) = &request.json {
+        fields.insert("json".into(), json.clone());
+    } else {
+        fields.insert(
+            "data".into(),
+            Value::Object(
+                request
+                    .form
+                    .iter()
+                    .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+                    .collect(),
+            ),
+        );
+    }
+    fields.insert(
+        "query".into(),
+        Value::Object(
+            request
+                .query
+                .iter()
+                .map(|(name, value)| (name.clone(), Value::String(value.clone())))
+                .collect(),
+        ),
+    );
+    fields
+}
+
 fn initial_template_states(
     runtime: &Runtime,
     automations: &[Automation],
@@ -1271,6 +1456,38 @@ pub fn start_with_timezone(
     runtime: Runtime,
     automations: Vec<Automation>,
     timezone: impl AsRef<str>,
+) -> Result<AutomationEngine> {
+    start_with_timezone_and_manager(runtime, automations, timezone, None)
+}
+
+/// Start the automation engine with a process-local webhook callback manager.
+///
+/// Webhook requests are delivered to the automation listener over a private,
+/// bounded channel. They are not published as runtime events.
+pub fn start_with_webhooks(
+    runtime: Runtime,
+    automations: Vec<Automation>,
+    webhooks: WebhookManager,
+) -> Result<AutomationEngine> {
+    let timezone = runtime.time_zone();
+    start_with_timezone_and_webhooks(runtime, automations, timezone, webhooks)
+}
+
+/// Start the automation engine with a configured timezone and webhook manager.
+pub fn start_with_timezone_and_webhooks(
+    runtime: Runtime,
+    automations: Vec<Automation>,
+    timezone: impl AsRef<str>,
+    webhooks: WebhookManager,
+) -> Result<AutomationEngine> {
+    start_with_timezone_and_manager(runtime, automations, timezone, Some(webhooks))
+}
+
+fn start_with_timezone_and_manager(
+    runtime: Runtime,
+    automations: Vec<Automation>,
+    timezone: impl AsRef<str>,
+    webhook_manager: Option<WebhookManager>,
 ) -> Result<AutomationEngine> {
     validate(&automations)?;
     let timezone = timezone
@@ -1309,8 +1526,27 @@ pub fn start_with_timezone(
         enabled.insert(automation.id.clone(), current);
         publish_automation_state(&runtime, automation, current, Context::default())?;
     }
+    let enabled = Arc::new(Mutex::new(enabled));
+    let (webhook_control, webhook_receiver) = if let Some(manager) = webhook_manager {
+        let (sender, receiver) = mpsc::channel(MAX_WEBHOOK_DELIVERIES);
+        let control = Arc::new(WebhookControl {
+            manager,
+            runtime: runtime.clone(),
+            automations: automations.clone(),
+            delivery_tx: sender,
+            registrations: Mutex::new(HashMap::new()),
+            stopped: AtomicBool::new(false),
+        });
+        if let Err(error) = control.reconcile() {
+            control.deactivate();
+            return Err(error);
+        }
+        (Some(control), Some(receiver))
+    } else {
+        (None, None)
+    };
     let controls = AutomationControl {
-        enabled: Arc::new(Mutex::new(enabled)),
+        enabled,
         automations: Arc::new(
             automations
                 .iter()
@@ -1318,8 +1554,14 @@ pub fn start_with_timezone(
                 .map(|automation| (automation.id.clone(), automation))
                 .collect(),
         ),
+        webhooks: webhook_control.as_ref().map(Arc::downgrade),
     };
-    register_automation_services(&runtime, controls.clone())?;
+    if let Err(error) = register_automation_services(&runtime, controls.clone()) {
+        if let Some(webhooks) = &webhook_control {
+            webhooks.deactivate();
+        }
+        return Err(error);
+    }
 
     let engine_automations = automations.clone();
     let engine_controls = controls.clone();
@@ -1335,6 +1577,7 @@ pub fn start_with_timezone(
             template_previous,
             receiver,
             signal_receiver,
+            webhook_receiver,
             cancel_rx,
             cancel_tx: listener_cancel,
         })
@@ -1346,6 +1589,7 @@ pub fn start_with_timezone(
         runtime,
         automations: engine_automations,
         controls: engine_controls,
+        webhooks: webhook_control,
     })
 }
 
@@ -1357,6 +1601,7 @@ pub struct AutomationEngine {
     runtime: Runtime,
     automations: Vec<Automation>,
     controls: AutomationControl,
+    webhooks: Option<Arc<WebhookControl>>,
 }
 
 impl AutomationEngine {
@@ -1364,6 +1609,9 @@ impl AutomationEngine {
     /// Synchronous service handlers already in progress are joined and must
     /// return before shutdown completes.
     pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(webhooks) = &self.webhooks {
+            webhooks.deactivate();
+        }
         self.cancel.send_replace(true);
         let task = self
             .task
@@ -1414,6 +1662,9 @@ impl AutomationEngine {
 
 impl Drop for AutomationEngine {
     fn drop(&mut self) {
+        if let Some(webhooks) = &self.webhooks {
+            webhooks.deactivate();
+        }
         self.cancel.send_replace(true);
     }
 }
@@ -1430,6 +1681,183 @@ struct PendingRun {
 struct AutomationControl {
     enabled: Arc<Mutex<HashMap<String, bool>>>,
     automations: Arc<HashMap<String, Automation>>,
+    // Runtime service callbacks retain AutomationControl, so this must stay
+    // weak: WebhookControl owns a Runtime used to render configured IDs.
+    webhooks: Option<Weak<WebhookControl>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WebhookTarget {
+    automation_id: String,
+    trigger_index: usize,
+    id: String,
+    idx: String,
+    alias: Option<String>,
+}
+
+struct WebhookPlan {
+    config: WebhookConfig,
+    targets: Vec<WebhookTarget>,
+}
+
+struct RegisteredWebhook {
+    config: WebhookConfig,
+    targets: Vec<WebhookTarget>,
+    _registration: WebhookRegistration,
+}
+
+struct WebhookDelivery {
+    request: WebhookRequest,
+    targets: Vec<WebhookTarget>,
+}
+
+struct WebhookControl {
+    manager: WebhookManager,
+    runtime: Runtime,
+    automations: Vec<Automation>,
+    delivery_tx: mpsc::Sender<WebhookDelivery>,
+    registrations: Mutex<HashMap<String, RegisteredWebhook>>,
+    stopped: AtomicBool,
+}
+
+impl WebhookControl {
+    fn reconcile(&self) -> Result<()> {
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let template = TemplateEngine::new(self.runtime.clone());
+        let mut desired = Vec::<(String, WebhookPlan)>::new();
+        let mut desired_index = HashMap::<String, usize>::new();
+
+        for automation in &self.automations {
+            let Some(variables) = webhook_setup_variables(&template, &self.runtime, automation)
+            else {
+                continue;
+            };
+            for (trigger_index, trigger) in automation.triggers.iter().enumerate() {
+                let Trigger::Webhook {
+                    webhook_id,
+                    local_only,
+                    allowed_methods,
+                    enabled: trigger_enabled,
+                    id,
+                    alias,
+                } = trigger
+                else {
+                    continue;
+                };
+                if !trigger_enabled {
+                    continue;
+                }
+                let rendered_id = match template.render(webhook_id, &variables) {
+                    Ok(webhook_id) => webhook_id,
+                    Err(_) => {
+                        tracing::warn!(
+                            automation_id = %automation.id,
+                            "webhook trigger ID template could not be rendered"
+                        );
+                        continue;
+                    }
+                };
+                let target = WebhookTarget {
+                    automation_id: automation.id.clone(),
+                    trigger_index,
+                    id: id.clone().unwrap_or_else(|| trigger_index.to_string()),
+                    idx: trigger_index.to_string(),
+                    alias: alias.clone(),
+                };
+                if let Some(index) = desired_index.get(&rendered_id).copied() {
+                    desired[index].1.targets.push(target);
+                    continue;
+                }
+                let config = WebhookConfig {
+                    domain: "automation".into(),
+                    name: automation
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| automation.id.clone()),
+                    local_only: *local_only,
+                    allowed_methods: allowed_methods.clone().map(WebhookAllowedMethods::into_vec),
+                };
+                desired_index.insert(rendered_id.clone(), desired.len());
+                desired.push((
+                    rendered_id,
+                    WebhookPlan {
+                        config,
+                        targets: vec![target],
+                    },
+                ));
+            }
+        }
+
+        let mut registrations = self
+            .registrations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.stopped.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let remove = registrations
+            .iter()
+            .filter_map(|(webhook_id, current)| {
+                let wanted = desired
+                    .iter()
+                    .find(|(desired_id, _)| desired_id == webhook_id)
+                    .map(|(_, plan)| plan);
+                (!wanted.is_some_and(|plan| {
+                    plan.config == current.config && plan.targets == current.targets
+                }))
+                .then(|| webhook_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for webhook_id in remove {
+            registrations.remove(&webhook_id);
+        }
+
+        let mut additions = Vec::new();
+        for (webhook_id, plan) in desired {
+            if registrations.contains_key(&webhook_id) {
+                continue;
+            }
+            let sender = self.delivery_tx.clone();
+            let targets = plan.targets.clone();
+            let registration = self
+                .manager
+                .register(webhook_id.clone(), plan.config.clone(), move |request| {
+                    let sender = sender.clone();
+                    let targets = targets.clone();
+                    async move {
+                        sender
+                            .try_send(WebhookDelivery { request, targets })
+                            .map_err(|_| WebhookHandlerError)?;
+                        Ok(None)
+                    }
+                })
+                .map_err(|error| {
+                    Error::Service(format!("webhook callback registration failed: {error}"))
+                })?;
+            additions.push((
+                webhook_id,
+                RegisteredWebhook {
+                    config: plan.config,
+                    targets: plan.targets,
+                    _registration: registration,
+                },
+            ));
+        }
+        for (webhook_id, registration) in additions {
+            registrations.insert(webhook_id, registration);
+        }
+        Ok(())
+    }
+
+    fn deactivate(&self) {
+        self.stopped.store(true, Ordering::Release);
+        self.registrations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
 }
 
 #[derive(Clone)]
@@ -1451,6 +1879,7 @@ struct EngineInput {
     template_previous: HashMap<(String, usize), bool>,
     receiver: broadcast::Receiver<Event>,
     signal_receiver: Option<broadcast::Receiver<Event>>,
+    webhook_receiver: Option<mpsc::Receiver<WebhookDelivery>>,
     cancel_rx: watch::Receiver<bool>,
     cancel_tx: watch::Sender<bool>,
 }
@@ -1504,6 +1933,7 @@ async fn run_engine(input: EngineInput) -> Result<()> {
         mut template_previous,
         mut receiver,
         mut signal_receiver,
+        mut webhook_receiver,
         mut cancel_rx,
         cancel_tx,
     } = input;
@@ -1679,6 +2109,29 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                     if failure.is_some() { break; }
                 }
                 if failure.is_some() { break; }
+            }
+            webhook = async {
+                match webhook_receiver.as_mut() {
+                    Some(receiver) => receiver.recv().await,
+                    None => std::future::pending::<Option<WebhookDelivery>>().await,
+                }
+            } => {
+                match webhook {
+                    Some(delivery) => {
+                        if let Err(error) = enqueue_webhook_delivery(
+                            &runtime,
+                            &controls,
+                            delivery,
+                            &mut pending,
+                            &mut active_by_automation,
+                            &mut schedule_cancels,
+                        ) {
+                            failure = Some(error);
+                            break;
+                        }
+                    }
+                    None => webhook_receiver = None,
+                }
             }
             received = receiver.recv() => {
                 match received {
@@ -2032,6 +2485,60 @@ fn enqueue_run(
     Ok(true)
 }
 
+fn enqueue_webhook_delivery(
+    runtime: &Runtime,
+    controls: &AutomationControl,
+    delivery: WebhookDelivery,
+    pending: &mut VecDeque<PendingRun>,
+    active: &mut HashMap<String, HashMap<u64, watch::Sender<bool>>>,
+    scheduled: &mut HashMap<ScheduleIdentity, (u64, watch::Sender<bool>)>,
+) -> Result<()> {
+    for target in delivery.targets {
+        if !automation_is_enabled(controls, &target.automation_id) {
+            continue;
+        }
+        let Some(automation) = controls.automations.get(&target.automation_id) else {
+            continue;
+        };
+        if !matches!(
+            automation.triggers.get(target.trigger_index),
+            Some(Trigger::Webhook { enabled: true, .. })
+        ) {
+            continue;
+        }
+        let variables = variables_for_trigger_with_fields(
+            runtime,
+            automation,
+            None,
+            "webhook",
+            None,
+            Some(webhook_trigger_fields(&delivery.request, &target)),
+        );
+        match conditions_match(runtime, &automation.conditions, &variables) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => {
+                tracing::warn!(
+                    automation_id = %automation.id,
+                    "webhook automation condition evaluation failed"
+                );
+                continue;
+            }
+        }
+        let run = PendingRun {
+            automation: automation.clone(),
+            trigger_context: Context::default(),
+            lineage: Vec::new(),
+            variables,
+        };
+        if run.automation.mode == AutomationMode::Restart {
+            cancel_automation_runs(&run.automation.id, pending, active, scheduled);
+        }
+        enqueue_run(pending, active, run)?;
+    }
+    Ok(())
+}
+
 fn cancel_automation_runs(
     automation_id: &str,
     pending: &mut VecDeque<PendingRun>,
@@ -2210,6 +2717,7 @@ fn match_event_trigger(
         }
         Trigger::PersistentNotification { .. } => (false, &None, None),
         Trigger::Time { .. } | Trigger::TimePattern { .. } => (false, &None, None),
+        Trigger::Webhook { .. } => (false, &None, None),
     };
     if !matches {
         return Ok(None);
@@ -2240,6 +2748,7 @@ fn trigger_platform_name(trigger: &Trigger) -> &'static str {
         Trigger::Mqtt { .. } => "mqtt",
         Trigger::PersistentNotification { .. } => "persistent_notification",
         Trigger::Event { .. } => "event",
+        Trigger::Webhook { .. } => "webhook",
     }
 }
 
@@ -2777,6 +3286,7 @@ mod tests {
     use super::*;
     use hass_core::{MemoryStore, ServiceResult};
     use hass_notifications::NotificationIntegration;
+    use hass_webhook::WebhookOrigin;
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration as StdDuration,
@@ -4270,5 +4780,463 @@ mod tests {
         .expect("queue overflow must terminate the automation listener");
         let error = engine.shutdown().await.unwrap_err();
         assert!(error.to_string().contains("pending run queue"));
+    }
+
+    #[tokio::test]
+    async fn webhook_triggers_render_json_form_and_query_metadata_privately() {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Runtime::new(store.clone()).unwrap();
+        let mut public_events = runtime.subscribe();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let manager = WebhookManager::new();
+        let engine = start_with_webhooks(
+            runtime.clone(),
+            config(
+                r#"
+- id: json_hook
+  triggers:
+    - trigger: webhook
+      webhook_id: json-secret-id
+      local_only: true
+      allowed_methods: [post]
+      id: json-trigger-id
+      alias: json-trigger-alias
+  actions:
+    - action: test.notify
+      data:
+        platform: "{{ trigger.platform }}"
+        description: "{{ trigger.description }}"
+        webhook_id: "{{ trigger.webhook_id }}"
+        trigger_id: "{{ trigger.id }}"
+        trigger_idx: "{{ trigger.idx }}"
+        trigger_alias: "{{ trigger.alias }}"
+        payload: "{{ trigger.json.message }}"
+        origin: "{{ trigger.query.origin }}"
+- id: form_hook
+  triggers:
+    - trigger: webhook
+      webhook_id: form-secret-id
+      local_only: false
+      id: form-trigger-id
+      alias: form-trigger-alias
+  actions:
+    - action: test.notify
+      data:
+        platform: "{{ trigger.platform }}"
+        webhook_id: "{{ trigger.webhook_id }}"
+        trigger_id: "{{ trigger.id }}"
+        trigger_idx: "{{ trigger.idx }}"
+        trigger_alias: "{{ trigger.alias }}"
+        payload: "{{ trigger.data.answer }}"
+        origin: "{{ trigger.query.origin }}"
+"#,
+            ),
+            manager.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(manager.admin_inventory().len(), 2);
+        let remote = WebhookRequest::new(
+            "POST",
+            WebhookOrigin {
+                client_ip: Some("203.0.113.7".parse().unwrap()),
+                is_local: false,
+            },
+        );
+        assert_eq!(manager.dispatch("json-secret-id", remote).await.status, 200);
+        assert_eq!(
+            manager
+                .dispatch(
+                    "json-secret-id",
+                    WebhookRequest::new(
+                        "GET",
+                        WebhookOrigin {
+                            client_ip: Some("127.0.0.1".parse().unwrap()),
+                            is_local: true,
+                        },
+                    ),
+                )
+                .await
+                .status,
+            405
+        );
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(60), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        let mut json_request = WebhookRequest::new(
+            "POST",
+            WebhookOrigin {
+                client_ip: Some("127.0.0.1".parse().unwrap()),
+                is_local: true,
+            },
+        );
+        json_request.body = br#"{"message":"private-json-body"}"#.to_vec();
+        json_request.json = Some(serde_json::json!({"message":"private-json-body"}));
+        json_request
+            .query
+            .insert("origin".into(), "private-json-query".into());
+        assert_eq!(
+            manager
+                .dispatch("json-secret-id", json_request)
+                .await
+                .status,
+            200
+        );
+        let json_call = receive_notification_run(&mut receiver).await;
+        assert_eq!(json_call.data["platform"], "webhook");
+        assert_eq!(json_call.data["description"], "webhook");
+        assert_eq!(json_call.data["webhook_id"], "json-secret-id");
+        assert_eq!(json_call.data["trigger_id"], "json-trigger-id");
+        assert_eq!(json_call.data["trigger_idx"], "0");
+        assert_eq!(json_call.data["trigger_alias"], "json-trigger-alias");
+        assert_eq!(json_call.data["payload"], "private-json-body");
+        assert_eq!(json_call.data["origin"], "private-json-query");
+
+        let mut form_request = WebhookRequest::new("POST", WebhookOrigin::default());
+        form_request
+            .form
+            .insert("answer".into(), "private-form-body".into());
+        form_request
+            .query
+            .insert("origin".into(), "private-form-query".into());
+        assert_eq!(
+            manager
+                .dispatch("form-secret-id", form_request)
+                .await
+                .status,
+            200
+        );
+        let form_call = receive_notification_run(&mut receiver).await;
+        assert_eq!(form_call.data["platform"], "webhook");
+        assert_eq!(form_call.data["webhook_id"], "form-secret-id");
+        assert_eq!(form_call.data["trigger_id"], "form-trigger-id");
+        assert_eq!(form_call.data["trigger_idx"], "0");
+        assert_eq!(form_call.data["trigger_alias"], "form-trigger-alias");
+        assert_eq!(form_call.data["payload"], "private-form-body");
+        assert_eq!(form_call.data["origin"], "private-form-query");
+
+        let stored_events = store.events().unwrap();
+        let serialized_events = stored_events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for private_value in [
+            "json-secret-id",
+            "form-secret-id",
+            "private-json-body",
+            "private-form-body",
+            "private-json-query",
+            "private-form-query",
+        ] {
+            assert!(!serialized_events.contains(private_value));
+        }
+        while let Ok(event) = public_events.try_recv() {
+            let serialized = serde_json::to_string(&event).unwrap();
+            assert!(!serialized.contains("json-secret-id"));
+            assert!(!serialized.contains("form-secret-id"));
+            assert!(!serialized.contains("private-json-body"));
+            assert!(!serialized.contains("private-form-body"));
+        }
+
+        engine.shutdown().await.unwrap();
+        assert!(manager.admin_inventory().is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_webhook_automation_keeps_registration_but_unload_removes_it() {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Runtime::new(store.clone()).unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let manager = WebhookManager::new();
+        let engine = start_with_webhooks(
+            runtime.clone(),
+            config(
+                r#"
+- id: initially_disabled
+  initial_state: false
+  triggers:
+    - trigger: webhook
+      webhook_id: disabled-automation-id
+      local_only: false
+  actions:
+    - action: test.notify
+      data:
+        message: ran
+- id: disabled_trigger
+  triggers:
+    - trigger: webhook
+      webhook_id: disabled-trigger-id
+      enabled: false
+  actions:
+    - action: test.notify
+      data:
+        message: wrong-trigger-ran
+"#,
+            ),
+            manager.clone(),
+        )
+        .unwrap();
+
+        assert_eq!(manager.admin_inventory().len(), 1);
+        assert_eq!(
+            manager
+                .dispatch(
+                    "disabled-automation-id",
+                    WebhookRequest::new("POST", WebhookOrigin::default())
+                )
+                .await
+                .status,
+            200
+        );
+        assert_eq!(
+            manager
+                .dispatch(
+                    "disabled-trigger-id",
+                    WebhookRequest::new("POST", WebhookOrigin::default())
+                )
+                .await
+                .status,
+            200
+        );
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(60), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        let call = |service: &str| ServiceCall {
+            domain: "automation".into(),
+            service: service.into(),
+            data: Map::new(),
+            target: serde_json::json!({ "entity_id": "automation.initially_disabled" })
+                .as_object()
+                .unwrap()
+                .clone(),
+            context: Context::default(),
+        };
+        runtime.call_service(call("turn_on")).unwrap();
+        assert_eq!(manager.admin_inventory().len(), 1);
+        manager
+            .dispatch(
+                "disabled-automation-id",
+                WebhookRequest::new("POST", WebhookOrigin::default()),
+            )
+            .await;
+        assert_eq!(
+            receive_notification_run(&mut receiver).await.data["message"],
+            "ran"
+        );
+
+        runtime.call_service(call("turn_off")).unwrap();
+        manager
+            .dispatch(
+                "disabled-automation-id",
+                WebhookRequest::new("POST", WebhookOrigin::default()),
+            )
+            .await;
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(60), receiver.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(manager.admin_inventory().len(), 1);
+
+        engine.shutdown().await.unwrap();
+        assert!(manager.admin_inventory().is_empty());
+        assert_eq!(Arc::strong_count(&store), 2);
+    }
+
+    #[tokio::test]
+    async fn duplicate_webhook_triggers_share_first_registration_and_fan_out() {
+        let runtime = runtime();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let manager = WebhookManager::new();
+        let engine = start_with_webhooks(
+            runtime,
+            config(
+                r#"
+- id: first_duplicate
+  alias: first name
+  triggers:
+    - trigger: webhook
+      webhook_id: shared-webhook-id
+      local_only: true
+      allowed_methods: [POST]
+      id: first-trigger
+  actions:
+    - action: test.notify
+      data: {message: first}
+- id: second_duplicate
+  alias: second name
+  triggers:
+    - trigger: webhook
+      webhook_id: shared-webhook-id
+      local_only: false
+      allowed_methods: [GET]
+      id: second-trigger
+  actions:
+    - action: test.notify
+      data: {message: second}
+"#,
+            ),
+            manager.clone(),
+        )
+        .unwrap();
+
+        let inventory = manager.admin_inventory();
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].name, "first name");
+        assert!(inventory[0].local_only);
+        assert_eq!(inventory[0].allowed_methods, ["POST"]);
+
+        let remote = WebhookRequest::new(
+            "POST",
+            WebhookOrigin {
+                client_ip: Some("203.0.113.15".parse().unwrap()),
+                is_local: false,
+            },
+        );
+        assert_eq!(
+            manager.dispatch("shared-webhook-id", remote).await.status,
+            200
+        );
+        assert_eq!(
+            manager
+                .dispatch(
+                    "shared-webhook-id",
+                    WebhookRequest::new("GET", WebhookOrigin::default())
+                )
+                .await
+                .status,
+            405
+        );
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(60), receiver.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .dispatch(
+                    "shared-webhook-id",
+                    WebhookRequest::new(
+                        "POST",
+                        WebhookOrigin {
+                            client_ip: Some("127.0.0.1".parse().unwrap()),
+                            is_local: true,
+                        },
+                    )
+                )
+                .await
+                .status,
+            200
+        );
+        let mut messages = vec![
+            receive_notification_run(&mut receiver).await.data["message"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+            receive_notification_run(&mut receiver).await.data["message"]
+                .as_str()
+                .unwrap()
+                .to_owned(),
+        ];
+        messages.sort();
+        assert_eq!(messages, ["first", "second"]);
+
+        engine.shutdown().await.unwrap();
+        assert!(manager.admin_inventory().is_empty());
+    }
+
+    #[tokio::test]
+    async fn webhook_registration_conflict_cleans_up_prior_additions_and_drop_is_weak() {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Runtime::new(store.clone()).unwrap();
+        let manager = WebhookManager::new();
+        let foreign_calls = Arc::new(AtomicUsize::new(0));
+        let foreign_callback_calls = Arc::clone(&foreign_calls);
+        let _foreign = manager
+            .register(
+                "occupied-id",
+                WebhookConfig::new("external", "reserved callback"),
+                move |_| {
+                    let calls = Arc::clone(&foreign_callback_calls);
+                    async move {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(None)
+                    }
+                },
+            )
+            .unwrap();
+
+        let conflicting = config(
+            r#"
+- id: conflicting
+  triggers:
+    - trigger: webhook
+      webhook_id: first-addition-id
+      local_only: false
+    - trigger: webhook
+      webhook_id: occupied-id
+      local_only: false
+  actions:
+    - action: test.notify
+      data: {message: ran}
+"#,
+        );
+        let error = match start_with_webhooks(runtime.clone(), conflicting, manager.clone()) {
+            Ok(engine) => {
+                drop(engine);
+                panic!("external ID conflicts must fail startup");
+            }
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("already registered"));
+        assert_eq!(manager.admin_inventory().len(), 1);
+        assert_eq!(manager.admin_inventory()[0].webhook_id, "occupied-id");
+        manager
+            .dispatch(
+                "occupied-id",
+                WebhookRequest::new("POST", WebhookOrigin::default()),
+            )
+            .await;
+        assert_eq!(foreign_calls.load(Ordering::SeqCst), 1);
+
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start_with_webhooks(
+            runtime.clone(),
+            config(
+                r#"
+- id: drop_cleanup
+  triggers:
+    - trigger: webhook
+      webhook_id: drop-cleanup-id
+  actions:
+    - action: test.notify
+      data: {message: ran}
+"#,
+            ),
+            manager.clone(),
+        )
+        .unwrap();
+        assert_eq!(manager.admin_inventory().len(), 2);
+        drop(engine);
+        assert_eq!(manager.admin_inventory().len(), 1);
+        tokio::time::timeout(StdDuration::from_secs(2), async {
+            while Arc::strong_count(&store) != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropping the engine must release its Runtime lease");
+        assert_eq!(manager.admin_inventory()[0].webhook_id, "occupied-id");
     }
 }

@@ -65,18 +65,17 @@ impl TemplateEngine {
             .map_err(|_| Error::InvalidInput("template output was not valid UTF-8".into()))
     }
 
-    /// Evaluate a single expression and preserve its JSON type.
+    /// Evaluate an expression or full template, preserving supported JSON types.
     ///
     /// Accepts either a bare expression such as `states('sensor.temp') | float`
-    /// or one `{{ ... }}` wrapper. Templates with control blocks or multiple
-    /// output nodes belong in [`Self::render`], which returns a string.
+    /// or one `{{ ... }}` wrapper. Control blocks and multiple output nodes use
+    /// the same bounded renderer as [`Self::render`], then parse supported
+    /// literal results. Ordinary text and quoted string results remain strings.
     pub fn render_value(&self, template: &str, variables: &Map<String, Value>) -> Result<Value> {
         ensure_template_size(template)?;
-        let expression = expression_body(template).ok_or_else(|| {
-            Error::InvalidInput(
-                "render_value accepts one expression, optionally wrapped in {{ }}".into(),
-            )
-        })?;
+        let Some(expression) = expression_body(template) else {
+            return self.render(template, variables).map(parse_rendered_value);
+        };
         let expression = self
             .environment
             .compile_expression(expression)
@@ -93,6 +92,54 @@ impl TemplateEngine {
         })?;
         serde_json::from_slice(&json_bytes.bytes)
             .map_err(|_| Error::InvalidInput("template value is not JSON-compatible".into()))
+    }
+}
+
+fn parse_rendered_value(rendered: String) -> Value {
+    let text = rendered.trim();
+    match text {
+        "True" => return Value::Bool(true),
+        "False" => return Value::Bool(false),
+        "None" => return Value::Null,
+        _ => {}
+    }
+    // The pinned result parser accepts decimal numeric text but deliberately
+    // retains scientific notation and quoted strings as the rendered text.
+    if text.bytes().any(|byte| byte.is_ascii_digit())
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'.' | b'+' | b'-'))
+    {
+        if text.contains('.') {
+            if let Ok(number) = text.parse::<f64>()
+                && let Some(number) = serde_json::Number::from_f64(number)
+            {
+                return Value::Number(number);
+            }
+        } else if let Ok(number) = text.parse::<i64>() {
+            return Value::Number(number.into());
+        } else if let Ok(number) = text.parse::<u64>() {
+            return Value::Number(number.into());
+        }
+    }
+    if matches!(text.as_bytes().first(), Some(b'[' | b'{'))
+        && let Ok(value @ (Value::Array(_) | Value::Object(_))) = serde_json::from_str(text)
+        && supported_container_literal(&value)
+        && !text.contains("\\/")
+    {
+        return value;
+    }
+    Value::String(text.to_owned())
+}
+
+fn supported_container_literal(value: &Value) -> bool {
+    match value {
+        // Lowercase JSON booleans/null are not Python literals. Keep an
+        // unsupported rendered container as text rather than change its type.
+        Value::Bool(_) | Value::Null => false,
+        Value::Array(values) => values.iter().all(supported_container_literal),
+        Value::Object(values) => values.values().all(supported_container_literal),
+        Value::Number(_) | Value::String(_) => true,
     }
 }
 
@@ -1337,10 +1384,56 @@ mod tests {
                 .render_value("{{ 'x' * 70000 }}", &Map::new())
                 .is_err()
         );
-        assert!(
+        assert_eq!(
             engine
                 .render_value("{% if true %}{{ 1 }}{% endif %}", &Map::new())
+                .unwrap(),
+            json!(1)
+        );
+        assert!(
+            engine
+                .render_value("prefix{{ 'x' * 70000 }}suffix", &Map::new())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn composite_templates_render_actions_and_parse_supported_literal_results() {
+        let engine = TemplateEngine::new(runtime());
+        let variables =
+            json!({"trigger":{"json":{"message":"hello"},"query":{"origin":"network"}}})
+                .as_object()
+                .unwrap()
+                .clone();
+        assert_eq!(
+            engine
+                .render_value(
+                    "{{ trigger.json.message }}|{{ trigger.query.origin }}",
+                    &variables,
+                )
+                .unwrap(),
+            json!("hello|network")
+        );
+        for (source, expected) in [
+            ("{{ 1 }}{{ 2 }}", json!(12)),
+            ("{% if true %} +001 {% endif %}", json!(1)),
+            ("{% if true %} -.5 {% endif %}", json!(-0.5)),
+            ("{% if true %}True{% endif %}", json!(true)),
+            ("{% if true %}None{% endif %}", Value::Null),
+            ("{% if true %}1e3{% endif %}", json!("1e3")),
+            ("{% if true %}'quoted'{% endif %}", json!("'quoted'")),
+            ("{% if true %}[null]{% endif %}", json!("[null]")),
+            ("{% if true %}[true]{% endif %}", json!("[true]")),
+            (
+                "[{% for n in range(3) %}{{ n }}{% if not loop.last %},{% endif %}{% endfor %}]",
+                json!([0, 1, 2]),
+            ),
+        ] {
+            assert_eq!(
+                engine.render_value(source, &Map::new()).unwrap(),
+                expected,
+                "{source}"
+            );
+        }
     }
 }

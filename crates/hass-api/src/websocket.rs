@@ -269,7 +269,7 @@ async fn handle_socket(
                             &mut subscriptions,
                             (id, command_type),
                             object,
-                            &identity,
+                            (&identity, origin.clone()),
                         )
                         .await
                         {
@@ -364,8 +364,9 @@ async fn handle_command(
     subscriptions: &mut HashMap<u64, Option<String>>,
     command: (u64, &str),
     message: &serde_json::Map<String, Value>,
-    identity: &crate::extensions::Identity,
+    client: (&crate::extensions::Identity, crate::network::ClientOrigin),
 ) -> bool {
+    let (identity, origin) = client;
     let (id, command_type) = command;
     if (crate::extensions::command_requires_admin(command_type) && !identity.is_admin)
         || (identity.read_only && matches!(command_type, "call_service" | "fire_event"))
@@ -375,7 +376,7 @@ async fn handle_command(
             .is_ok();
     }
     if let Some(result) =
-        crate::extensions::handle_ws(state, identity, &Value::Object(message.clone())).await
+        crate::extensions::handle_ws(state, identity, origin, &Value::Object(message.clone())).await
     {
         return send_core_result(socket, id, result.map_err(map_core_error))
             .await

@@ -18,7 +18,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use hass_core::{Context, Error, Event, Runtime, ServiceCall, ServiceHandler, ServiceResult};
-use hass_registry::{EntityRegistration, Registries};
+use hass_entity::{EntityHandle, EntityLifecycle, EntitySnapshot, EntitySpec};
+use hass_registry::{ProviderEntityInfo, Registries};
 use hass_script::{run_sequence, validate_sequence};
 use hass_template::TemplateEngine;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -614,9 +615,19 @@ impl EntityKind {
 #[derive(Clone, Debug)]
 struct EntityDefinition {
     entity_id: String,
+    handle: EntityHandle,
     domain: &'static str,
     common: EntityCommon,
     kind: EntityKind,
+}
+
+impl EntityDefinition {
+    fn current(&self) -> Option<Self> {
+        self.handle.current_entity_id().map(|entity_id| Self {
+            entity_id,
+            ..self.clone()
+        })
+    }
 }
 
 fn flatten_blocks(blocks: &[TemplateBlock]) -> Vec<PendingEntity> {
@@ -1301,14 +1312,16 @@ fn write_entities(
     context: Context,
 ) -> Result<()> {
     for entity in entities {
-        let rendered = render_entity(runtime, engine, entity);
-        runtime.set_state(
-            &entity.entity_id,
-            &rendered.state,
-            rendered.attributes,
-            context.clone(),
-            false,
-        )?;
+        let Some(entity) = entity.current() else {
+            continue;
+        };
+        let rendered = render_entity(runtime, engine, &entity);
+        entity.handle.publish(EntitySnapshot {
+            available: rendered.state != "unavailable",
+            state: Some(rendered.state),
+            attributes: rendered.attributes,
+            context: context.clone(),
+        })?;
     }
     Ok(())
 }
@@ -1442,6 +1455,9 @@ pub struct TemplateEntities {
     cancel: watch::Sender<bool>,
     updates: Option<JoinHandle<Result<()>>>,
     actions: ActionDispatcher,
+    handles: Vec<EntityHandle>,
+    lifecycle: EntityLifecycle,
+    owns_lifecycle: bool,
 }
 
 impl TemplateEntities {
@@ -1460,20 +1476,35 @@ impl TemplateEntities {
         blocks: Vec<TemplateBlock>,
         registries: Registries,
     ) -> Result<Self> {
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries)?;
+        Self::start_internal(runtime, blocks, lifecycle, true).await
+    }
+
+    /// Start with the application's shared entity lifecycle manager.
+    pub async fn start_with_lifecycle(
+        runtime: Runtime,
+        blocks: Vec<TemplateBlock>,
+        lifecycle: EntityLifecycle,
+    ) -> Result<Self> {
+        Self::start_internal(runtime, blocks, lifecycle, false).await
+    }
+
+    async fn start_internal(
+        runtime: Runtime,
+        blocks: Vec<TemplateBlock>,
+        lifecycle: EntityLifecycle,
+        owns_lifecycle: bool,
+    ) -> Result<Self> {
         validate(&blocks)?;
-        let (snapshot, mut events) = runtime.subscribe_with_states();
-        let snapshot_ids = snapshot
-            .iter()
-            .map(|state| state.entity_id.clone())
-            .collect::<HashSet<_>>();
+        let (_, mut events) = runtime.subscribe_with_states();
         let engine = TemplateEngine::new(runtime.clone());
         let pending = flatten_blocks(&blocks);
-        let entities =
-            match allocate_entity_ids(&runtime, &registries, &engine, pending, &snapshot_ids) {
-                Ok(entities) => entities,
-                Err(error) => return Err(error),
-            };
+        let entities = allocate_entity_ids(&runtime, &lifecycle, &engine, pending)?;
         let (ordered_entities, dependents) = build_refresh_plan(entities)?;
+        let handles = ordered_entities
+            .iter()
+            .map(|entity| entity.handle.clone())
+            .collect();
         let entity_ids = ordered_entities
             .iter()
             .map(|entity| entity.entity_id.clone())
@@ -1525,6 +1556,9 @@ impl TemplateEntities {
                 };
                 let (mut refresh_all, mut sources, mut context) = match event {
                     None => (true, BTreeSet::new(), Context::default()),
+                    Some(Ok(event)) if event.event_type == "entity_registry_updated" => {
+                        (true, BTreeSet::new(), event.context)
+                    }
                     Some(Ok(event)) => {
                         let Some(entity_id) = state_changed_entity_id(&event) else {
                             continue;
@@ -1547,6 +1581,12 @@ impl TemplateEntities {
                     }
                     match events.try_recv() {
                         Ok(event) => {
+                            if event.event_type == "entity_registry_updated" {
+                                refresh_all = true;
+                                context = event.context;
+                                drained += 1;
+                                continue;
+                            }
                             if let Some(entity_id) = state_changed_entity_id(&event) {
                                 if entity_ids.contains(entity_id) {
                                     sources.insert(entity_id.to_owned());
@@ -1601,6 +1641,9 @@ impl TemplateEntities {
             cancel,
             updates: Some(updates),
             actions,
+            handles,
+            lifecycle,
+            owns_lifecycle,
         })
     }
 
@@ -1621,8 +1664,23 @@ impl TemplateEntities {
             Ok(())
         };
         let action_result = self.actions.shutdown().await;
+        let mut lifecycle_result = if self.owns_lifecycle {
+            self.lifecycle.shutdown().await
+        } else {
+            Ok(())
+        };
+        for handle in &self.handles {
+            if let Err(error) = handle.release()
+                && lifecycle_result.is_ok()
+            {
+                lifecycle_result = Err(error);
+            }
+        }
         let unregister_result = unregister_result.map(|_| ());
-        update_result.and(action_result).and(unregister_result)
+        update_result
+            .and(action_result)
+            .and(unregister_result)
+            .and(lifecycle_result)
     }
 }
 
@@ -1845,9 +1903,10 @@ fn register_entity_services(
     for (domain, service) in services {
         let matcher_entities = Arc::clone(&entities);
         let matcher: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(move |entity_id| {
-            matcher_entities
-                .get(entity_id)
-                .is_some_and(|entity| supports_service(entity, domain, service))
+            matcher_entities.values().any(|entity| {
+                entity.handle.current_entity_id().as_deref() == Some(entity_id)
+                    && supports_service(entity, domain, service)
+            })
         });
         let callback_entities = Arc::clone(&entities);
         let callback_actions = actions.clone();
@@ -1898,18 +1957,23 @@ fn execute_entity_service(
     let mut plans = Vec::with_capacity(entity_ids.len());
     for entity_id in entity_ids {
         let entity = entities
-            .get(&entity_id)
+            .values()
+            .filter_map(EntityDefinition::current)
+            .find(|entity| entity.entity_id == entity_id)
             .ok_or_else(|| Error::NotFound(format!("unknown template entity {entity_id}")))?;
-        if !supports_service(entity, domain, service) {
+        if !supports_service(&entity, domain, service) {
             return invalid(format!(
                 "service {domain}.{service} is not supported by {entity_id}"
             ));
         }
-        plans.push(plan_entity_action(runtime, call, entity, service)?);
+        plans.push((
+            entity.handle.clone(),
+            plan_entity_action(runtime, call, &entity, service)?,
+        ));
     }
 
     let mut changed_states = Vec::new();
-    for plan in plans {
+    for (handle, plan) in plans {
         if !plan.sequence.is_empty() {
             actions.run(&plan.sequence, plan.variables, call.context.clone())?;
         }
@@ -1918,14 +1982,15 @@ fn execute_entity_service(
                 .get_state(&plan.entity_id)
                 .map(|current| current.attributes)
                 .unwrap_or_default();
-            let result = runtime.set_state(
-                &plan.entity_id,
-                &state,
+            let result = handle.publish(EntitySnapshot {
+                state: Some(state),
+                available: true,
                 attributes,
-                call.context.clone(),
-                false,
-            )?;
-            if result.created || result.changed {
+                context: call.context.clone(),
+            })?;
+            if let Some(result) = result
+                && (result.created || result.changed)
+            {
                 changed_states.push(result.state);
             }
         }
@@ -2089,26 +2154,18 @@ fn number_string(value: f64) -> String {
 
 fn allocate_entity_ids(
     runtime: &Runtime,
-    registries: &Registries,
+    lifecycle: &EntityLifecycle,
     engine: &TemplateEngine,
     pending: Vec<PendingEntity>,
-    snapshot_ids: &HashSet<String>,
 ) -> Result<Vec<EntityDefinition>> {
-    let mut persisted: BTreeMap<String, String> = match runtime.get_data(ENTITY_ID_MAP_KEY)? {
+    let persisted: BTreeMap<String, String> = match runtime.get_data(ENTITY_ID_MAP_KEY)? {
         Some(value) => serde_json::from_value(value).map_err(|error| {
             Error::Storage(format!("invalid template entity ID metadata: {error}"))
         })?,
         None => BTreeMap::new(),
     };
-    let registered_ids: HashSet<String> = registries
-        .entities()
-        .into_iter()
-        .map(|entry| entry.entity_id)
-        .collect();
-    let mut allocated = HashSet::new();
-    let mut result = Vec::with_capacity(pending.len());
-
-    for pending_entity in pending {
+    let mut specs = Vec::with_capacity(pending.len());
+    for pending_entity in &pending {
         let rendered_name = render_name(engine, &pending_entity.common, pending_entity.domain);
         let suggested = pending_entity
             .common
@@ -2120,72 +2177,52 @@ fn allocate_entity_ids(
                     .map(|(_, object)| object.to_owned())
             })
             .unwrap_or_else(|| slugify(&rendered_name));
-        let static_entity_name = static_name(&pending_entity.common, pending_entity.domain);
-        let entity_id = if let Some(unique_id) = pending_entity.common.unique_id.as_deref() {
-            let mut registration =
-                EntityRegistration::new(pending_entity.domain, "template", unique_id);
-            registration.suggested_object_id = Some(suggested);
-            registration.original_name = static_entity_name;
-            registration.original_icon = pending_entity
+        let info = ProviderEntityInfo {
+            original_name: static_name(&pending_entity.common, pending_entity.domain),
+            original_icon: pending_entity
                 .common
                 .icon
                 .as_ref()
                 .filter(|icon| !icon.contains("{{") && !icon.contains("{%"))
-                .cloned();
-            registration.icon = registration.original_icon.clone();
-            registration.device_class = pending_entity.kind.device_class().map(str::to_owned);
-            registration.original_device_class = registration.device_class.clone();
-            registration.unit_of_measurement =
-                pending_entity.kind.unit_of_measurement().map(str::to_owned);
-            registries.get_or_create_entity(registration)?.entity_id
-        } else if let Some(existing) = persisted.get(&pending_entity.config_key) {
-            if !existing.starts_with(&format!("{}.", pending_entity.domain)) {
-                return Err(Error::Storage(format!(
-                    "invalid persisted entity ID for {}",
-                    pending_entity.config_key
-                )));
-            }
-            existing.clone()
-        } else {
-            let base = format!("{}.{}", pending_entity.domain, suggested);
-            let mut candidate = base.clone();
-            let mut suffix = 2usize;
-            while runtime.get_state(&candidate).is_some()
-                || snapshot_ids.contains(&candidate)
-                || registered_ids.contains(&candidate)
-                || allocated.contains(&candidate)
-            {
-                candidate = format!("{base}_{suffix}");
-                suffix += 1;
-            }
-            persisted.insert(pending_entity.config_key.clone(), candidate.clone());
-            candidate
+                .cloned(),
+            original_device_class: pending_entity.kind.device_class().map(str::to_owned),
+            unit_of_measurement: pending_entity.kind.unit_of_measurement().map(str::to_owned),
+            ..Default::default()
         };
-        if !allocated.insert(entity_id.clone()) {
-            return invalid(format!(
-                "multiple template configurations resolved to {entity_id}"
-            ));
+        let mut spec = EntitySpec::new(
+            pending_entity.domain,
+            "template",
+            "template",
+            &pending_entity.config_key,
+        )
+        .with_suggested_object_id(suggested)
+        .with_info(info);
+        if let Some(unique_id) = &pending_entity.common.unique_id {
+            spec = spec.with_unique_id(unique_id);
+        } else if let Some(prior_id) = persisted.get(&pending_entity.config_key) {
+            spec = spec.with_prior_entity_id(prior_id);
         }
-        result.push(EntityDefinition {
-            entity_id,
+        specs.push(spec);
+    }
+    let handles = lifecycle.register_provider_batch("template", specs)?;
+    Ok(pending
+        .into_iter()
+        .zip(handles)
+        .map(|(pending_entity, handle)| EntityDefinition {
+            entity_id: handle.status().entity_id().to_owned(),
+            handle,
             domain: pending_entity.domain,
             common: pending_entity.common,
             kind: pending_entity.kind,
-        });
-    }
-    runtime.set_data(
-        ENTITY_ID_MAP_KEY,
-        &serde_json::to_value(persisted).map_err(|error| {
-            Error::Storage(format!("cannot encode template entity IDs: {error}"))
-        })?,
-    )?;
-    Ok(result)
+        })
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use hass_core::MemoryStore;
+    use hass_registry::EntityRegistration;
 
     fn runtime() -> (Runtime, Arc<MemoryStore>) {
         let store = Arc::new(MemoryStore::default());
@@ -2326,6 +2363,169 @@ mod tests {
             runtime.get_state("sensor.doubled").unwrap().attributes["source"],
             "1"
         );
+        entities.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn registry_overrides_rename_disable_and_remove_follow_live_provider() {
+        let (runtime, _store) = runtime();
+        set(&runtime, "sensor.source", "7");
+        let registry = Registries::new(runtime.clone()).unwrap();
+        let config = blocks(
+            "template:\n  - sensor:\n      - name: Provider name\n        unique_id: lifecycle-sensor\n        icon: mdi:thermometer\n        device_class: temperature\n        state: \"{{ states('sensor.source') }}\"\n",
+        );
+        let entities =
+            TemplateEntities::start_with_registries(runtime.clone(), config, registry.clone())
+                .await
+                .unwrap();
+        registry
+            .update_entity(
+                "sensor.provider_name",
+                hass_registry::EntityUpdate {
+                    name: Some(Some("User name".into())),
+                    icon: Some(Some("mdi:home".into())),
+                    device_class: Some(Some("humidity".into())),
+                    new_entity_id: Some("sensor.renamed_provider".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        wait_for_state(&runtime, "sensor.renamed_provider", "7").await;
+        assert!(runtime.get_state("sensor.provider_name").is_none());
+        let state = runtime.get_state("sensor.renamed_provider").unwrap();
+        assert_eq!(state.attributes["friendly_name"], "User name");
+        assert_eq!(state.attributes["icon"], "mdi:home");
+        assert_eq!(state.attributes["device_class"], "humidity");
+        set(&runtime, "sensor.source", "8");
+        wait_for_state(&runtime, "sensor.renamed_provider", "8").await;
+        registry
+            .update_entity(
+                "sensor.renamed_provider",
+                hass_registry::EntityUpdate {
+                    disabled_by: Some(Some("user".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while runtime.get_state("sensor.renamed_provider").is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        set(&runtime, "sensor.source", "9");
+        registry
+            .update_entity(
+                "sensor.renamed_provider",
+                hass_registry::EntityUpdate {
+                    disabled_by: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        wait_for_state(&runtime, "sensor.renamed_provider", "9").await;
+        registry.remove_entity("sensor.renamed_provider").unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while runtime.get_state("sensor.renamed_provider").is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        set(&runtime, "sensor.source", "10");
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(runtime.get_state("sensor.renamed_provider").is_none());
+        assert!(runtime.get_state("sensor.provider_name").is_none());
+        assert!(
+            registry
+                .entities()
+                .iter()
+                .all(|entry| entry.unique_id != "lifecycle-sensor")
+        );
+        entities.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn action_service_follows_registry_rename_and_disabled_identity() {
+        let (runtime, _store) = runtime();
+        let registry = Registries::new(runtime.clone()).unwrap();
+        let captured = register_capture_service(&runtime);
+        let config = blocks(
+            "template:\n  - button:\n      - name: Managed button\n        unique_id: managed-button\n        press:\n          - action: test.capture\n            data: {control: managed_press}\n",
+        );
+        let entities =
+            TemplateEntities::start_with_registries(runtime.clone(), config, registry.clone())
+                .await
+                .unwrap();
+        registry
+            .update_entity(
+                "button.managed_button",
+                hass_registry::EntityUpdate {
+                    new_entity_id: Some("button.renamed_button".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        wait_for_state(&runtime, "button.renamed_button", "unknown").await;
+        runtime
+            .call_service(call("button", "press", "button.renamed_button", json!({})))
+            .unwrap();
+        assert_eq!(captured.lock().unwrap().len(), 1);
+        assert!(runtime.get_state("button.managed_button").is_none());
+        registry
+            .update_entity(
+                "button.renamed_button",
+                hass_registry::EntityUpdate {
+                    disabled_by: Some(Some("user".into())),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while runtime.get_state("button.renamed_button").is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let _ = runtime.call_service(call("button", "press", "button.renamed_button", json!({})));
+        assert_eq!(
+            captured.lock().unwrap().len(),
+            1,
+            "disabled providers must not receive actions"
+        );
+        entities.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disabled_registry_entity_stays_absent_during_provider_setup() {
+        let (runtime, _store) = runtime();
+        let registry = Registries::new(runtime.clone()).unwrap();
+        let mut registration = EntityRegistration::new("sensor", "template", "disabled-at-setup");
+        registration.suggested_object_id = Some("disabled_at_setup".into());
+        registration.disabled_by = Some("user".into());
+        registry.get_or_create_entity(registration).unwrap();
+        let config = blocks(
+            "template:\n  - sensor:\n      - name: Disabled at setup\n        unique_id: disabled-at-setup\n        state: '42'\n",
+        );
+        let entities =
+            TemplateEntities::start_with_registries(runtime.clone(), config, registry.clone())
+                .await
+                .unwrap();
+        assert!(runtime.get_state("sensor.disabled_at_setup").is_none());
+        registry
+            .update_entity(
+                "sensor.disabled_at_setup",
+                hass_registry::EntityUpdate {
+                    disabled_by: Some(None),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        wait_for_state(&runtime, "sensor.disabled_at_setup", "42").await;
         entities.shutdown().await.unwrap();
     }
 

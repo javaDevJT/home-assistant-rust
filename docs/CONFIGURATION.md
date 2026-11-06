@@ -82,3 +82,27 @@ must name an existing native image uploaded through `POST /api/image/upload`;
 arbitrary URLs are rejected. JPEG, PNG and GIF uploads are limited to 10 MiB.
 Files live under the configuration directory's `image/` folder, with metadata
 in the native database. Keep both when moving this installation's data.
+
+Native time/date sensors use the legacy `sensor:` platform form:
+
+```yaml
+sensor:
+  - platform: time_date
+    display_options: [date, time, date_time_iso, time_utc]
+    entity_namespace: clock
+    scan_interval: "00:01:00"
+```
+
+The supported options are `time`, `date`, `date_time`, `date_time_utc`,
+`date_time_iso`, `time_date` and `time_utc`; `beat` is rejected. The namespace
+prefixes generated entity IDs. `scan_interval` is validated as a platform
+setting; these non-polling sensors retain their native minute or local-midnight
+schedule. They read the actual clock and follow saved/live Home Assistant
+timezone settings. Local ISO state is timezone-naive, as in the pinned source.
+
+The native `time_date` and `uptime` config-entry flows are also available through
+the authenticated configuration API. Time/date entries select one option;
+uptime allows one entry and accepts no fields. Uptime is the fixed UTC timestamp
+captured at provider setup, refreshed on reload/restart. It is not an elapsed
+duration or operating-system boot time. See the
+[system sensor contract](../crates/hass-system-sensors/README.md).

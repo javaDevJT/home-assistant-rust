@@ -575,6 +575,265 @@ async fn real_process_auth_services_automation_history_and_crash_restore() {
     restarted.child.wait().await.unwrap();
 }
 
+#[tokio::test]
+async fn real_process_webhook_executes_private_trigger_and_reregisters_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        r#"
+recorder:
+  db_path: state.sqlite
+input_text:
+  webhook_result:
+    initial: waiting
+counter:
+  webhook_count:
+    initial: 0
+automation:
+  - id: inbound_webhook
+    triggers:
+      - trigger: webhook
+        webhook_id: compiled_process_webhook_fixture
+        allowed_methods: [POST]
+        local_only: true
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.webhook_result
+        data:
+          value: "{{ trigger.json.message }}|{{ trigger.query.origin }}"
+      - action: counter.increment
+        target:
+          entity_id: counter.webhook_count
+"#,
+    )
+    .unwrap();
+    let mut server = Server::start(&config).await;
+    let response = server
+        .client
+        .post(format!(
+            "{}/api/webhook/compiled_process_webhook_fixture?origin=network",
+            server.url
+        ))
+        .json(&json!({"message":"first"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    server
+        .wait_state("input_text.webhook_result", "first|network")
+        .await;
+    server.wait_state("counter.webhook_count", "1").await;
+    let response = server
+        .client
+        .get(format!(
+            "{}/api/webhook/compiled_process_webhook_fixture",
+            server.url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+    let mut restarted = Server::start(&config).await;
+    restarted.wait_state("counter.webhook_count", "1").await;
+    let response = restarted
+        .client
+        .post(format!(
+            "{}/api/webhook/compiled_process_webhook_fixture?origin=restart",
+            restarted.url
+        ))
+        .json(&json!({"message":"second"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    restarted
+        .wait_state("input_text.webhook_result", "second|restart")
+        .await;
+    restarted.wait_state("counter.webhook_count", "2").await;
+    restarted.child.kill().await.unwrap();
+    restarted.child.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_process_clock_yaml_and_config_entries_use_actual_time_and_restore_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        r#"
+homeassistant:
+  time_zone: America/New_York
+recorder:
+  db_path: state.sqlite
+sensor:
+  - platform: time_date
+    display_options: [date, time_utc]
+  - platform: time_date
+    entity_namespace: office
+    display_options: [time]
+    scan_interval: "00:02:00"
+"#,
+    )
+    .unwrap();
+    let mut server = Server::start(&config).await;
+    let date: Value = server
+        .get("/api/states/sensor.date")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(chrono::NaiveDate::parse_from_str(date["state"].as_str().unwrap(), "%Y-%m-%d").is_ok());
+    let time: Value = server
+        .get("/api/states/sensor.time_utc")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(chrono::NaiveTime::parse_from_str(time["state"].as_str().unwrap(), "%H:%M").is_ok());
+    let flow_base = "/api/config/config_entries/flow";
+    assert_eq!(
+        server.get("/api/states/sensor.office_time").await.status(),
+        StatusCode::OK
+    );
+    let mut entry_ids = Vec::new();
+    let before_setup = chrono::Utc::now();
+    for (domain, input) in [
+        ("time_date", json!({"display_options":"date_time_utc"})),
+        ("uptime", json!({})),
+    ] {
+        let form: Value = server
+            .post(flow_base, json!({"handler":domain}))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(form["type"], "form", "{form}");
+        let created: Value = server
+            .post(
+                &format!("{flow_base}/{}", form["flow_id"].as_str().unwrap()),
+                input,
+            )
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(created["type"], "create_entry", "{created}");
+        assert_eq!(created["result"]["state"], "loaded", "{created}");
+        entry_ids.push(created["result"]["entry_id"].as_str().unwrap().to_owned());
+    }
+    let uptime: Value = server
+        .get("/api/states/sensor.uptime")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let setup_time =
+        chrono::DateTime::parse_from_rfc3339(uptime["state"].as_str().unwrap()).unwrap();
+    assert!(setup_time >= before_setup && setup_time <= chrono::Utc::now());
+    assert_eq!(uptime["attributes"]["device_class"], "uptime");
+    let entry_sensor: Value = server
+        .get("/api/states/sensor.date_time_utc")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(entry_sensor["state"], "unknown");
+    assert_ne!(entry_sensor["state"], "unavailable");
+    let duplicate_form: Value = server
+        .post(flow_base, json!({"handler":"uptime"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let duplicate: Value = server
+        .post(
+            &format!(
+                "{flow_base}/{}",
+                duplicate_form["flow_id"].as_str().unwrap()
+            ),
+            json!({}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(duplicate["type"], "abort");
+    assert_eq!(duplicate["reason"], "single_instance_allowed");
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+    let yaml = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, yaml.replace(
+        "  - platform: time_date\n    entity_namespace: office\n    display_options: [time]\n    scan_interval: \"00:02:00\"\n", "",
+    )).unwrap();
+    let mut restarted = Server::start(&config).await;
+    assert_eq!(
+        restarted
+            .get("/api/states/sensor.office_time")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let current: Value = restarted
+        .get("/api/states/sensor.uptime")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let restarted_time =
+        chrono::DateTime::parse_from_rfc3339(current["state"].as_str().unwrap()).unwrap();
+    assert!(
+        restarted_time > setup_time,
+        "uptime is a fresh setup timestamp after restart"
+    );
+    let entries: Value = restarted
+        .get("/api/config/config_entries/entry")
+        .await
+        .json()
+        .await
+        .unwrap();
+    for entry_id in &entry_ids {
+        assert!(
+            entries
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["entry_id"] == *entry_id && entry["state"] == "loaded")
+        );
+    }
+    let removed = restarted
+        .client
+        .delete(format!(
+            "{}/api/config/config_entries/entry/{}",
+            restarted.url, entry_ids[0]
+        ))
+        .bearer_auth(TOKEN)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    assert_eq!(
+        restarted
+            .get("/api/states/sensor.date_time_utc")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        restarted.get("/api/states/sensor.date").await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        restarted.get("/api/states/sensor.uptime").await.status(),
+        StatusCode::OK
+    );
+    restarted.child.kill().await.unwrap();
+    restarted.child.wait().await.unwrap();
+}
+
 #[test]
 fn check_validates_without_creating_data_or_requiring_a_token() {
     let dir = tempfile::tempdir().unwrap();

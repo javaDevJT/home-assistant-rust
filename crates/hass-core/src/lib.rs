@@ -807,6 +807,41 @@ impl Runtime {
         context: Context,
         force_update: bool,
     ) -> Result<StateChange> {
+        self.set_state_checked(entity_id, state, attributes, context, force_update, None)
+            .map(|change| change.expect("unconditional state write cannot fail its comparison"))
+    }
+
+    /// Publish only when the current snapshot matches `expected`, atomically.
+    /// `None` requires the ID to be absent. A failed comparison leaves state,
+    /// history, timestamps and events untouched and returns `Ok(None)`.
+    pub fn set_state_if_unchanged(
+        &self,
+        entity_id: &str,
+        expected: Option<&State>,
+        state: &str,
+        attributes: Map<String, Value>,
+        context: Context,
+        force_update: bool,
+    ) -> Result<Option<StateChange>> {
+        self.set_state_checked(
+            entity_id,
+            state,
+            attributes,
+            context,
+            force_update,
+            Some(expected),
+        )
+    }
+
+    fn set_state_checked(
+        &self,
+        entity_id: &str,
+        state: &str,
+        attributes: Map<String, Value>,
+        context: Context,
+        force_update: bool,
+        expected: Option<Option<&State>>,
+    ) -> Result<Option<StateChange>> {
         validate_entity_id(entity_id)?;
         let state_len = state.chars().count();
         if state_len > 255 {
@@ -821,6 +856,9 @@ impl Runtime {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let previous = self.get_state(entity_id);
+        if expected.is_some_and(|expected| previous.as_ref() != expected) {
+            return Ok(None);
+        }
         let now = Utc::now();
         let value_changed = previous.as_ref().is_none_or(|old| old.state != state);
         let attributes_changed = previous
@@ -839,11 +877,11 @@ impl Runtime {
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(entity_id.to_owned(), reported.clone());
-            return Ok(StateChange {
+            return Ok(Some(StateChange {
                 state: reported,
                 created: false,
                 changed: false,
-            });
+            }));
         }
 
         let changed = created || value_changed || attributes_changed || force_update;
@@ -883,15 +921,31 @@ impl Runtime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(entity_id.to_owned(), next.clone());
         let _ = self.inner.events.send(event);
-        Ok(StateChange {
+        Ok(Some(StateChange {
             state: next,
             created,
             changed,
-        })
+        }))
     }
 
     /// Remove an entity's current state, retaining its historical snapshots.
     pub fn remove_state(&self, entity_id: &str, context: Context) -> Result<bool> {
+        self.remove_state_checked(entity_id, None, context)
+    }
+
+    /// Remove only the exact observed state under the runtime's write lock.
+    /// A concurrent replacement, including a newer report with the same value,
+    /// remains intact and produces no removal event.
+    pub fn remove_state_if_unchanged(&self, expected: &State, context: Context) -> Result<bool> {
+        self.remove_state_checked(&expected.entity_id, Some(expected), context)
+    }
+
+    fn remove_state_checked(
+        &self,
+        entity_id: &str,
+        expected: Option<&State>,
+        context: Context,
+    ) -> Result<bool> {
         validate_entity_id(entity_id)?;
         let _order = self
             .inner
@@ -901,6 +955,9 @@ impl Runtime {
         let Some(previous) = self.get_state(entity_id) else {
             return Ok(false);
         };
+        if expected.is_some_and(|expected| expected != &previous) {
+            return Ok(false);
+        }
         let now = Utc::now();
         let event = state_changed_event(entity_id, Some(&previous), None, context, now)?;
         self.inner.store.remove_state(entity_id, &event)?;
@@ -2152,6 +2209,189 @@ mod tests {
             }
             self.inner.repack()
         }
+    }
+
+    #[test]
+    fn conditional_state_writes_require_absence_or_the_exact_owned_snapshot() {
+        let store = Arc::new(FallibleStore {
+            inner: MemoryStore::default(),
+            fail_writes: AtomicBool::new(false),
+        });
+        let runtime = runtime_with_store(store.clone());
+        let created = runtime
+            .set_state_if_unchanged(
+                "sensor.conditional",
+                None,
+                "first",
+                empty_map(),
+                Context::default(),
+                false,
+            )
+            .unwrap()
+            .unwrap()
+            .state;
+        let mut events = runtime.subscribe();
+        assert!(
+            runtime
+                .set_state_if_unchanged(
+                    "sensor.conditional",
+                    None,
+                    "overwrite",
+                    empty_map(),
+                    Context::default(),
+                    false
+                )
+                .unwrap()
+                .is_none()
+        );
+        let foreign = runtime
+            .set_state(
+                "sensor.conditional",
+                "replacement",
+                empty_map(),
+                Context::default(),
+                false,
+            )
+            .unwrap()
+            .state;
+        events.try_recv().unwrap();
+        assert!(
+            runtime
+                .set_state_if_unchanged(
+                    "sensor.conditional",
+                    Some(&created),
+                    "unavailable",
+                    empty_map(),
+                    Context::default(),
+                    false
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            runtime.get_state("sensor.conditional"),
+            Some(foreign.clone())
+        );
+        assert_eq!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        );
+        store.fail_writes.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            runtime.set_state_if_unchanged(
+                "sensor.conditional",
+                Some(&foreign),
+                "unavailable",
+                empty_map(),
+                Context::default(),
+                false
+            ),
+            Err(Error::Storage(_))
+        ));
+        assert_eq!(
+            runtime.get_state("sensor.conditional"),
+            Some(foreign.clone())
+        );
+        assert_eq!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        );
+        store.fail_writes.store(false, Ordering::SeqCst);
+        assert!(
+            runtime
+                .set_state_if_unchanged(
+                    "sensor.conditional",
+                    Some(&foreign),
+                    "unavailable",
+                    empty_map(),
+                    Context::default(),
+                    false
+                )
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            runtime.get_state("sensor.conditional").unwrap().state,
+            "unavailable"
+        );
+        assert_eq!(
+            events.try_recv().unwrap().data["old_state"]["state"],
+            "replacement"
+        );
+    }
+
+    #[test]
+    fn conditional_state_removal_preserves_newer_reports_and_failed_writes() {
+        let store = Arc::new(FallibleStore {
+            inner: MemoryStore::default(),
+            fail_writes: AtomicBool::new(false),
+        });
+        let runtime = runtime_with_store(store.clone());
+        let first = runtime
+            .set_state(
+                "sensor.owned",
+                "one",
+                empty_map(),
+                Context::default(),
+                false,
+            )
+            .unwrap()
+            .state;
+        let second = runtime
+            .set_state(
+                "sensor.owned",
+                "two",
+                empty_map(),
+                Context::default(),
+                false,
+            )
+            .unwrap()
+            .state;
+        let mut events = runtime.subscribe();
+        assert!(
+            !runtime
+                .remove_state_if_unchanged(&first, Context::default())
+                .unwrap()
+        );
+        assert_eq!(runtime.get_state("sensor.owned"), Some(second.clone()));
+        assert_eq!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        );
+        let newest = runtime
+            .set_state("sensor.owned", "two", empty_map(), Context::default(), true)
+            .unwrap()
+            .state;
+        events.try_recv().unwrap();
+        assert!(
+            !runtime
+                .remove_state_if_unchanged(&second, Context::default())
+                .unwrap()
+        );
+        store.fail_writes.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            runtime.remove_state_if_unchanged(&newest, Context::default()),
+            Err(Error::Storage(_))
+        ));
+        assert_eq!(runtime.get_state("sensor.owned"), Some(newest.clone()));
+        assert_eq!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        );
+        store.fail_writes.store(false, Ordering::SeqCst);
+        assert!(
+            runtime
+                .remove_state_if_unchanged(&newest, Context::default())
+                .unwrap()
+        );
+        let removed = events.try_recv().unwrap();
+        assert_eq!(removed.data["old_state"]["state"], "two");
+        assert!(removed.data["new_state"].is_null());
+        assert!(
+            !runtime
+                .remove_state_if_unchanged(&newest, Context::default())
+                .unwrap()
+        );
     }
 
     #[test]
