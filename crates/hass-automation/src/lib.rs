@@ -3541,7 +3541,17 @@ mod tests {
         runtime
             .fire_event("flood", Map::new(), Context::default())
             .unwrap();
-        tokio::time::sleep(StdDuration::from_secs(1)).await;
-        assert!(engine.shutdown().await.is_err());
+        // On a busy runner the initial automation state events can take more
+        // than a second to drain. Wait for the actual terminal queue failure
+        // before shutdown, which would otherwise cancel processing first.
+        tokio::time::timeout(StdDuration::from_secs(15), async {
+            while !engine.task.as_ref().unwrap().is_finished() {
+                tokio::time::sleep(StdDuration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("queue overflow must terminate the automation listener");
+        let error = engine.shutdown().await.unwrap_err();
+        assert!(error.to_string().contains("pending run queue"));
     }
 }

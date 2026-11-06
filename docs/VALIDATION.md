@@ -18,6 +18,10 @@ Storage tests verify owned v1→v2 migration, rollback/foreign-schema rejection,
 
 These receipts establish the implemented subset. They do not verify complete integrations, frontend/browser use, upstream database compatibility, custom authorization policies, hardware operation, or full Home Assistant parity. Synchronous handlers already running must terminate before joined shutdown can complete.
 
+## Linux checkpoint CI
+
+Implementation `2250d4780f44b4837766fba31b2e150078575c39` is published on the fork. [Linux run 42165900082](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42165900082) passed formatting and strict workspace Clippy, then exposed a timing-dependent automation queue test. Its fixed one-second wait began shutdown before a busy runner had drained initialization events and observed queue overflow. The regression now waits for actual listener termination, then checks the specific pending-queue error. The focused case passed five consecutive local runs; all 14 automation tests and strict automation Clippy passed after the correction. Follow-up Linux verification remains pending.
+
 ## Initial published milestone (historical)
 
 - `cargo fmt --all --check`
