@@ -49,7 +49,8 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Zones | Home, YAML and editable zones, WGS-84 distance, occupancy, live collection feeds and YAML reload |
 | Presence | Native tracker reports/expiry, registry-backed people, tracker priority, account linkage and caller-only name edits |
 | Images | Authenticated JPEG/PNG/GIF uploads, public originals/thumbnails, private collection feeds and caller-bound profile pictures |
-| Automation | State/event/numeric/template/time/MQTT/notification/webhook/lifecycle triggers, conditions, execution modes |
+| Tags | Registry-backed collection, native reader callback, scan-triggered actions, private WebSocket feeds and history attribute projection |
+| Automation | State/event/numeric/template/time/MQTT/notification/webhook/tag/lifecycle triggers, conditions, execution modes |
 | Clock sensors | Time/date formats, timezone and DST scheduling, fixed setup-time uptime, YAML and config-entry flows |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
@@ -69,6 +70,7 @@ cargo test --workspace --locked
 
 - [Rewrite status, baseline inventory, and task ledger](docs/REWRITE.md)
 - [Active full-rewrite execution ledger](docs/PORTING.md)
+- [Pinned Sun port contracts and astronomical reference cases](docs/SUN-PORT.md)
 - [Exhaustive upstream integration and subsystem parity](docs/PARITY.md)
 - [Module contracts and ownership](docs/CONTRACT.md)
 - [Shared entity identity, provider leases and lifecycle](crates/hass-entity/README.md)
@@ -89,6 +91,7 @@ cargo test --workspace --locked
 - [Uploaded images, thumbnails and profile pictures](crates/hass-image-upload/README.md)
 - [Webhooks, callback authority and private automation delivery](crates/hass-webhook/README.md)
 - [Native time/date and uptime sensors](crates/hass-system-sensors/README.md)
+- [Native tag collection, scan callbacks and automation triggers](crates/hass-tag/README.md)
 - [Config entries, native drivers, and core settings](crates/hass-config/README.md)
 - [Supported configuration example](examples/configuration.yaml)
 - [YAML includes, secrets, packages, and loading limits](docs/CONFIGURATION.md)

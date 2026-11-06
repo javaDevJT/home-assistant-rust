@@ -4,7 +4,7 @@
 //! contracts used by the Rust rewrite. It implements a bounded core runtime;
 //! it does not run Python integrations or control devices by itself.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
@@ -33,6 +33,12 @@ pub enum Error {
     /// A service registration or invocation failed.
     #[error("service error: {0}")]
     Service(String),
+    /// A domain operation raised a user-facing Home Assistant error.
+    #[error("{0}")]
+    HomeAssistant(String),
+    /// The domain rejects this operation on the requested resource.
+    #[error("{0}")]
+    NotAllowed(String),
 }
 
 /// Core runtime result type.
@@ -76,6 +82,50 @@ pub struct State {
     pub last_updated: DateTime<Utc>,
     pub last_reported: DateTime<Utc>,
     pub context: Context,
+}
+
+/// Attributes retained on the live state but omitted from recorded state
+/// history. The current state and state-change event remain full-fidelity.
+///
+/// The native store also keeps full `state_changed` events in event history;
+/// unlike Home Assistant Recorder's generic event table, it does not omit
+/// those events. This policy affects only the state-history projection.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StateRecordingPolicy {
+    unrecorded_attributes: BTreeSet<String>,
+}
+
+impl StateRecordingPolicy {
+    /// Add attribute names that should be omitted from recorded state history.
+    #[must_use]
+    pub fn with_unrecorded_attributes(
+        mut self,
+        attributes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.unrecorded_attributes
+            .extend(attributes.into_iter().map(Into::into));
+        self
+    }
+
+    /// Return the attribute names omitted from recorded state history.
+    #[must_use]
+    pub fn unrecorded_attributes(&self) -> &BTreeSet<String> {
+        &self.unrecorded_attributes
+    }
+
+    /// Return a history snapshot with excluded attributes removed.
+    #[must_use]
+    pub fn history_state(&self, state: &State) -> State {
+        let mut history_state = state.clone();
+        for attribute in &self.unrecorded_attributes {
+            history_state.attributes.remove(attribute);
+        }
+        history_state
+    }
+
+    fn is_empty(&self) -> bool {
+        self.unrecorded_attributes.is_empty()
+    }
 }
 
 /// An event emitted by the runtime.
@@ -209,6 +259,23 @@ pub struct StateChange {
 pub trait Store: Send + Sync {
     fn load_states(&self) -> Result<Vec<State>>;
     fn put_state(&self, state: &State, event: Option<&Event>) -> Result<()>;
+    /// Atomically persist a full current state, its history projection, and
+    /// the full state-change event.
+    ///
+    /// The default preserves compatibility with existing stores and forwards
+    /// through `put_state`, which also keeps failure-injecting wrappers in the
+    /// call path. Stores that persist state history should override this method
+    /// to use `history_state` for history rows while retaining `state` for the
+    /// current-state row. The event is intentionally full-fidelity.
+    fn put_state_with_history(
+        &self,
+        state: &State,
+        history_state: &State,
+        event: &Event,
+    ) -> Result<()> {
+        let _ = history_state;
+        self.put_state(state, Some(event))
+    }
     fn remove_state(&self, entity_id: &str, event: &Event) -> Result<()>;
     fn append_event(&self, event: &Event) -> Result<()>;
     fn get_data(&self, key: &str) -> Result<Option<Value>>;
@@ -273,6 +340,22 @@ impl Store for MemoryStore {
             data.history.push(state.clone());
             data.events.push(event.clone());
         }
+        Ok(())
+    }
+
+    fn put_state_with_history(
+        &self,
+        state: &State,
+        history_state: &State,
+        event: &Event,
+    ) -> Result<()> {
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|_| Error::Storage("memory store lock poisoned".into()))?;
+        data.states.insert(state.entity_id.clone(), state.clone());
+        data.history.push(history_state.clone());
+        data.events.push(event.clone());
         Ok(())
     }
 
@@ -807,8 +890,38 @@ impl Runtime {
         context: Context,
         force_update: bool,
     ) -> Result<StateChange> {
-        self.set_state_checked(entity_id, state, attributes, context, force_update, None)
-            .map(|change| change.expect("unconditional state write cannot fail its comparison"))
+        self.set_state_with_recording_policy(
+            entity_id,
+            state,
+            attributes,
+            context,
+            force_update,
+            &StateRecordingPolicy::default(),
+        )
+    }
+
+    /// Set or report an entity state while omitting configured attributes from
+    /// persisted history. Live state and state-change events retain every
+    /// attribute.
+    pub fn set_state_with_recording_policy(
+        &self,
+        entity_id: &str,
+        state: &str,
+        attributes: Map<String, Value>,
+        context: Context,
+        force_update: bool,
+        recording_policy: &StateRecordingPolicy,
+    ) -> Result<StateChange> {
+        self.set_state_checked(
+            entity_id,
+            state,
+            attributes,
+            context,
+            force_update,
+            recording_policy,
+            None,
+        )
+        .map(|change| change.expect("unconditional state write cannot fail its comparison"))
     }
 
     /// Publish only when the current snapshot matches `expected`, atomically.
@@ -823,16 +936,45 @@ impl Runtime {
         context: Context,
         force_update: bool,
     ) -> Result<Option<StateChange>> {
+        self.set_state_if_unchanged_with_recording_policy(
+            entity_id,
+            expected,
+            state,
+            attributes,
+            context,
+            force_update,
+            &StateRecordingPolicy::default(),
+        )
+    }
+
+    /// Publish only when the current snapshot matches `expected`, atomically,
+    /// while applying `recording_policy` to history only.
+    ///
+    /// `None` requires the ID to be absent. A failed comparison leaves state,
+    /// history, timestamps and events untouched and returns `Ok(None)`.
+    #[allow(clippy::too_many_arguments)] // Mirrors the existing guarded state API.
+    pub fn set_state_if_unchanged_with_recording_policy(
+        &self,
+        entity_id: &str,
+        expected: Option<&State>,
+        state: &str,
+        attributes: Map<String, Value>,
+        context: Context,
+        force_update: bool,
+        recording_policy: &StateRecordingPolicy,
+    ) -> Result<Option<StateChange>> {
         self.set_state_checked(
             entity_id,
             state,
             attributes,
             context,
             force_update,
+            recording_policy,
             Some(expected),
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn set_state_checked(
         &self,
         entity_id: &str,
@@ -840,6 +982,7 @@ impl Runtime {
         attributes: Map<String, Value>,
         context: Context,
         force_update: bool,
+        recording_policy: &StateRecordingPolicy,
         expected: Option<Option<&State>>,
     ) -> Result<Option<StateChange>> {
         validate_entity_id(entity_id)?;
@@ -914,7 +1057,14 @@ impl Runtime {
 
         // Persist both the new snapshot and event before exposing either in
         // memory or on the bus.
-        self.inner.store.put_state(&next, Some(&event))?;
+        if recording_policy.is_empty() {
+            self.inner.store.put_state(&next, Some(&event))?;
+        } else {
+            let history_state = recording_policy.history_state(&next);
+            self.inner
+                .store
+                .put_state_with_history(&next, &history_state, &event)?;
+        }
         self.inner
             .states
             .write()
@@ -1925,6 +2075,182 @@ mod tests {
                 .dispatch_signal("", Map::new(), Context::default())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn state_recording_policy_only_projects_history_attributes() {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = runtime_with_store(store.clone());
+        let policy = StateRecordingPolicy::default().with_unrecorded_attributes(["tag_id"]);
+        let mut attributes = Map::new();
+        attributes.insert("tag_id".into(), Value::String("fixture-tag".into()));
+        attributes.insert("device_id".into(), Value::String("scanner-1".into()));
+        let mut events = runtime.subscribe();
+
+        let _first = runtime
+            .set_state_with_recording_policy(
+                "tag.fixture",
+                "2026-11-06T12:00:00+00:00",
+                attributes.clone(),
+                Context::default(),
+                false,
+                &policy,
+            )
+            .unwrap();
+        let public_event = events.try_recv().unwrap();
+        assert_eq!(
+            public_event.data["new_state"]["attributes"]["tag_id"],
+            "fixture-tag"
+        );
+        assert_eq!(
+            runtime.get_state("tag.fixture").unwrap().attributes["tag_id"],
+            "fixture-tag"
+        );
+        let history = store
+            .history(
+                "tag.fixture",
+                DateTime::<Utc>::MIN_UTC,
+                DateTime::<Utc>::MAX_UTC,
+            )
+            .unwrap();
+        assert_eq!(history.len(), 1);
+        assert!(!history[0].attributes.contains_key("tag_id"));
+        assert_eq!(history[0].attributes["device_id"], "scanner-1");
+        let events_in_store = store
+            .event_history_query(&EventHistoryQuery {
+                start: DateTime::<Utc>::MIN_UTC,
+                end: DateTime::<Utc>::MAX_UTC,
+                event_types: Some(vec!["state_changed".into()]),
+            })
+            .unwrap();
+        assert_eq!(
+            events_in_store[0].data["new_state"]["attributes"]["tag_id"],
+            "fixture-tag"
+        );
+
+        let unchanged = runtime
+            .set_state_with_recording_policy(
+                "tag.fixture",
+                "2026-11-06T12:00:00+00:00",
+                attributes.clone(),
+                Context::default(),
+                false,
+                &policy,
+            )
+            .unwrap();
+        assert!(!unchanged.changed);
+        assert_eq!(
+            store
+                .history(
+                    "tag.fixture",
+                    DateTime::<Utc>::MIN_UTC,
+                    DateTime::<Utc>::MAX_UTC
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            runtime.set_state_if_unchanged_with_recording_policy(
+                "tag.fixture",
+                None,
+                "ignored",
+                attributes.clone(),
+                Context::default(),
+                false,
+                &policy,
+            ),
+            Ok(None)
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+
+        let forced = runtime
+            .set_state_with_recording_policy(
+                "tag.fixture",
+                "2026-11-06T12:00:00+00:00",
+                attributes,
+                Context::default(),
+                true,
+                &policy,
+            )
+            .unwrap();
+        assert!(forced.changed);
+        assert_eq!(
+            events.try_recv().unwrap().data["new_state"]["attributes"]["tag_id"],
+            "fixture-tag"
+        );
+        assert_eq!(
+            store
+                .history(
+                    "tag.fixture",
+                    DateTime::<Utc>::MIN_UTC,
+                    DateTime::<Utc>::MAX_UTC
+                )
+                .unwrap()
+                .len(),
+            2
+        );
+        let guarded = runtime
+            .set_state_if_unchanged_with_recording_policy(
+                "tag.fixture",
+                Some(&forced.state),
+                "cleared",
+                serde_json::json!({"tag_id":"fixture-tag"})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+                Context::default(),
+                false,
+                &policy,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(runtime.get_state("tag.fixture"), Some(guarded.state));
+        assert_eq!(
+            store
+                .history(
+                    "tag.fixture",
+                    DateTime::<Utc>::MIN_UTC,
+                    DateTime::<Utc>::MAX_UTC
+                )
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[test]
+    fn recording_policy_default_store_hook_preserves_failure_injection() {
+        let store = Arc::new(FallibleStore {
+            inner: MemoryStore::default(),
+            fail_writes: AtomicBool::new(true),
+        });
+        let runtime = runtime_with_store(store.clone());
+        let mut events = runtime.subscribe();
+        let policy = StateRecordingPolicy::default().with_unrecorded_attributes(["tag_id"]);
+        let mut attributes = Map::new();
+        attributes.insert("tag_id".into(), Value::String("fixture-tag".into()));
+
+        assert!(matches!(
+            runtime.set_state_with_recording_policy(
+                "tag.fixture",
+                "unknown",
+                attributes,
+                Context::default(),
+                false,
+                &policy,
+            ),
+            Err(Error::Storage(_))
+        ));
+        assert!(runtime.get_state("tag.fixture").is_none());
+        assert!(store.inner.load_states().unwrap().is_empty());
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     #[test]

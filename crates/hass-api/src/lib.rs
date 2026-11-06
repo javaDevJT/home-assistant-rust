@@ -17,6 +17,7 @@ mod login;
 pub mod network;
 mod persons;
 mod subscriptions;
+mod tags;
 mod webhooks;
 mod websocket;
 mod zones;
@@ -57,6 +58,7 @@ pub struct ApiFeatures {
     pub persons: Option<hass_person::PersonManager>,
     pub images: Option<hass_image_upload::ImageManager>,
     pub webhooks: Option<hass_webhook::WebhookManager>,
+    pub tags: Option<hass_tag::TagManager>,
 }
 
 #[derive(Clone)]

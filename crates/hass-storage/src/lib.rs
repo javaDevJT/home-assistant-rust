@@ -127,6 +127,65 @@ impl SqliteStore {
             .lock()
             .map_err(|_| Error::Storage("SQLite connection lock was poisoned".to_owned()))
     }
+
+    fn put_state_records(
+        &self,
+        state: &State,
+        history_state: Option<&State>,
+        event: Option<&Event>,
+    ) -> Result<()> {
+        validate_state(state)?;
+        if let Some(history_state) = history_state {
+            validate_state(history_state)?;
+            if history_state.entity_id != state.entity_id
+                || history_state.last_updated != state.last_updated
+            {
+                return Err(Error::InvalidInput(
+                    "history projection must match the current state's entity and update time"
+                        .into(),
+                ));
+            }
+        }
+        if history_state.is_some() != event.is_some() {
+            return Err(Error::InvalidInput(
+                "state history and event must be written together".into(),
+            ));
+        }
+
+        let state_json = encode_state(state)?;
+        let history_json = history_state.map(encode_state).transpose()?;
+        let event_record = event.map(encode_event).transpose()?;
+        let (seconds, nanoseconds) = timestamp_parts(&state.last_updated);
+
+        let mut connection = self.connection()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| storage_error("begin state transaction", error))?;
+        transaction
+            .execute(
+                "INSERT INTO states(entity_id, state_json) VALUES (?1, ?2) \
+                 ON CONFLICT(entity_id) DO UPDATE SET state_json = excluded.state_json",
+                params![state.entity_id, state_json],
+            )
+            .map_err(|error| storage_error("persist current state", error))?;
+
+        if let (Some(history_json), Some(event), Some(event_json)) =
+            (history_json.as_deref(), event, event_record.as_deref())
+        {
+            transaction
+                .execute(
+                    "INSERT INTO history(entity_id, time_seconds, time_nanoseconds, state_json) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![state.entity_id, seconds, nanoseconds, history_json],
+                )
+                .map_err(|error| storage_error("append state history", error))?;
+            insert_event(&transaction, event, event_json)?;
+        }
+
+        transaction
+            .commit()
+            .map_err(|error| storage_error("commit state transaction", error))
+    }
 }
 
 // Authentication keys, TOTP secrets and broker credentials share this owned
@@ -191,37 +250,16 @@ impl Store for SqliteStore {
     }
 
     fn put_state(&self, state: &State, event: Option<&Event>) -> Result<()> {
-        validate_state(state)?;
-        let state_json = encode_state(state)?;
-        let event_record = event.map(encode_event).transpose()?;
-        let (seconds, nanoseconds) = timestamp_parts(&state.last_updated);
+        self.put_state_records(state, event.map(|_| state), event)
+    }
 
-        let mut connection = self.connection()?;
-        let transaction = connection
-            .transaction()
-            .map_err(|error| storage_error("begin state transaction", error))?;
-        transaction
-            .execute(
-                "INSERT INTO states(entity_id, state_json) VALUES (?1, ?2) \
-                 ON CONFLICT(entity_id) DO UPDATE SET state_json = excluded.state_json",
-                params![state.entity_id, state_json],
-            )
-            .map_err(|error| storage_error("persist current state", error))?;
-
-        if let (Some(event), Some(event_json)) = (event, event_record.as_deref()) {
-            transaction
-                .execute(
-                    "INSERT INTO history(entity_id, time_seconds, time_nanoseconds, state_json) \
-                     VALUES (?1, ?2, ?3, ?4)",
-                    params![state.entity_id, seconds, nanoseconds, state_json],
-                )
-                .map_err(|error| storage_error("append state history", error))?;
-            insert_event(&transaction, event, event_json)?;
-        }
-
-        transaction
-            .commit()
-            .map_err(|error| storage_error("commit state transaction", error))
+    fn put_state_with_history(
+        &self,
+        state: &State,
+        history_state: &State,
+        event: &Event,
+    ) -> Result<()> {
+        self.put_state_records(state, Some(history_state), Some(event))
     }
 
     fn remove_state(&self, entity_id: &str, event: &Event) -> Result<()> {

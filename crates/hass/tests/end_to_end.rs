@@ -2,34 +2,98 @@
 
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
-use std::{net::TcpListener, path::Path, process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio, time::Duration};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 const TOKEN: &str = "rust-rewrite-test-token-never-use-in-production-123456789";
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn ws_command(socket: &mut Socket, value: Value) -> Value {
+    use futures_util::{SinkExt, StreamExt};
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            value.to_string().into(),
+        ))
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(frame.to_text().unwrap()).unwrap()
+}
+
+async fn authenticated_socket(server: &Server) -> Socket {
+    use futures_util::StreamExt;
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!(
+        "{}/api/websocket",
+        server.url.replacen("http://", "ws://", 1)
+    ))
+    .await
+    .unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(frame.to_text().unwrap()).unwrap()["type"],
+        "auth_required"
+    );
+    assert_eq!(
+        ws_command(&mut socket, json!({"type":"auth","access_token":TOKEN})).await["type"],
+        "auth_ok"
+    );
+    socket
+}
 
 struct Server {
     child: Child,
     url: String,
     client: Client,
+    _stdout: tokio::task::JoinHandle<()>,
 }
 
 impl Server {
     async fn start(config: &Path) -> Self {
-        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
         let mut child = Command::new(env!("CARGO_BIN_EXE_hass"))
             .arg("--config")
             .arg(config)
             .arg("--port")
-            .arg(port.to_string())
+            .arg("0")
             .env("HASS_TOKEN", TOKEN)
+            .env("RUST_LOG", "hass=info,hass_automation=info")
             .env_remove("HASS_TOKEN_FILE")
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
+        // Let the child bind its own ephemeral port atomically. Reserving and
+        // dropping a parent socket races with concurrent process fixtures.
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let port = tokio::time::timeout(Duration::from_secs(10), async {
+            while let Some(line) = lines.next_line().await.unwrap() {
+                if line.contains("Rust runtime listening")
+                    && let Some((_, address)) = line.split_once("127.0.0.1:")
+                {
+                    let port: String = address.chars().take_while(char::is_ascii_digit).collect();
+                    return port.parse::<u16>().unwrap();
+                }
+            }
+            panic!(
+                "server exited before announcing its listener: {:?}",
+                child.wait().await.unwrap()
+            );
+        })
+        .await
+        .expect("server did not announce its listener");
+        let stdout =
+            tokio::spawn(async move { while matches!(lines.next_line().await, Ok(Some(_))) {} });
         let client = Client::builder()
             .timeout(Duration::from_secs(3))
             .build()
@@ -38,7 +102,12 @@ impl Server {
         for _ in 0..100 {
             if let Ok(response) = client.get(format!("{url}/health")).send().await {
                 assert_eq!(response.status(), StatusCode::OK);
-                return Self { child, url, client };
+                return Self {
+                    child,
+                    url,
+                    client,
+                    _stdout: stdout,
+                };
             }
             if let Some(status) = child.try_wait().unwrap() {
                 panic!("server exited before readiness: {status}");
@@ -149,6 +218,142 @@ automation:
     )
     .unwrap();
     config
+}
+
+#[tokio::test]
+async fn real_process_tags_registry_and_trigger_survive_hard_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        r#"
+recorder:
+  db_path: state.sqlite
+tag: {}
+input_text:
+  tag_message:
+    initial: waiting
+automation:
+  - id: tag_fixture
+    triggers:
+      - trigger: tag
+        tag_id: process-tag
+        device_id: scanner-fixture
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.tag_message
+        data:
+          value: "{{ trigger.event.data.tag_id }}:{{ trigger.event.data.device_id }}"
+"#,
+    )
+    .unwrap();
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    let created = ws_command(&mut socket, json!({"id":1,"type":"tag/create","tag_id":"process-tag","name":"Kitchen","last_scanned":"2026-01-02T03:04:05"})).await;
+    assert_eq!(created["success"], true, "{created}");
+    let registry = ws_command(
+        &mut socket,
+        json!({"id":2,"type":"config/entity_registry/list"}),
+    )
+    .await;
+    let entity = registry["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["platform"] == "tag" && entry["unique_id"] == "process-tag")
+        .unwrap()
+        .clone();
+    let entity_id = entity["entity_id"].as_str().unwrap();
+    server
+        .wait_state(entity_id, "2026-01-02T03:04:05.000")
+        .await;
+    let current: Value = server
+        .get(&format!("/api/states/{entity_id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(current["attributes"]["tag_id"], "process-tag");
+    let history: Value = server
+        .get(&format!("/api/history/period?filter_entity_id={entity_id}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    let rows = history[0].as_array().unwrap();
+    assert!(!rows.is_empty());
+    assert!(
+        rows.iter()
+            .all(|row| row["attributes"].get("tag_id").is_none())
+    );
+    assert_eq!(
+        ws_command(
+            &mut socket,
+            json!({"id":3,"type":"tag/update","tag_id":"process-tag","name":"Renamed kitchen"})
+        )
+        .await["success"],
+        true
+    );
+    assert_eq!(
+        server
+            .post(
+                "/api/events/tag_scanned",
+                json!({"tag_id":"process-tag","device_id":"scanner-fixture"})
+            )
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    server
+        .wait_state("input_text.tag_message", "process-tag:scanner-fixture")
+        .await;
+    // Publishing the public event drives automations; it does not impersonate
+    // the native scanner's durable collection update.
+    let listed = ws_command(&mut socket, json!({"id":4,"type":"tag/list"})).await;
+    assert_eq!(listed["result"][0]["last_scanned"], "2026-01-02T03:04:05");
+    assert_eq!(listed["result"][0]["name"], "Renamed kitchen");
+    socket.close(None).await.unwrap();
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+
+    let mut restarted = Server::start(&config).await;
+    restarted
+        .wait_state(entity_id, "2026-01-02T03:04:05.000")
+        .await;
+    let mut socket = authenticated_socket(&restarted).await;
+    let registry = ws_command(
+        &mut socket,
+        json!({"id":1,"type":"config/entity_registry/list"}),
+    )
+    .await;
+    let restored = registry["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["unique_id"] == "process-tag")
+        .unwrap();
+    assert_eq!(restored["id"], entity["id"]);
+    assert_eq!(restored["entity_id"], entity["entity_id"]);
+    assert_eq!(restored["name"], "Renamed kitchen");
+    assert_eq!(
+        ws_command(
+            &mut socket,
+            json!({"id":2,"type":"tag/delete","tag_id":"process-tag"})
+        )
+        .await["success"],
+        true
+    );
+    assert_eq!(
+        restarted
+            .get(&format!("/api/states/{entity_id}"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    socket.close(None).await.unwrap();
+    restarted.child.kill().await.unwrap();
+    restarted.child.wait().await.unwrap();
 }
 
 #[tokio::test]

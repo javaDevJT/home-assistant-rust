@@ -2,7 +2,10 @@ use std::sync::Arc;
 use std::thread;
 
 use chrono::{DateTime, TimeZone, Utc};
-use hass_core::{Context, Error, Event, EventHistoryQuery, HistoryQuery, Runtime, State, Store};
+use hass_core::{
+    Context, Error, Event, EventHistoryQuery, HistoryQuery, Runtime, State, StateRecordingPolicy,
+    Store,
+};
 use hass_storage::SqliteStore;
 use rusqlite::Connection;
 use serde_json::{Map, json};
@@ -444,6 +447,82 @@ fn state_without_event_does_not_create_history() {
         store.load_states().expect("load state")[0].state,
         "reported"
     );
+}
+
+#[test]
+fn runtime_recording_projection_keeps_current_and_events_full_across_reopen() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("recording-projection.sqlite3");
+    let store = Arc::new(SqliteStore::open(&database).expect("open store"));
+    let runtime = Runtime::new(store.clone()).expect("create runtime");
+    let policy = StateRecordingPolicy::default().with_unrecorded_attributes(["tag_id"]);
+    let mut attributes = Map::new();
+    attributes.insert("tag_id".into(), json!("fixture-tag"));
+    attributes.insert("device_id".into(), json!("scanner-1"));
+    let mut public_events = runtime.subscribe();
+
+    let changed = runtime
+        .set_state_with_recording_policy(
+            "tag.fixture",
+            "2026-11-06T12:00:00+00:00",
+            attributes,
+            Context::default(),
+            false,
+            &policy,
+        )
+        .expect("write state");
+    assert_eq!(changed.state.attributes["tag_id"], "fixture-tag");
+    assert_eq!(
+        public_events.try_recv().unwrap().data["new_state"]["attributes"]["tag_id"],
+        "fixture-tag"
+    );
+    let history = runtime
+        .history_query(&HistoryQuery {
+            entity_ids: Some(vec!["tag.fixture".into()]),
+            start: DateTime::<Utc>::MIN_UTC,
+            end: DateTime::<Utc>::MAX_UTC,
+            include_start_time_state: false,
+            significant_changes_only: false,
+            minimal_response: false,
+            no_attributes: false,
+            exclude_entities: Vec::new(),
+        })
+        .expect("query history");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].states.len(), 1);
+    assert!(!history[0].states[0].attributes.contains_key("tag_id"));
+    assert_eq!(history[0].states[0].attributes["device_id"], "scanner-1");
+    let events = runtime
+        .event_history_query(&EventHistoryQuery {
+            start: DateTime::<Utc>::MIN_UTC,
+            end: DateTime::<Utc>::MAX_UTC,
+            event_types: Some(vec!["state_changed".into()]),
+        })
+        .expect("query event history");
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].data["new_state"]["attributes"]["tag_id"],
+        "fixture-tag"
+    );
+
+    drop(runtime);
+    drop(store);
+    let reopened_store = Arc::new(SqliteStore::open(&database).expect("reopen store"));
+    let reopened_runtime = Runtime::new(reopened_store.clone()).expect("restore runtime");
+    let current = reopened_runtime
+        .get_state("tag.fixture")
+        .expect("restored current state");
+    assert_eq!(current.attributes["tag_id"], "fixture-tag");
+    let history = reopened_store
+        .history(
+            "tag.fixture",
+            DateTime::<Utc>::MIN_UTC,
+            DateTime::<Utc>::MAX_UTC,
+        )
+        .expect("history survives reopen");
+    assert_eq!(history.len(), 1);
+    assert!(!history[0].attributes.contains_key("tag_id"));
+    drop(reopened_runtime);
 }
 
 #[test]
@@ -1022,6 +1101,56 @@ fn state_history_and_event_roll_back_together_on_event_failure() {
     let current = store.load_states().expect("state survives failed removal");
     assert_eq!(current.len(), 1);
     assert_eq!(current[0].state, "retain this state");
+}
+
+#[test]
+fn projected_state_history_and_event_roll_back_together_on_event_failure() {
+    let directory = tempfile::tempdir().expect("temp directory");
+    let database = directory.path().join("projected-rollback.sqlite3");
+    let store = SqliteStore::open(&database).expect("open store");
+    let connection = Connection::open(&database).expect("open second connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER reject_event BEFORE INSERT ON events \
+             BEGIN SELECT RAISE(ABORT, 'injected event failure'); END;",
+        )
+        .expect("install failure trigger");
+
+    let at = timestamp(50, 0);
+    let mut current_state = state("must roll back", at);
+    current_state
+        .attributes
+        .insert("tag_id".into(), json!("fixture-tag"));
+    let mut history_state = current_state.clone();
+    history_state.attributes.remove("tag_id");
+    let result = store.put_state_with_history(
+        &current_state,
+        &history_state,
+        &event("sensor.temperature", at),
+    );
+    assert!(matches!(result, Err(Error::Storage(_))));
+    assert!(
+        store
+            .load_states()
+            .expect("check current states")
+            .is_empty()
+    );
+    assert!(
+        store
+            .history("sensor.temperature", timestamp(0, 0), timestamp(60, 0))
+            .expect("check history")
+            .is_empty()
+    );
+    assert!(
+        store
+            .event_history_query(&EventHistoryQuery {
+                start: timestamp(0, 0),
+                end: timestamp(60, 0),
+                event_types: None,
+            })
+            .expect("check events")
+            .is_empty()
+    );
 }
 
 #[test]

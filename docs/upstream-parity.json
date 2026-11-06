@@ -935,7 +935,7 @@
     {
       "area": "Entity model, platforms and add/remove lifecycle",
       "coverage_status": "partial_or_unported",
-      "gap": "Shared native provider identity, metadata refresh, weak leases, registry rename/disable/remove, restore and unload are exercised by actual template and clock providers. Generic platform setup, polling/coordinator ownership, complete attribute/capability/domain semantics, translation and exhaustive failure/parity coverage remain open.",
+      "gap": "Shared native provider identity, metadata refresh, weak leases, registry rename/disable/remove, restore and unload are exercised by actual template and clock providers. EntitySpec recording policy also omits Tag tag_id from state history while preserving full live state and state_changed payloads. Generic platform setup, polling/coordinator ownership, complete attribute/capability/domain semantics, translation and exhaustive failure/parity coverage remain open.",
       "id": "entities_platforms_and_lifecycle",
       "local_evidence_paths": [
         "crates/hass-entity/src/lib.rs",
@@ -943,11 +943,13 @@
         "crates/hass-registry/src/provider.rs",
         "crates/hass-template-entities/src/lib.rs",
         "crates/hass-system-sensors/src/lib.rs",
+        "crates/hass-tag/src/lib.rs",
+        "crates/hass-tag/tests/sqlite.rs",
         "crates/hass-core/src/lib.rs",
         "crates/hass-native/src/lib.rs",
         "crates/hass/src/helpers.rs"
       ],
-      "next_acceptance": "Complete provider replacement and failed-cleanup recovery checks, then extend the shared lifecycle to generic platform setup, coordinator refresh, source-complete attributes/capabilities and remaining providers against pinned entity tests.",
+      "next_acceptance": "Complete provider replacement and failed-cleanup recovery checks, prove custom Store implementations honor the history projection, then extend the shared lifecycle to generic platform setup, coordinator refresh, source-complete attributes/capabilities and remaining providers against pinned entity tests.",
       "pinned_upstream_sources": [
         "homeassistant/helpers/entity.py",
         "homeassistant/helpers/entity_platform.py",
@@ -961,13 +963,15 @@
     {
       "area": "Entity, device, area, floor and label registries",
       "coverage_status": "partial_or_unported",
-      "gap": "Native entity/device/area/floor/label CRUD, durable identity, trusted provider metadata refresh preserving user overrides, service-device types, invalid-reference checks, live selectors and registry events have fixtures. Child/composite devices, categories, remaining registries and exhaustive payload acceptance remain open.",
+      "gap": "Native registry CRUD, provider metadata, service devices and validated references/events have fixtures. Composite migration splits active and deleted owner identities, retains complete legacy subentry associations, replaces copied identifiers once and resolves parent aliases through actual config-entry domains. Tag restart and injected rollback cases preserve live and removed identities. Remaining child-device behavior, categories, other registries and exhaustive payload acceptance remain open.",
       "id": "registries",
       "local_evidence_paths": [
         "crates/hass-registry/src/lib.rs",
+        "crates/hass-tag/src/lib.rs",
+        "crates/hass/tests/end_to_end.rs",
         "crates/hass-api/src/websocket.rs"
       ],
-      "next_acceptance": "Verify CRUD/get/list/update/remove for all registry types after restart, collision and invalid-reference behavior, atomic persistence, websocket envelopes, event payloads and unknown-command errors.",
+      "next_acceptance": "Extend the accepted migration and identity guards against every pinned registry payload and child-device case; verify restart, collisions, invalid references, atomic persistence, websocket envelopes and event ordering.",
       "pinned_upstream_sources": [
         "homeassistant/helpers/entity_registry.py",
         "homeassistant/helpers/device_registry.py",
@@ -1054,14 +1058,17 @@
     {
       "area": "Recorder event/state pipeline, history, purge and statistics",
       "coverage_status": "partial_or_unported",
-      "gap": "Native SQLite state/event/private-metadata recording, multi-entity boundary history, purge/retention and actual repack have fixtures. Complete ingestion/filter pipelines, long-term statistics, repairs, upstream migrations and other database backends remain open.",
+      "gap": "Native SQLite state/event/private-metadata recording, multi-entity boundary history, purge/retention and actual repack have fixtures. Entity-specific StateRecordingPolicy omits Tag tag_id only from state-history snapshots; live/current state and generic event payloads retain it, including across SQLite reopen. Native generic event storage still records state_changed, unlike Home Assistant Recorder's state-row route, and the default Store::put_state_with_history ignores the projected snapshot unless a custom store overrides it. Complete ingestion/filter pipelines, long-term statistics, repairs, upstream migrations and other database backends remain open.",
       "id": "recorder_history_statistics",
       "local_evidence_paths": [
         "crates/hass-storage/src/lib.rs",
         "crates/hass-storage/tests/sqlite_store.rs",
+        "crates/hass-core/src/lib.rs",
+        "crates/hass-entity/src/lib.rs",
+        "crates/hass-tag/tests/sqlite.rs",
         "crates/hass-api/src/http.rs"
       ],
-      "next_acceptance": "Use pinned recorder migrations and tests to add event/state ingestion, filters, retention/purge, long-term statistics, migration/version refusal and query API semantics.",
+      "next_acceptance": "Verify each custom Store override applies the state-history projection while preserving full events, then use pinned recorder migrations and tests to add event/state ingestion, filters, retention/purge, long-term statistics, migration/version refusal and query API semantics.",
       "pinned_upstream_sources": [
         "homeassistant/components/recorder/__init__.py",
         "homeassistant/components/recorder/core.py",
@@ -1077,10 +1084,12 @@
     {
       "area": "Automation, script, scene and template engines",
       "coverage_status": "partial_or_unported",
-      "gap": "Native scripts/scenes and shared action execution, state/event/numeric/template/time/MQTT/notification/lifecycle triggers, modes and reactive template entities have fixtures. Remaining trigger/condition/action/template surfaces, blueprints, traces and exhaustive acceptance remain open.",
+      "gap": "Native scripts/scenes and shared action execution, state/event/numeric/template/time/MQTT/notification/lifecycle triggers, modes and reactive template entities have fixtures. Native tag_scanned callback triggers carry event context and metadata, with focused legacy composite-ID expansion coverage. Remaining trigger/condition/action/template surfaces, blueprints, traces and exhaustive acceptance remain open.",
       "id": "automation_scripts_scenes_templates",
       "local_evidence_paths": [
         "crates/hass-automation/src/lib.rs",
+        "crates/hass-tag/src/lib.rs",
+        "crates/hass/tests/end_to_end.rs",
         "crates/hass-script/src/lib.rs",
         "crates/hass-template/src/lib.rs"
       ],
@@ -15659,7 +15668,9 @@
       "config_flow_classes": [],
       "domain": "automation",
       "local_evidence_paths": [
-        "crates/hass-automation/src/lib.rs"
+        "crates/hass-automation/src/lib.rs",
+        "crates/hass-tag/src/lib.rs",
+        "crates/hass/tests/end_to_end.rs"
       ],
       "manifest": {
         "after_dependencies": [
@@ -15681,7 +15692,7 @@
       },
       "manifest_blob_oid": "a22abbee3b2f49d086c535bfb4144cd8106c9ced",
       "manifest_path": "homeassistant/components/automation/manifest.json",
-      "outstanding_acceptance": "Current schema/engine is bounded to a trigger, condition, and action subset; remaining upstream trigger/condition/action constructs, modes, tracing, and automation config lifecycle remain open.",
+      "outstanding_acceptance": "Native tag_scanned triggers use the Tag callback with event context and metadata; a focused test covers legacy composite device-ID expansion. Remaining upstream trigger/condition/action constructs, modes, tracing, automation config lifecycle, and exhaustive acceptance remain open. The separate composite-builder review corrections are not accepted.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -114036,7 +114047,9 @@
       "domain": "recorder",
       "local_evidence_paths": [
         "crates/hass-storage/src/lib.rs",
-        "crates/hass-core/src/lib.rs"
+        "crates/hass-core/src/lib.rs",
+        "crates/hass-entity/src/lib.rs",
+        "crates/hass-tag/tests/sqlite.rs"
       ],
       "manifest": {
         "codeowners": [
@@ -114056,7 +114069,7 @@
       },
       "manifest_blob_oid": "1fff8f916c85d194e78ecd54f1c7e81d44edbe96",
       "manifest_path": "homeassistant/components/recorder/manifest.json",
-      "outstanding_acceptance": "SQLite state/event history is a storage subset; recorder pipeline, retention/purge, statistics, repair, and database backend parity remain open.",
+      "outstanding_acceptance": "SQLite state/event history is a storage subset. Tag's StateRecordingPolicy omits tag_id from history only while current state and generic state_changed payloads retain it, proven across SQLite reopen. Native generic event history keeps state_changed unlike Home Assistant Recorder's state-row route; default Store::put_state_with_history ignores the projection unless custom stores override it. Recorder pipeline, retention/purge, statistics, repair, and database backend parity remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -136189,7 +136202,19 @@
       "component_directory": "homeassistant/components/tag/",
       "config_flow_classes": [],
       "domain": "tag",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-tag/src/lib.rs",
+        "crates/hass-tag/README.md",
+        "crates/hass-tag/tests/sqlite.rs",
+        "crates/hass-api/src/tags.rs",
+        "crates/hass-api/tests/tags_protocol.rs",
+        "crates/hass-automation/src/lib.rs",
+        "crates/hass-core/src/lib.rs",
+        "crates/hass-entity/src/lib.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/main.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -136202,10 +136227,10 @@
       },
       "manifest_blob_oid": "d7b695b68442fab9574047a84fac17bbfe19093d",
       "manifest_path": "homeassistant/components/tag/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Partial native behavior now covers persistent tag CRUD and names, registry-backed tag entities, the tag_scanned callback, role-limited Tag WebSocket list/CRUD/private subscription, and Tag-trigger automation. YAML accepts tag: null or tag: {} only. EntitySpec StateRecordingPolicy omits tag_id from state history while preserving current state and generic event payloads, as proven across SQLite reopen. Native generic event history still retains state_changed unlike Home Assistant Recorder's state-row route; default Store::put_state_with_history ignores the projection, so custom-store history parity remains open. The pinned Tag source does not establish a dedicated scan HTTP/service/WebSocket requirement; broader NFC/mobile-app reader flows, remaining upstream semantics, and full acceptance remain open. Focused composite migration and failed-write/tombstone corrections pass; exhaustive integration acceptance remains open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -155011,7 +155036,9 @@
       "domain": "websocket_api",
       "local_evidence_paths": [
         "crates/hass-api/src/websocket.rs",
-        "crates/hass-api/src/login.rs"
+        "crates/hass-api/src/login.rs",
+        "crates/hass-api/src/tags.rs",
+        "crates/hass-api/tests/tags_protocol.rs"
       ],
       "manifest": {
         "codeowners": [
@@ -155028,7 +155055,7 @@
       },
       "manifest_blob_oid": "315411ea4cf88f1fddfc571ccbe3742826cbc63c",
       "manifest_path": "homeassistant/components/websocket_api/manifest.json",
-      "outstanding_acceptance": "Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, and feature event payloads remain open.",
+      "outstanding_acceptance": "Tag list/create/update/delete and its private subscription feed now have actual-transport evidence for scalar parsing, role boundaries, strict fields, and private events. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, and feature event payloads remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -167706,7 +167733,7 @@
             "path": "crates/hass-api/src/http.rs",
             "public_functions": [],
             "test_functions_present": [
-              "event_listener_inventory_is_explicitly_unimplemented",
+              "event_listener_inventory_reports_actual_public_receivers",
               "rest_auth_health_and_state_statuses",
               "rest_invalid_state_body_and_history_filter",
               "empty_configured_token_rejects_protected_requests",
@@ -167800,7 +167827,7 @@
             ]
           }
         ],
-        "remaining": "Current schema/engine is bounded to a trigger, condition, and action subset; remaining upstream trigger/condition/action constructs, modes, tracing, and automation config lifecycle remain open.",
+        "remaining": "Native tag_scanned automation triggers use the Tag callback with context and metadata; focused tests cover legacy composite-ID expansion. Remaining upstream trigger/condition/action constructs, modes, tracing, automation config lifecycle, and exhaustive acceptance remain open. Composite-builder review corrections are not accepted.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
@@ -167950,7 +167977,7 @@
             "path": "crates/hass-api/src/http.rs",
             "public_functions": [],
             "test_functions_present": [
-              "event_listener_inventory_is_explicitly_unimplemented",
+              "event_listener_inventory_reports_actual_public_receivers",
               "rest_auth_health_and_state_statuses",
               "rest_invalid_state_body_and_history_filter",
               "empty_configured_token_rejects_protected_requests",
@@ -168276,11 +168303,24 @@
               "persistence_failures_do_not_mutate_or_publish",
               "runtime_metadata_round_trips_and_storage_failures_propagate",
               "concurrent_updates_publish_in_the_same_order_as_mutations",
-              "service_handler_can_reenter_runtime_registry_and_state_methods"
+              "service_handler_can_reenter_runtime_registry_and_state_methods",
+              "state_recording_policy_only_projects_history_attributes"
+            ]
+          },
+          {
+            "path": "crates/hass-entity/src/lib.rs",
+            "test_functions_present": [
+              "unrecorded_attributes_survive_live_restore_and_are_filtered_from_history"
+            ]
+          },
+          {
+            "path": "crates/hass-tag/tests/sqlite.rs",
+            "test_functions_present": [
+              "actual_tag_keeps_live_attributes_and_projects_history_across_sqlite_reopen"
             ]
           }
         ],
-        "remaining": "SQLite state/event history is a storage subset; recorder pipeline, retention/purge, statistics, repair, and database backend parity remain open.",
+        "remaining": "SQLite evidence proves Tag tag_id is omitted from state history while current state and full generic state_changed payloads retain it across reopen. Native event history still keeps state_changed unlike Home Assistant Recorder's state-row route, and default Store::put_state_with_history ignores the projection unless custom stores override it. Recorder pipeline, retention/purge, statistics, repair, and database backend parity remain open.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
@@ -168373,6 +168413,85 @@
         "remaining": "Only the implemented script subset is present; upstream sequencing, modes, cancellation, tracing, UI/config flow, and all pinned fixtures remain to be accepted.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+      },
+      {
+        "domain": "tag",
+        "local_evidence": [
+          {
+            "path": "crates/hass-tag/src/lib.rs",
+            "test_functions_present": [
+              "datetime_validation_preserves_source_naive_and_offset_forms",
+              "scan_fires_public_event_with_context_before_creating_persisted_tag",
+              "scan_without_device_preserves_existing_device_and_name_is_registry_backed",
+              "source_minor_11_collection_migrates_names_and_duplicate_tag_id",
+              "manager_drop_invalidates_weak_handles_and_releases_entities",
+              "snapshot_and_subscribe_delivers_only_private_collection_deltas",
+              "collection_list_and_persistence_keep_source_insertion_order",
+              "unrelated_collection_changes_do_not_recreate_removed_registry_entities",
+              "duplicate_create_keeps_collection_and_emits_no_delta",
+              "tag_collection_write_failure_does_not_retract_public_scan_event",
+              "failed_create_removes_only_its_new_registry_identity",
+              "failed_create_preserves_a_preexisting_registry_entry_and_raw_name",
+              "failed_create_restores_a_prior_tombstone_and_preserves_occupied_state",
+              "failed_update_restores_raw_name_collection_and_state",
+              "failed_delete_restores_the_same_registry_identity_and_live_state"
+            ]
+          },
+          {
+            "path": "crates/hass-tag/README.md"
+          },
+          {
+            "path": "crates/hass-tag/tests/sqlite.rs",
+            "test_functions_present": [
+              "actual_tag_keeps_live_attributes_and_projects_history_across_sqlite_reopen"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/tags.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/tags_protocol.rs",
+            "test_functions_present": [
+              "tag_list_and_subscribe_are_readable_but_crud_is_admin_only",
+              "actual_composite_registry_is_readable_and_alias_mutations_report_not_allowed"
+            ]
+          },
+          {
+            "path": "crates/hass-automation/src/lib.rs",
+            "test_functions_present": [
+              "native_tag_scan_uses_public_event_context_and_trigger_metadata",
+              "native_tag_trigger_expands_split_legacy_device_ids",
+              "native_tag_scan_matches_coerced_scalars_and_keeps_null_device_filter_empty"
+            ]
+          },
+          {
+            "path": "crates/hass-core/src/lib.rs",
+            "test_functions_present": [
+              "state_recording_policy_only_projects_history_attributes"
+            ]
+          },
+          {
+            "path": "crates/hass-entity/src/lib.rs",
+            "test_functions_present": [
+              "unrecorded_attributes_survive_live_restore_and_are_filtered_from_history"
+            ]
+          },
+          {
+            "path": "crates/hass/src/config.rs"
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_tags_registry_and_trigger_survive_hard_restart"
+            ]
+          }
+        ],
+        "remaining": "Tag config accepts only null or an empty mapping. The pinned Tag source does not define a dedicated scan HTTP/service/WebSocket requirement; broader NFC/mobile-app reader flows and exhaustive upstream integration acceptance remain open. Tag triggers resolve legacy composite aliases through the actual shared registry; complete registry parity remains open.",
+        "status": "partial",
+        "verification": "Frozen 24-crate workspace passes 499 tests across 63 targets, zero failed or ignored, strict all-target locked Clippy, formatting, release build and optimized CLI validation. Tag contributes 15 unit cases and actual SQLite reopen coverage; real WebSocket coverage includes two transport cases, and the compiled process verifies CRUD, history projection, automation, hard restart and deletion. Full integration acceptance remains open."
       },
       {
         "domain": "template",
@@ -168518,9 +168637,18 @@
             "path": "crates/hass-api/src/login.rs",
             "public_functions": [],
             "test_functions_present": []
+          },
+          {
+            "path": "crates/hass-api/src/tags.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/tags_protocol.rs",
+            "test_functions_present": [
+              "tag_list_and_subscribe_are_readable_but_crud_is_admin_only"
+            ]
           }
         ],
-        "remaining": "Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, and feature event payloads remain open.",
+        "remaining": "Tag list/create/update/delete and its private subscription feed have actual-transport evidence for scalar parsing, role boundaries, strict fields, and private events. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, and feature event payloads remain open.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
@@ -168551,10 +168679,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 32,
+    "partial": 33,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1533
+    "unported": 1532
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

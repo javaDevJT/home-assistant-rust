@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker", "crates/hass-image-upload", "crates/hass-webhook", "crates/hass-entity", "crates/hass-system-sensors"]
+members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker", "crates/hass-image-upload", "crates/hass-webhook", "crates/hass-entity", "crates/hass-system-sensors", "crates/hass-tag"]
 
 [workspace.package]
 version = "0.1.0"
@@ -39,6 +39,7 @@ hass-image-upload = { path = "crates/hass-image-upload" }
 hass-webhook = { path = "crates/hass-webhook" }
 hass-entity = { path = "crates/hass-entity" }
 hass-system-sensors = { path = "crates/hass-system-sensors" }
+hass-tag = { path = "crates/hass-tag" }
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png"] }
 http-body-util = "0.1"
 ipnet = "2"

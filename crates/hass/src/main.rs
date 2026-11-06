@@ -131,8 +131,16 @@ async fn main() -> Result<()> {
             let runtime = Runtime::new(Arc::new(store))?;
             helpers::setup(&runtime, &helper_config)?;
             let auth = hass_auth::AuthManager::new(runtime.clone())?;
-            let registries = hass_registry::Registries::new(runtime.clone())?;
             let config_entries = hass_config::ConfigEntries::new(runtime.clone())?;
+            let registry_entries = config_entries.clone();
+            let registries = hass_registry::Registries::new_with_config_entry_domain_resolver(
+                runtime.clone(),
+                Arc::new(move |entry_id| {
+                    registry_entries
+                        .get_entry(entry_id)
+                        .map(|entry| entry.domain)
+                }),
+            )?;
             config_entries.initialize_core_config(&seed_config)?;
             Ok((runtime, auth, registries, config_entries))
         })
@@ -221,6 +229,12 @@ async fn main() -> Result<()> {
     let native = hass_native::NativeIntegrations::start(runtime.clone(), native_config).await?;
     let scripts = hass_script::ScriptEngine::start(runtime.clone(), config.script, config.scene)?;
     let entity_lifecycle = hass_entity::EntityLifecycle::new(runtime.clone(), registries.clone())?;
+    let tags = hass_tag::TagIntegration::start(
+        runtime.clone(),
+        registries.clone(),
+        entity_lifecycle.clone(),
+    )?;
+    let tag_manager = tags.manager();
     let system_sensors = system_sensors::SystemSensors::start(
         runtime.clone(),
         registries.clone(),
@@ -237,11 +251,14 @@ async fn main() -> Result<()> {
     .await?;
     let mqtt_topics = hass_automation::mqtt_topics(&config.automation);
     let webhooks = hass_webhook::WebhookManager::new();
-    let automations = hass_automation::start_with_timezone_and_webhooks(
+    let automations = hass_automation::start_with_features(
         runtime.clone(),
         config.automation,
-        runtime.time_zone(),
-        webhooks.clone(),
+        hass_automation::AutomationFeatures {
+            time_zone: Some(runtime.time_zone()),
+            webhooks: Some(webhooks.clone()),
+            registries: Some(registries.clone()),
+        },
     )?;
     let rest = hass_rest::RestIntegration::start(runtime.clone(), config.rest, config.rest_command)
         .await?;
@@ -283,6 +300,7 @@ async fn main() -> Result<()> {
             persons: Some(person_manager),
             images: Some(image_manager),
             webhooks: Some(webhooks),
+            tags: Some(tag_manager),
         },
         Some(shutdown_rx),
     );
@@ -294,6 +312,7 @@ async fn main() -> Result<()> {
     let recorder_result = recorder.shutdown().await;
     let automation_result = automations.shutdown().await;
     let system_sensor_result = system_sensors.shutdown().await;
+    let tag_result = tags.shutdown();
     let entity_lifecycle_result = entity_lifecycle.shutdown().await;
     let template_entity_result = template_entities.shutdown().await;
     let driver_result = drivers.shutdown().await;
@@ -315,6 +334,7 @@ async fn main() -> Result<()> {
     recorder_result?;
     automation_result?;
     system_sensor_result?;
+    tag_result?;
     entity_lifecycle_result?;
     template_entity_result?;
     driver_result?;

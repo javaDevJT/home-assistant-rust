@@ -1,8 +1,20 @@
 # Validation evidence
 
-The current 23-crate entity/webhook/clock checkpoint passed **462 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Linux CI awaits publication. Earlier published checkpoints remain separately pinned below. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
+The accepted 24-crate tag/recording/composite source passes **499 workspace tests**, formatting, strict full-workspace Clippy, optimized build and CLI configuration validation on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Linux publication follows this local gate. Earlier checkpoints remain separately pinned below. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
 
-## Current 23-crate acceptance
+## Accepted 24-crate source
+
+`cargo test --workspace --locked --no-fail-fast` passes 499 tests across 63 unit/integration/doc-test targets, with zero failed or ignored cases. Formatting, strict locked all-target Clippy, optimized build and optimized example `--check` pass. Optimized macOS executable SHA-256: `1efc479a1bba8d8d07280c23f5c026eaacb92c2a45ad710b4bdfd6605888ad2f`.
+
+Tag acceptance exercises native reader scans, causal automation context, scalar/list and null filters, private current/live WebSocket subscriptions, ordinary-user reads and administrator mutations, strict fields and pinned errors. The actual compiled process verifies names, stable registry identity, HTTP current/history separation, tag-triggered automation, hard restart and deletion cleanup. Injected failures cover create/update/delete, prior live and removed identities, concurrent name edits, foreign states, aborted private deltas and retry. The actual SQLite reopen retains live `tag_id` while recorded state history excludes it; full native event rows remain deliberately unchanged.
+
+Composite migration tests cover active and deleted owner splits, complete multi-subentry association retention, copied identifier replacement, self/dangling parent cleanup, same-entry/domain/fallback parent aliases, actual shared config-entry resolution, persistence failure and event ordering. Public WebSocket fixtures verify readable split inventory and exact `not_allowed` mutation errors.
+
+The first broad run found a process-fixture port reservation race and a connection reset during early rejection of a large image upload. Fixtures now use the child's atomically bound port 0; authentication rejection discards a bounded upload stream without buffering before returning its response. Both affected IO targets passed repeated focused checks before the complete green rerun.
+
+The inventory reconciles all 1,565 unique manifests over 32 disjoint batches: 33 partial domains, 1,532 unported, zero complete. Logger and Sun draft crates and their isolated checks are outside this workspace receipt. Generic platform, recorder/statistics/event routing, physical transports and the other listed gaps remain open.
+
+## Published 23-crate acceptance
 
 `cargo test --workspace --locked --no-fail-fast` passed 462 tests across 59 unit/integration/doc-test targets, with zero failed or ignored cases. Formatting, strict locked all-target Clippy, optimized build and optimized example `--check` passed. Optimized macOS executable SHA-256: `d27d71f52a0777f56c713462152132417540b979f85eda66c2f288c9ee20f430`.
 
@@ -53,6 +65,8 @@ Storage tests verify owned v1→v2 migration, rollback/foreign-schema rejection,
 These receipts establish the implemented subset. They do not verify complete integrations, frontend/browser use, upstream database compatibility, custom authorization policies, hardware operation, or full Home Assistant parity. Synchronous handlers already running must terminate before joined shutdown can complete.
 
 ## Linux checkpoint CI
+
+Checkpoint `831dce75694a2bdba0777aaeef985614895eacae` passed [Linux run 42270320657](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42270320657), including formatting, strict all-target Clippy, all tests and CLI configuration validation. It excludes subsequent tag, device-composite and recording-policy changes.
 
 Checkpoint `33a67c42d782debc54046f32069b05edaf325d98` passed [Linux run 42202324831](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42202324831), including formatting, strict all-target Clippy, all tests and actual CLI configuration validation. It excludes subsequent entity-lifecycle and webhook work.
 

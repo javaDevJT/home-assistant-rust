@@ -30,12 +30,13 @@ use std::{
 use chrono::{Datelike, Timelike};
 use chrono_tz::Tz;
 use hass_core::{Context, Error, Event, Result, Runtime, ServiceCall, ServiceResult, State};
+use hass_registry::Registries;
 use hass_script::{run_sequence, validate_sequence};
 use hass_template::TemplateEngine;
 use hass_webhook::{
     WebhookConfig, WebhookHandlerError, WebhookManager, WebhookRegistration, WebhookRequest,
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use tokio::{
     sync::{broadcast, mpsc, watch},
@@ -188,6 +189,18 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_data: Option<Map<String, Value>>,
     },
+    /// Match a public `tag_scanned` event from a native tag provider.
+    Tag {
+        tag_id: EntityIds,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device_id: Option<EntityIds>,
+        #[serde(default = "default_tag_trigger_enabled")]
+        enabled: TriggerEnabled,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+    },
     /// Match an inbound Home Assistant webhook.
     Webhook {
         webhook_id: String,
@@ -202,6 +215,20 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         alias: Option<String>,
     },
+}
+
+/// Common trigger enable value, either a literal boolean or a template.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TriggerEnabled {
+    /// Enable or disable the trigger directly.
+    Boolean(bool),
+    /// Render the value when the automation engine attaches its triggers.
+    Template(String),
+}
+
+fn default_tag_trigger_enabled() -> TriggerEnabled {
+    TriggerEnabled::Boolean(true)
 }
 
 fn default_webhook_local_only() -> bool {
@@ -367,6 +394,18 @@ enum TriggerRepr {
         #[serde(default)]
         event_data: Option<Map<String, Value>>,
     },
+    Tag {
+        #[serde(deserialize_with = "deserialize_tag_ids")]
+        tag_id: EntityIds,
+        #[serde(default, deserialize_with = "deserialize_optional_tag_ids")]
+        device_id: Option<EntityIds>,
+        #[serde(default = "default_tag_trigger_enabled")]
+        enabled: TriggerEnabled,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        alias: Option<String>,
+    },
     Webhook {
         webhook_id: String,
         #[serde(default = "default_webhook_local_only")]
@@ -458,6 +497,19 @@ impl From<TriggerRepr> for Trigger {
                 event_type,
                 event_data,
             },
+            TriggerRepr::Tag {
+                tag_id,
+                device_id,
+                enabled,
+                id,
+                alias,
+            } => Self::Tag {
+                tag_id,
+                device_id,
+                enabled,
+                id,
+                alias,
+            },
             TriggerRepr::Webhook {
                 webhook_id,
                 local_only,
@@ -514,6 +566,53 @@ impl EntityIds {
             Self::One(id) => vec![id],
             Self::Many(ids) => ids.iter().map(String::as_str).collect(),
         }
+    }
+}
+
+fn deserialize_tag_ids<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<EntityIds, D::Error> {
+    tag_ids_from_value(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_tag_ids<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<EntityIds>, D::Error> {
+    deserialize_tag_ids(deserializer).map(Some)
+}
+
+fn tag_ids_from_value(value: Value) -> std::result::Result<EntityIds, String> {
+    // Pinned EnsureList maps null to an empty list; cv.string then accepts
+    // scalar strings, numbers and booleans, including within a list.
+    fn scalar(value: Value) -> std::result::Result<String, String> {
+        match value {
+            Value::String(value) => Ok(value),
+            Value::Bool(value) => Ok(if value { "True" } else { "False" }.into()),
+            Value::Number(value) if value.is_f64() => {
+                let formatted = format!("{:?}", value.as_f64().ok_or("Invalid tag number")?);
+                if let Some((base, exponent)) = formatted.split_once('e') {
+                    let exponent = exponent.parse::<i32>().map_err(|_| "Invalid tag number")?;
+                    Ok(format!(
+                        "{base}e{}{abs:02}",
+                        if exponent < 0 { "-" } else { "+" },
+                        abs = exponent.unsigned_abs()
+                    ))
+                } else {
+                    Ok(formatted)
+                }
+            }
+            Value::Number(value) => Ok(value.to_string()),
+            _ => Err("Tag IDs must be scalar string values".into()),
+        }
+    }
+    match value {
+        Value::Null => Ok(EntityIds::Many(Vec::new())),
+        Value::Array(values) => values
+            .into_iter()
+            .map(scalar)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map(EntityIds::Many),
+        value => scalar(value).map(EntityIds::One),
     }
 }
 
@@ -847,6 +946,7 @@ pub fn validate(automations: &[Automation]) -> Result<()> {
                     )));
                 }
                 Trigger::Event { .. } => {}
+                Trigger::Tag { .. } => {}
                 Trigger::Webhook {
                     allowed_methods, ..
                 } => {
@@ -1439,6 +1539,167 @@ fn initial_template_states(
     Ok(values)
 }
 
+#[derive(Clone)]
+struct TagTriggerPlan {
+    tag_ids: HashSet<String>,
+    device_ids: Option<HashSet<String>>,
+    id: String,
+    idx: String,
+    alias: Option<String>,
+}
+
+fn prepare_tag_trigger_plans(
+    runtime: &Runtime,
+    automations: &[Automation],
+    registries: Option<&Registries>,
+) -> HashMap<(String, usize), TagTriggerPlan> {
+    let mut plans = HashMap::new();
+    for automation in automations {
+        for (trigger_index, trigger) in automation.triggers.iter().enumerate() {
+            let Trigger::Tag {
+                tag_id,
+                device_id,
+                enabled,
+                id,
+                alias,
+            } = trigger
+            else {
+                continue;
+            };
+
+            let is_enabled = match enabled {
+                TriggerEnabled::Boolean(enabled) => *enabled,
+                TriggerEnabled::Template(template) => {
+                    let variables = variables_for_trigger(runtime, automation, None, "tag", None);
+                    match template_truthy(runtime, template, &variables) {
+                        Ok(enabled) => enabled,
+                        Err(error) => {
+                            tracing::error!(
+                                automation_id = %automation.id,
+                                trigger_index,
+                                %error,
+                                "tag trigger enabled template failed"
+                            );
+                            false
+                        }
+                    }
+                }
+            };
+            if !is_enabled {
+                continue;
+            }
+
+            let tag_ids = tag_id.as_slice().into_iter().map(str::to_owned).collect();
+            // Home Assistant expands pre-migration composite IDs once when
+            // attaching the trigger. Preserve the configured ID if the shared
+            // registry has no surviving split members.
+            let device_ids: Option<HashSet<String>> = device_id.as_ref().map(|ids| {
+                let mut resolved = HashSet::new();
+                for device_id in ids.as_slice() {
+                    let split_devices = registries
+                        .map(|registries| registries.devices_for_composite_device_id(device_id))
+                        .unwrap_or_default();
+                    if split_devices.is_empty() {
+                        resolved.insert(device_id.to_owned());
+                    } else {
+                        resolved.extend(split_devices.into_iter().map(|device| device.id));
+                    }
+                }
+                resolved
+            });
+            plans.insert(
+                (automation.id.clone(), trigger_index),
+                TagTriggerPlan {
+                    tag_ids,
+                    device_ids,
+                    id: id.clone().unwrap_or_else(|| trigger_index.to_string()),
+                    idx: trigger_index.to_string(),
+                    alias: alias.clone(),
+                },
+            );
+        }
+    }
+    plans
+}
+
+fn tag_trigger_match(
+    runtime: &Runtime,
+    automation: &Automation,
+    plan: &TagTriggerPlan,
+    event: &Event,
+) -> Result<Option<TriggerMatch>> {
+    if event.event_type != "tag_scanned"
+        || !event
+            .data
+            .get("tag_id")
+            .and_then(Value::as_str)
+            .is_some_and(|tag_id| plan.tag_ids.contains(tag_id))
+        || plan.device_ids.as_ref().is_some_and(|device_ids| {
+            !event
+                .data
+                .get("device_id")
+                .and_then(Value::as_str)
+                .is_some_and(|device_id| device_ids.contains(device_id))
+        })
+    {
+        return Ok(None);
+    }
+
+    let event = serde_json::to_value(event)
+        .map_err(|error| Error::Service(format!("cannot serialize tag trigger event: {error}")))?;
+    let mut fields = Map::new();
+    fields.insert("event".into(), event);
+    fields.insert("description".into(), Value::String("Tag scanned".into()));
+    fields.insert("id".into(), Value::String(plan.id.clone()));
+    fields.insert("idx".into(), Value::String(plan.idx.clone()));
+    fields.insert(
+        "alias".into(),
+        plan.alias.clone().map_or(Value::Null, Value::String),
+    );
+    Ok(Some(TriggerMatch {
+        variables: variables_for_trigger_with_fields(
+            runtime,
+            automation,
+            None,
+            "tag",
+            None,
+            Some(fields),
+        ),
+        duration: None,
+        entity_id: None,
+    }))
+}
+
+/// Optional services shared with the root application when starting
+/// automations. Passing the application's `Registries` enables tag trigger
+/// compatibility for composite device IDs when registry data is available.
+#[derive(Default)]
+pub struct AutomationFeatures {
+    /// Configured IANA timezone. Missing values use the Runtime timezone.
+    pub time_zone: Option<String>,
+    /// Process-local callback manager for webhook triggers.
+    pub webhooks: Option<WebhookManager>,
+    /// The application's shared registries; the automation engine does not
+    /// create a second registry instance.
+    pub registries: Option<Registries>,
+}
+
+/// Start automations with optional shared application services.
+pub fn start_with_features(
+    runtime: Runtime,
+    automations: Vec<Automation>,
+    features: AutomationFeatures,
+) -> Result<AutomationEngine> {
+    let timezone = features.time_zone.unwrap_or_else(|| runtime.time_zone());
+    start_with_timezone_and_manager_and_registries(
+        runtime,
+        automations,
+        timezone,
+        features.webhooks,
+        features.registries,
+    )
+}
+
 /// Start the automation engine. It subscribes to runtime events before
 /// returning. Broadcast lag and an overflowing pending queue terminate the
 /// listener and are returned by [`AutomationEngine::shutdown`].
@@ -1489,12 +1750,29 @@ fn start_with_timezone_and_manager(
     timezone: impl AsRef<str>,
     webhook_manager: Option<WebhookManager>,
 ) -> Result<AutomationEngine> {
+    start_with_timezone_and_manager_and_registries(
+        runtime,
+        automations,
+        timezone,
+        webhook_manager,
+        None,
+    )
+}
+
+fn start_with_timezone_and_manager_and_registries(
+    runtime: Runtime,
+    automations: Vec<Automation>,
+    timezone: impl AsRef<str>,
+    webhook_manager: Option<WebhookManager>,
+    registries: Option<Registries>,
+) -> Result<AutomationEngine> {
     validate(&automations)?;
     let timezone = timezone
         .as_ref()
         .parse::<Tz>()
         .map_err(|_| Error::InvalidInput("unknown automation time zone".into()))?;
     let template_previous = initial_template_states(&runtime, &automations)?;
+    let tag_trigger_plans = prepare_tag_trigger_plans(&runtime, &automations, registries.as_ref());
     let receiver = runtime.subscribe();
     let signal_receiver = automations
         .iter()
@@ -1578,6 +1856,7 @@ fn start_with_timezone_and_manager(
             receiver,
             signal_receiver,
             webhook_receiver,
+            tag_trigger_plans,
             cancel_rx,
             cancel_tx: listener_cancel,
         })
@@ -1880,6 +2159,7 @@ struct EngineInput {
     receiver: broadcast::Receiver<Event>,
     signal_receiver: Option<broadcast::Receiver<Event>>,
     webhook_receiver: Option<mpsc::Receiver<WebhookDelivery>>,
+    tag_trigger_plans: HashMap<(String, usize), TagTriggerPlan>,
     cancel_rx: watch::Receiver<bool>,
     cancel_tx: watch::Sender<bool>,
 }
@@ -1934,6 +2214,7 @@ async fn run_engine(input: EngineInput) -> Result<()> {
         mut receiver,
         mut signal_receiver,
         mut webhook_receiver,
+        tag_trigger_plans,
         mut cancel_rx,
         cancel_tx,
     } = input;
@@ -2213,29 +2494,81 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                                 {
                                     continue;
                                 }
-                                let matched = if let Trigger::Template { value_template, r#for } = trigger {
-                                    if event.event_type != "state_changed" { continue; }
-                                    let variables = variables_for_trigger(&runtime, automation, Some(&event), "template", None);
-                                    let value = match template_truthy(&runtime, value_template, &variables) {
+                                let matched = if matches!(trigger, Trigger::Tag { .. }) {
+                                    match tag_trigger_plans
+                                        .get(&(automation.id.clone(), trigger_index))
+                                    {
+                                        Some(plan) => {
+                                            match tag_trigger_match(&runtime, automation, plan, &event)
+                                            {
+                                                Ok(matched) => matched,
+                                                Err(error) => {
+                                                    tracing::warn!(
+                                                        automation_id = %automation.id,
+                                                        %error,
+                                                        "tag trigger evaluation failed"
+                                                    );
+                                                    None
+                                                }
+                                            }
+                                        }
+                                        None => None,
+                                    }
+                                } else if let Trigger::Template {
+                                    value_template,
+                                    r#for,
+                                } = trigger
+                                {
+                                    if event.event_type != "state_changed" {
+                                        continue;
+                                    }
+                                    let variables = variables_for_trigger(
+                                        &runtime,
+                                        automation,
+                                        Some(&event),
+                                        "template",
+                                        None,
+                                    );
+                                    let value = match template_truthy(
+                                        &runtime,
+                                        value_template,
+                                        &variables,
+                                    ) {
                                         Ok(value) => value,
                                         Err(error) => {
-                                            tracing::warn!(automation_id = %automation.id, %error, "template trigger evaluation failed");
+                                            tracing::warn!(
+                                                automation_id = %automation.id,
+                                                %error,
+                                                "template trigger evaluation failed"
+                                            );
                                             false
                                         }
                                     };
-                                    let was_true = template_previous.insert((automation.id.clone(), trigger_index), value).unwrap_or(false);
+                                    let was_true = template_previous
+                                        .insert((automation.id.clone(), trigger_index), value)
+                                        .unwrap_or(false);
                                     (value && !was_true).then(|| TriggerMatch {
                                         variables,
-                                        duration: r#for.as_ref().and_then(|duration| duration.duration_with_limit(MAX_TRIGGER_FOR).ok()),
+                                        duration: r#for.as_ref().and_then(|duration| {
+                                            duration.duration_with_limit(MAX_TRIGGER_FOR).ok()
+                                        }),
                                         entity_id: None,
                                     })
                                 } else {
-                                    match match_event_trigger(&runtime, automation, trigger, &event, false) {
-                                        Ok(matched) => {
-                                            matched
-                                        },
+                                    match match_event_trigger(
+                                        &runtime,
+                                        automation,
+                                        trigger,
+                                        &event,
+                                        false,
+                                    ) {
+                                        Ok(matched) => matched,
                                         Err(error) => {
-                                            tracing::warn!(automation_id = %automation.id, %error, "automation trigger evaluation failed");
+                                            tracing::warn!(
+                                                automation_id = %automation.id,
+                                                %error,
+                                                "automation trigger evaluation failed"
+                                            );
                                             None
                                         }
                                     }
@@ -2717,6 +3050,7 @@ fn match_event_trigger(
         }
         Trigger::PersistentNotification { .. } => (false, &None, None),
         Trigger::Time { .. } | Trigger::TimePattern { .. } => (false, &None, None),
+        Trigger::Tag { .. } => (false, &None, None),
         Trigger::Webhook { .. } => (false, &None, None),
     };
     if !matches {
@@ -2748,6 +3082,7 @@ fn trigger_platform_name(trigger: &Trigger) -> &'static str {
         Trigger::Mqtt { .. } => "mqtt",
         Trigger::PersistentNotification { .. } => "persistent_notification",
         Trigger::Event { .. } => "event",
+        Trigger::Tag { .. } => "tag",
         Trigger::Webhook { .. } => "webhook",
     }
 }
@@ -3285,7 +3620,10 @@ fn condition_matches(
 mod tests {
     use super::*;
     use hass_core::{MemoryStore, ServiceResult};
+    use hass_entity::EntityLifecycle;
     use hass_notifications::NotificationIntegration;
+    use hass_registry::Registries;
+    use hass_tag::TagIntegration;
     use hass_webhook::WebhookOrigin;
     use std::{
         sync::atomic::{AtomicUsize, Ordering},
@@ -5238,5 +5576,315 @@ mod tests {
         .await
         .expect("dropping the engine must release its Runtime lease");
         assert_eq!(manager.admin_inventory()[0].webhook_id, "occupied-id");
+    }
+
+    #[tokio::test]
+    async fn native_tag_scan_uses_public_event_context_and_trigger_metadata() {
+        let runtime = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+        let tag_integration =
+            TagIntegration::start(runtime.clone(), registries.clone(), lifecycle.clone()).unwrap();
+        let tags = tag_integration.manager();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let automations = config(
+            r#"
+- id: tag_metadata
+  mode: queued
+  trigger_variables:
+    source_name: reader
+    skip_trigger: false
+  triggers:
+    - platform: tag
+      tag_id: [scan-1, scan-2]
+      device_id: [scanner-1, scanner-2]
+      id: custom-trigger-id
+      alias: Scanner tag
+    - trigger: tag
+      tag_id: scan-1
+      enabled: false
+      id: disabled-trigger
+    - trigger: tag
+      tag_id: scan-1
+      enabled: "{{ skip_trigger }}"
+      id: templated-disabled-trigger
+  actions:
+    - action: test.notify
+      data:
+        name: custom
+        platform: "{{ trigger.platform }}"
+        description: "{{ trigger.description }}"
+        trigger_id: "{{ trigger.id }}"
+        trigger_idx: "{{ trigger.idx }}"
+        trigger_alias: "{{ trigger.alias }}"
+        source_name: "{{ source_name }}"
+        event_type: "{{ trigger.event.event_type }}"
+        event_tag_id: "{{ trigger.event.data.tag_id }}"
+- id: tag_default_id
+  triggers:
+    - platform: tag
+      tag_id: scan-1
+      device_id: scanner-1
+  actions:
+    - action: test.notify
+      data:
+        name: default
+        trigger_id: "{{ trigger.id }}"
+        trigger_idx: "{{ trigger.idx }}"
+- id: tag_optional_device
+  mode: queued
+  triggers:
+    - trigger: tag
+      tag_id: scan-2
+  actions:
+    - action: test.notify
+      data:
+        name: optional_device
+        event_device_id: "{{ trigger.event.data.device_id }}"
+"#,
+        );
+        let engine = start_with_features(
+            runtime.clone(),
+            automations,
+            AutomationFeatures {
+                registries: Some(registries),
+                ..AutomationFeatures::default()
+            },
+        )
+        .unwrap();
+        let context = Context {
+            id: "native-tag-context".into(),
+            parent_id: Some("parent-context".into()),
+            user_id: Some("reader-user".into()),
+        };
+        let assert_causal_context = |actual: &Context| {
+            assert_ne!(actual.id, context.id);
+            assert_eq!(actual.parent_id.as_deref(), Some(context.id.as_str()));
+            assert_eq!(actual.user_id.as_deref(), context.user_id.as_deref());
+        };
+
+        tags.scan("unconfigured-tag", Some("scanner-1"), context.clone())
+            .unwrap();
+        tags.scan("scan-1", Some("other-scanner"), context.clone())
+            .unwrap();
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(60), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        // A trigger without a device filter accepts scans from any device.
+        tags.scan("scan-2", Some("other-scanner"), context.clone())
+            .unwrap();
+        let any_device = receive_notification_run(&mut receiver).await;
+        assert_eq!(any_device.data["name"], "optional_device");
+        assert_eq!(any_device.data["event_device_id"], "other-scanner");
+        assert_causal_context(&any_device.context);
+
+        // Scalar/list filters match each configured value.
+        tags.scan("scan-2", Some("scanner-2"), context.clone())
+            .unwrap();
+        let mut list_matches = [
+            receive_notification_run(&mut receiver).await,
+            receive_notification_run(&mut receiver).await,
+        ];
+        list_matches.sort_by_key(|call| call.data["name"].as_str().unwrap().to_owned());
+        assert_eq!(list_matches[0].data["name"], "custom");
+        assert_eq!(list_matches[1].data["name"], "optional_device");
+        assert!(
+            list_matches
+                .iter()
+                .all(
+                    |call| call.context.parent_id.as_deref() == Some(context.id.as_str())
+                        && call.context.user_id.as_deref() == context.user_id.as_deref()
+                )
+        );
+
+        tags.scan("scan-1", Some("scanner-1"), context.clone())
+            .unwrap();
+        let mut calls = [
+            receive_notification_run(&mut receiver).await,
+            receive_notification_run(&mut receiver).await,
+        ];
+        calls.sort_by_key(|call| call.data["name"].as_str().unwrap().to_owned());
+        assert_eq!(calls[0].data["name"], "custom");
+        assert_eq!(calls[0].data["platform"], "tag");
+        assert_eq!(calls[0].data["description"], "Tag scanned");
+        assert_eq!(calls[0].data["trigger_id"], "custom-trigger-id");
+        assert_eq!(calls[0].data["trigger_idx"], "0");
+        assert_eq!(calls[0].data["trigger_alias"], "Scanner tag");
+        assert_eq!(calls[0].data["source_name"], "reader");
+        assert_eq!(calls[0].data["event_type"], "tag_scanned");
+        assert_eq!(calls[0].data["event_tag_id"], "scan-1");
+        assert_causal_context(&calls[0].context);
+        assert_eq!(calls[1].data["name"], "default");
+        assert_eq!(calls[1].data["trigger_id"], "0");
+        assert_eq!(calls[1].data["trigger_idx"], "0");
+        assert_causal_context(&calls[1].context);
+
+        engine.shutdown().await.unwrap();
+        tag_integration.shutdown().unwrap();
+        lifecycle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_tag_scan_matches_coerced_scalars_and_keeps_null_device_filter_empty() {
+        let runtime = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+        let integration =
+            TagIntegration::start(runtime.clone(), registries, lifecycle.clone()).unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let automations = config(
+            r#"
+- id: scalar_ids
+  mode: queued
+  triggers:
+    - trigger: tag
+      tag_id: [42, true, 1.0e20]
+      device_id: false
+  actions:
+    - action: test.notify
+      data:
+        name: "id:{{ trigger.event.data.tag_id }}"
+- id: explicit_null_device
+  triggers:
+    - trigger: tag
+      tag_id: 42
+      device_id: null
+  actions:
+    - action: test.notify
+      data:
+        name: must_not_run
+- id: empty_tags
+  triggers:
+    - trigger: tag
+      tag_id: null
+  actions:
+    - action: test.notify
+      data:
+        name: must_not_run
+"#,
+        );
+        let engine = start(runtime.clone(), automations).unwrap();
+        for id in ["42", "True", "1e+20"] {
+            integration
+                .manager()
+                .scan(id, Some("False"), Context::default())
+                .unwrap();
+            let call = tokio::time::timeout(StdDuration::from_secs(2), receiver.recv())
+                .await
+                .unwrap_or_else(|_| panic!("No action for tag {id}"))
+                .unwrap();
+            assert_eq!(call.data["name"], format!("id:{id}"));
+        }
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(60), receiver.recv())
+                .await
+                .is_err()
+        );
+        for invalid in ["{nested: value}", "[null]", "[[nested]]"] {
+            let source = format!(
+                "- id: invalid\n  triggers:\n    - trigger: tag\n      tag_id: {invalid}\n  actions: []\n"
+            );
+            assert!(serde_yaml::from_str::<Vec<Automation>>(&source).is_err());
+        }
+        engine.shutdown().await.unwrap();
+        integration.shutdown().unwrap();
+        lifecycle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_tag_trigger_expands_split_legacy_device_ids() {
+        let runtime = runtime();
+        runtime
+            .set_data(
+                "core.registries",
+                &serde_json::json!({
+                    "version": 1,
+                    "devices": [{
+                        "id": "composite00000000000000000000ab",
+                        "config_entry_id": "legacy-entry-one",
+                        "config_entries": ["legacy-entry-one", "legacy-entry-two"],
+                        "config_entries_subentries": {
+                            "legacy-entry-one": [null],
+                            "legacy-entry-two": [null]
+                        },
+                        "created_at": "2025-01-01T00:00:00Z",
+                        "modified_at": "2025-01-01T00:00:00Z"
+                    }]
+                }),
+            )
+            .unwrap();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let split_devices =
+            registries.devices_for_composite_device_id("composite00000000000000000000ab");
+        assert_eq!(split_devices.len(), 2);
+
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+        let tag_integration =
+            TagIntegration::start(runtime.clone(), registries.clone(), lifecycle.clone()).unwrap();
+        let tags = tag_integration.manager();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let automations = config(
+            r#"
+- id: split_device_tag
+  mode: queued
+  triggers:
+    - trigger: tag
+      tag_id: scan-1
+      device_id: composite00000000000000000000ab
+  actions:
+    - action: test.notify
+      data:
+        scanned_device: "{{ trigger.event.data.device_id }}"
+"#,
+        );
+        let engine = start_with_features(
+            runtime.clone(),
+            automations,
+            AutomationFeatures {
+                registries: Some(registries),
+                ..AutomationFeatures::default()
+            },
+        )
+        .unwrap();
+
+        tags.scan(
+            "scan-1",
+            Some("composite00000000000000000000ab"),
+            Context::default(),
+        )
+        .unwrap();
+        tags.scan("scan-1", Some("unrelated-device"), Context::default())
+            .unwrap();
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(60), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        let mut matched_devices = Vec::new();
+        for device in &split_devices {
+            tags.scan("scan-1", Some(device.id.as_str()), Context::default())
+                .unwrap();
+            let call = receive_notification_run(&mut receiver).await;
+            matched_devices.push(call.data["scanned_device"].as_str().unwrap().to_owned());
+            tokio::task::yield_now().await;
+        }
+        let mut expected_devices = split_devices
+            .into_iter()
+            .map(|device| device.id)
+            .collect::<Vec<_>>();
+        matched_devices.sort();
+        expected_devices.sort();
+        assert_eq!(matched_devices, expected_devices);
+
+        engine.shutdown().await.unwrap();
+        tag_integration.shutdown().unwrap();
+        lifecycle.shutdown().await.unwrap();
     }
 }

@@ -191,6 +191,7 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
         || matches!(kind, "person/create" | "person/update" | "person/delete")
         || matches!(kind, "image/create" | "image/update" | "image/delete")
         || kind == "webhook/list"
+        || matches!(kind, "tag/create" | "tag/update" | "tag/delete")
         || kind.starts_with("config/auth_provider/")
         || matches!(
             kind,
@@ -269,6 +270,17 @@ pub(crate) async fn handle_ws(
     command: &Value,
 ) -> Option<Result<Value>> {
     let kind = command.get("type")?.as_str()?;
+    if matches!(
+        kind,
+        "tag/list" | "tag/create" | "tag/update" | "tag/delete"
+    ) {
+        let Some(manager) = state.features.tags.clone() else {
+            return Some(Err(Error::NotFound(
+                "Tag collection is not configured".into(),
+            )));
+        };
+        return Some(crate::tags::handle(manager, command).await);
+    }
     if kind.starts_with("webhook/") {
         return crate::webhooks::handle_ws(state, identity, origin, command).await;
     }

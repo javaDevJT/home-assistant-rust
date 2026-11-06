@@ -22,7 +22,12 @@ pub use provider::{ProviderEntityInfo, ProviderEntityRegistration};
 pub type Result<T> = hass_core::Result<T>;
 
 const STORAGE_KEY: &str = "core.registries";
-const REGISTRY_VERSION: u8 = 1;
+const LEGACY_REGISTRY_VERSION: u8 = 1;
+const REGISTRY_VERSION: u8 = 2;
+
+/// Resolves a config-entry ID to its integration domain for composite parent
+/// alias matching.
+pub type ConfigEntryDomainResolver = dyn Fn(&str) -> Option<String> + Send + Sync + 'static;
 
 /// A persistent entity registry entry.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -254,6 +259,12 @@ pub struct DeviceEntry {
     pub area_id: Option<String>,
     #[serde(default)]
     pub configuration_url: Option<String>,
+    /// Former id of a multi-entry device which this split entry replaced.
+    #[serde(default)]
+    pub composite_device_id: Option<String>,
+    /// Former primary config entry of the composite device.
+    #[serde(default)]
+    pub composite_primary_config_entry: Option<String>,
     #[serde(default)]
     pub connections: BTreeSet<(String, String)>,
     pub created_at: DateTime<Utc>,
@@ -280,6 +291,12 @@ pub struct DeviceEntry {
     pub name: Option<String>,
     #[serde(default)]
     pub serial_number: Option<String>,
+    /// Time the legacy composite device was split into single-entry devices.
+    #[serde(default)]
+    pub split_at: Option<DateTime<Utc>>,
+    /// Set on split rows until their owning integration first re-registers IDs.
+    #[serde(default)]
+    pub has_composite_identifiers: bool,
     #[serde(default)]
     pub sw_version: Option<String>,
     #[serde(default)]
@@ -306,6 +323,8 @@ impl DeviceEntry {
         json!({
             "area_id": self.area_id,
             "configuration_url": self.configuration_url,
+            "composite_device_id": self.composite_device_id,
+            "composite_primary_config_entry": self.composite_primary_config_entry,
             "config_entries": config_entries,
             "config_entries_subentries": subentries,
             "config_entry_id": self.config_entry_id,
@@ -315,6 +334,7 @@ impl DeviceEntry {
             "disabled_by": self.disabled_by,
             "entry_type": self.entry_type,
             "hw_version": self.hw_version,
+            "has_composite_identifiers": self.has_composite_identifiers,
             "id": self.id,
             "identifiers": self.identifiers,
             "labels": self.labels,
@@ -328,10 +348,20 @@ impl DeviceEntry {
             "parent_device_id": Value::Null,
             "primary_config_entry": self.config_entry_id,
             "serial_number": self.serial_number,
+            "split_at": self.split_at.as_ref().map(DateTime::to_rfc3339),
             "sw_version": self.sw_version,
             "via_device_id": self.via_device_id,
         })
     }
+}
+
+/// Split members of a removed pre-migration composite device.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompositeSplit {
+    /// Live device ids which replaced the composite device, in registry order.
+    pub split_ids: Vec<String>,
+    /// Split id owned by the former primary config entry, if it still exists.
+    pub primary_id: Option<String>,
 }
 
 /// Input used by integrations to identify or create a device.
@@ -580,7 +610,7 @@ struct RegistryData {
 }
 
 fn default_version() -> u8 {
-    REGISTRY_VERSION
+    LEGACY_REGISTRY_VERSION
 }
 
 impl Default for RegistryData {
@@ -676,6 +706,7 @@ struct RegistryInner {
     runtime: Runtime,
     data: RwLock<RegistryData>,
     write_order: Mutex<()>,
+    config_entry_domain_resolver: Option<Arc<ConfigEntryDomainResolver>>,
 }
 
 /// Cloneable access to entity, device, area, floor, and label registries.
@@ -687,20 +718,50 @@ pub struct Registries {
 impl Registries {
     /// Load registry state from the runtime's durable metadata store.
     pub fn new(runtime: Runtime) -> Result<Self> {
+        Self::new_with_optional_config_entry_domain_resolver(runtime, None)
+    }
+    /// Load registry state and resolve config-entry integration domains when
+    /// mapping parent links through a legacy composite device ID.
+    ///
+    /// Parent links prefer a split in the same config entry, then one owned by
+    /// the same integration domain, then any split for that composite ID.
+    pub fn new_with_config_entry_domain_resolver(
+        runtime: Runtime,
+        resolver: Arc<ConfigEntryDomainResolver>,
+    ) -> Result<Self> {
+        Self::new_with_optional_config_entry_domain_resolver(runtime, Some(resolver))
+    }
+    fn new_with_optional_config_entry_domain_resolver(
+        runtime: Runtime,
+        resolver: Option<Arc<ConfigEntryDomainResolver>>,
+    ) -> Result<Self> {
         let data = match runtime.get_data(STORAGE_KEY)? {
             Some(value) => {
-                let loaded: RegistryData = serde_json::from_value(value).map_err(|error| {
+                let mut loaded: RegistryData = serde_json::from_value(value).map_err(|error| {
                     Error::Storage(format!("invalid registry snapshot: {error}"))
                 })?;
-                if loaded.version != REGISTRY_VERSION {
+                if loaded.version == LEGACY_REGISTRY_VERSION {
+                    migrate_legacy_devices(&mut loaded, resolver.as_deref()).map_err(|error| {
+                        Error::Storage(format!("cannot migrate registry snapshot: {error}"))
+                    })?;
+                    loaded.version = REGISTRY_VERSION;
+                    validate_data(&loaded).map_err(|error| {
+                        Error::Storage(format!("invalid migrated registry snapshot: {error}"))
+                    })?;
+                    let serialized = serde_json::to_value(&loaded).map_err(|error| {
+                        Error::Storage(format!("serialize migrated registry snapshot: {error}"))
+                    })?;
+                    runtime.set_data(STORAGE_KEY, &serialized)?;
+                } else if loaded.version != REGISTRY_VERSION {
                     return Err(Error::Storage(format!(
                         "unsupported registry snapshot version {}",
                         loaded.version
                     )));
+                } else {
+                    validate_data(&loaded).map_err(|error| {
+                        Error::Storage(format!("invalid registry snapshot: {error}"))
+                    })?;
                 }
-                validate_data(&loaded).map_err(|error| {
-                    Error::Storage(format!("invalid registry snapshot: {error}"))
-                })?;
                 loaded
             }
             None => RegistryData::default(),
@@ -710,6 +771,7 @@ impl Registries {
                 runtime,
                 data: RwLock::new(data),
                 write_order: Mutex::new(()),
+                config_entry_domain_resolver: resolver,
             }),
         })
     }
@@ -732,6 +794,52 @@ impl Registries {
     /// Return device entries in registry insertion order.
     pub fn devices(&self) -> Vec<DeviceEntry> {
         self.snapshot().devices
+    }
+    /// Return the live devices which replaced a pre-migration composite id.
+    ///
+    /// An id with no recorded split is not a composite device and returns an
+    /// empty vector. The registry's persisted order is retained for callers
+    /// that need the primary member or a stable fallback.
+    pub fn devices_for_composite_device_id(&self, composite_device_id: &str) -> Vec<DeviceEntry> {
+        self.snapshot()
+            .devices
+            .into_iter()
+            .filter(|entry| entry.composite_device_id.as_deref() == Some(composite_device_id))
+            .collect()
+    }
+    /// Return persisted composite ids and their current live split members.
+    pub fn composite_splits(&self) -> BTreeMap<String, CompositeSplit> {
+        let devices = self.snapshot().devices;
+        let mut grouped: BTreeMap<String, Vec<&DeviceEntry>> = BTreeMap::new();
+        for entry in &devices {
+            if let Some(composite_id) = &entry.composite_device_id {
+                grouped.entry(composite_id.clone()).or_default().push(entry);
+            }
+        }
+        grouped
+            .into_iter()
+            .map(|(composite_id, members)| {
+                let primary_config_entry = members
+                    .first()
+                    .and_then(|entry| entry.composite_primary_config_entry.as_deref());
+                let primary_id = primary_config_entry.and_then(|primary_config_entry| {
+                    members
+                        .iter()
+                        .find(|entry| {
+                            entry.config_entry_id.as_deref() == Some(primary_config_entry)
+                        })
+                        .map(|entry| entry.id.clone())
+                });
+                let split_ids = members.iter().map(|entry| entry.id.clone()).collect();
+                (
+                    composite_id,
+                    CompositeSplit {
+                        split_ids,
+                        primary_id,
+                    },
+                )
+            })
+            .collect()
     }
     /// Return one device entry by stable device ID.
     pub fn device(&self, device_id: &str) -> Option<DeviceEntry> {
@@ -1063,7 +1171,17 @@ impl Registries {
     /// Get or create a device by an identifier or connection pair.
     pub fn get_or_create_device(&self, registration: DeviceRegistration) -> Result<DeviceEntry> {
         validate_device_registration(&registration)?;
-        self.transact(|data| {
+        let resolver = self.inner.config_entry_domain_resolver.clone();
+        self.transact(move |data| {
+            let mut registration = registration;
+            if let Some(via_device_id) = registration.via_device_id.clone() {
+                registration.via_device_id = Some(resolve_via_device_id(
+                    data,
+                    &via_device_id,
+                    registration.config_entry_id.as_deref(),
+                    resolver.as_deref(),
+                ));
+            }
             let matching: Vec<usize> = data
                 .devices
                 .iter()
@@ -1091,8 +1209,14 @@ impl Registries {
             if let Some(index) = matching.first().copied() {
                 let old = data.devices[index].clone();
                 let mut new = old.clone();
-                new.identifiers.extend(registration.identifiers.clone());
-                new.connections.extend(registration.connections.clone());
+                if old.has_composite_identifiers {
+                    new.identifiers = registration.identifiers.clone();
+                    new.connections = registration.connections.clone();
+                    new.has_composite_identifiers = false;
+                } else {
+                    new.identifiers.extend(registration.identifiers.clone());
+                    new.connections.extend(registration.connections.clone());
+                }
                 if new.config_entry_id.is_none() {
                     new.config_entry_id = registration.config_entry_id.clone();
                 }
@@ -1275,6 +1399,8 @@ impl Registries {
                 config_subentry_id: registration.config_subentry_id.clone(),
                 area_id: registration.area_id.clone(),
                 configuration_url: registration.configuration_url.clone(),
+                composite_device_id: None,
+                composite_primary_config_entry: None,
                 connections: registration.connections.clone(),
                 created_at: now,
                 disabled_by: None,
@@ -1289,6 +1415,8 @@ impl Registries {
                 name_by_user: None,
                 name: registration.name.clone(),
                 serial_number: registration.serial_number.clone(),
+                split_at: None,
+                has_composite_identifiers: false,
                 sw_version: registration.sw_version.clone(),
                 via_device_id: registration.via_device_id.clone(),
             };
@@ -1303,6 +1431,37 @@ impl Registries {
                     &id,
                 )],
             ))
+        })
+    }
+
+    /// Split a legacy multi-entry device into one stable device per config entry.
+    ///
+    /// The old id is retained as `composite_device_id` on each replacement so
+    /// callers which still hold it can resolve all split members. Repeating the
+    /// operation for an already split id returns its current members.
+    pub fn split_legacy_device(&self, composite_device_id: &str) -> Result<Vec<DeviceEntry>> {
+        let resolver = self.inner.config_entry_domain_resolver.clone();
+        self.transact(move |data| {
+            if data
+                .devices
+                .iter()
+                .any(|entry| entry.composite_device_id.as_deref() == Some(composite_device_id))
+            {
+                return Ok((
+                    data.devices
+                        .iter()
+                        .filter(|entry| {
+                            entry.composite_device_id.as_deref() == Some(composite_device_id)
+                        })
+                        .cloned()
+                        .collect(),
+                    Vec::new(),
+                ));
+            }
+            let (members, mut events) =
+                split_legacy_device_in_data(data, composite_device_id, resolver.as_deref())?;
+            events.extend(reconcile_via_device_references(data, resolver.as_deref()));
+            Ok((members, events))
         })
     }
 
@@ -1351,6 +1510,13 @@ impl Registries {
     /// Remove a device and clear entity and parent-device references to it.
     pub fn remove_device(&self, device_id: &str) -> Result<()> {
         self.transact(|data| {
+            if data
+                .devices
+                .iter()
+                .any(|entry| entry.composite_device_id.as_deref() == Some(device_id))
+            {
+                return Err(Error::NotAllowed("Cannot remove a composite device".into()));
+            }
             let index = data
                 .devices
                 .iter()
@@ -2201,6 +2367,439 @@ fn device_in_config_entry(entry: &DeviceEntry, config_entry_id: Option<&str>) ->
         None => entry.config_entry_id.is_none() && entry.config_entries.is_empty(),
     }
 }
+
+fn composite_split_for_config_entry<'a>(
+    data: &'a RegistryData,
+    composite_device_id: &str,
+    config_entry_id: Option<&str>,
+    resolver: Option<&ConfigEntryDomainResolver>,
+) -> Option<&'a DeviceEntry> {
+    composite_split_from_entries(
+        &data.devices,
+        composite_device_id,
+        config_entry_id,
+        resolver,
+    )
+}
+
+fn composite_split_from_entries<'a>(
+    devices: &'a [DeviceEntry],
+    composite_device_id: &str,
+    config_entry_id: Option<&str>,
+    resolver: Option<&ConfigEntryDomainResolver>,
+) -> Option<&'a DeviceEntry> {
+    config_entry_id
+        .and_then(|config_entry_id| {
+            devices.iter().find(|entry| {
+                entry.composite_device_id.as_deref() == Some(composite_device_id)
+                    && entry.config_entry_id.as_deref() == Some(config_entry_id)
+            })
+        })
+        .or_else(|| {
+            let resolver = resolver?;
+            let config_entry_id = config_entry_id?;
+            let domain = resolver(config_entry_id)?;
+            devices.iter().find(|entry| {
+                entry.composite_device_id.as_deref() == Some(composite_device_id)
+                    && entry
+                        .config_entry_id
+                        .as_deref()
+                        .and_then(resolver)
+                        .is_some_and(|entry_domain| entry_domain == domain)
+            })
+        })
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|entry| entry.composite_device_id.as_deref() == Some(composite_device_id))
+        })
+}
+
+fn resolve_via_device_id(
+    data: &RegistryData,
+    via_device_id: &str,
+    config_entry_id: Option<&str>,
+    resolver: Option<&ConfigEntryDomainResolver>,
+) -> String {
+    if data.devices.iter().any(|entry| entry.id == via_device_id) {
+        return via_device_id.to_owned();
+    }
+    composite_split_for_config_entry(data, via_device_id, config_entry_id, resolver)
+        .map(|entry| entry.id.clone())
+        .unwrap_or_else(|| via_device_id.to_owned())
+}
+
+fn reconcile_via_device_references(
+    data: &mut RegistryData,
+    resolver: Option<&ConfigEntryDomainResolver>,
+) -> Vec<RegistryEvent> {
+    let split_members = data.devices.clone();
+    let live_ids = data
+        .devices
+        .iter()
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
+    let all_ids = data
+        .devices
+        .iter()
+        .chain(data.deleted_devices.iter())
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
+    let mut events = Vec::new();
+    for device in &mut data.devices {
+        let Some(old_via_device_id) = device.via_device_id.clone() else {
+            continue;
+        };
+        let new_via_device_id = if old_via_device_id == device.id {
+            None
+        } else if live_ids.contains(&old_via_device_id) {
+            Some(old_via_device_id)
+        } else {
+            composite_split_from_entries(
+                &split_members,
+                &old_via_device_id,
+                device.config_entry_id.as_deref(),
+                resolver,
+            )
+            .map(|parent| parent.id.clone())
+            .filter(|parent_id| parent_id != &device.id)
+        };
+        if device.via_device_id != new_via_device_id {
+            let previous = device.clone();
+            device.via_device_id = new_via_device_id;
+            events.push(RegistryEvent::changed(
+                "device_registry_updated",
+                "device_id",
+                &device.id,
+                device_change_values(&previous, device),
+            ));
+        }
+    }
+    for device in &mut data.deleted_devices {
+        let Some(old_via_device_id) = device.via_device_id.clone() else {
+            continue;
+        };
+        if old_via_device_id == device.id {
+            device.via_device_id = None;
+        } else if !all_ids.contains(&old_via_device_id) {
+            device.via_device_id = composite_split_from_entries(
+                &split_members,
+                &old_via_device_id,
+                device.config_entry_id.as_deref(),
+                resolver,
+            )
+            .map(|parent| parent.id.clone())
+            .filter(|parent_id| parent_id != &device.id);
+        }
+    }
+    events
+}
+
+fn legacy_device_config_pairs(entry: &DeviceEntry) -> Result<Vec<(String, Option<String>)>> {
+    let mut pairs = Vec::new();
+    if !entry.config_entries_subentries.is_empty() {
+        for (config_entry_id, subentries) in &entry.config_entries_subentries {
+            validate_nonempty(config_entry_id, "device config entry ID")?;
+            if subentries.iter().flatten().any(String::is_empty) {
+                return Err(invalid("device config subentry IDs cannot be empty"));
+            }
+            let subentry_id = subentries.iter().find_map(Option::as_ref).cloned();
+            if subentry_id.as_deref().is_some_and(str::is_empty) {
+                return Err(invalid("device config subentry IDs cannot be empty"));
+            }
+            pairs.push((config_entry_id.clone(), subentry_id));
+        }
+    } else if !entry.config_entries.is_empty() {
+        for config_entry_id in &entry.config_entries {
+            validate_nonempty(config_entry_id, "device config entry ID")?;
+            let subentry_id = (entry.config_entry_id.as_deref() == Some(config_entry_id))
+                .then(|| entry.config_subentry_id.clone())
+                .flatten();
+            pairs.push((config_entry_id.clone(), subentry_id));
+        }
+    } else if let Some(config_entry_id) = &entry.config_entry_id {
+        validate_nonempty(config_entry_id, "device config entry ID")?;
+        if entry
+            .config_subentry_id
+            .as_deref()
+            .is_some_and(str::is_empty)
+        {
+            return Err(invalid("device config subentry IDs cannot be empty"));
+        }
+        pairs.push((config_entry_id.clone(), entry.config_subentry_id.clone()));
+    }
+    let unique_entries: HashSet<&str> = pairs
+        .iter()
+        .map(|(config_entry_id, _)| config_entry_id.as_str())
+        .collect();
+    if unique_entries.len() != pairs.len() {
+        return Err(invalid(
+            "legacy device can have only one split per config entry",
+        ));
+    }
+    Ok(pairs)
+}
+
+fn migrate_legacy_devices(
+    data: &mut RegistryData,
+    resolver: Option<&ConfigEntryDomainResolver>,
+) -> Result<()> {
+    let legacy_ids = data
+        .devices
+        .iter()
+        .filter(|entry| entry.composite_device_id.is_none())
+        .map(|entry| Ok((entry.id.clone(), legacy_device_config_pairs(entry)?)))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter_map(|(device_id, pairs)| (!pairs.is_empty()).then_some(device_id))
+        .collect::<Vec<_>>();
+    for device_id in legacy_ids {
+        split_legacy_device_in_data(data, &device_id, resolver)?;
+    }
+    migrate_legacy_deleted_devices(data)?;
+    reconcile_via_device_references(data, resolver);
+    Ok(())
+}
+
+fn retain_legacy_owner_subentries(target: &mut DeviceEntry, original: &DeviceEntry) {
+    // The scalar field represents one association. Earlier native snapshots
+    // also permit multiple subentries for an owner; retain that owner's full
+    // vector rather than discarding valid associations during migration.
+    target.config_entries.clear();
+    target.config_entries_subentries = target
+        .config_entry_id
+        .as_ref()
+        .and_then(|owner| {
+            original
+                .config_entries_subentries
+                .get(owner)
+                .filter(|subentries| subentries.len() > 1)
+                .map(|subentries| (owner.clone(), subentries.clone()))
+        })
+        .into_iter()
+        .collect();
+}
+
+fn migrate_legacy_deleted_devices(data: &mut RegistryData) -> Result<()> {
+    let mut unavailable_ids = data
+        .devices
+        .iter()
+        .chain(data.deleted_devices.iter())
+        .map(|entry| entry.id.clone())
+        .collect::<HashSet<_>>();
+    let mut migrated = Vec::new();
+    for old in std::mem::take(&mut data.deleted_devices) {
+        let pairs = legacy_device_config_pairs(&old)?;
+        if pairs.len() <= 1 {
+            let mut normalized = old.clone();
+            if let Some((config_entry_id, config_subentry_id)) = pairs.into_iter().next() {
+                normalized.config_entry_id = Some(config_entry_id);
+                normalized.config_subentry_id = config_subentry_id;
+            }
+            retain_legacy_owner_subentries(&mut normalized, &old);
+            normalized.composite_device_id = None;
+            normalized.composite_primary_config_entry = None;
+            normalized.split_at = None;
+            normalized.has_composite_identifiers = false;
+            migrated.push(normalized);
+            continue;
+        }
+
+        for (index, (config_entry_id, config_subentry_id)) in pairs.into_iter().enumerate() {
+            let mut split = old.clone();
+            if index > 0 {
+                split.id = loop {
+                    let candidate = new_hex_id();
+                    if unavailable_ids.insert(candidate.clone()) {
+                        break candidate;
+                    }
+                };
+            }
+            split.config_entry_id = Some(config_entry_id);
+            split.config_subentry_id = config_subentry_id;
+            retain_legacy_owner_subentries(&mut split, &old);
+            split.composite_device_id = None;
+            split.composite_primary_config_entry = None;
+            split.split_at = None;
+            split.has_composite_identifiers = false;
+            migrated.push(split);
+        }
+    }
+    data.deleted_devices = migrated;
+    Ok(())
+}
+
+fn split_legacy_device_in_data(
+    data: &mut RegistryData,
+    composite_device_id: &str,
+    resolver: Option<&ConfigEntryDomainResolver>,
+) -> Result<(Vec<DeviceEntry>, Vec<RegistryEvent>)> {
+    let index = data
+        .devices
+        .iter()
+        .position(|entry| entry.id == composite_device_id)
+        .ok_or_else(|| Error::NotFound(format!("device {composite_device_id}")))?;
+    let old = data.devices[index].clone();
+    if old.composite_device_id.is_some() {
+        return Err(invalid("a split device cannot be split again"));
+    }
+    let pairs = legacy_device_config_pairs(&old)?;
+    if pairs.is_empty() {
+        return Err(invalid("legacy device has no config entry to split"));
+    }
+    if pairs.len() == 1 {
+        let (config_entry_id, config_subentry_id) = pairs[0].clone();
+        let mut normalized = old.clone();
+        normalized.config_entry_id = Some(config_entry_id);
+        normalized.config_subentry_id = config_subentry_id;
+        retain_legacy_owner_subentries(&mut normalized, &old);
+        if normalized == old {
+            return Ok((vec![old], Vec::new()));
+        }
+        let changes = device_change_values(&old, &normalized);
+        data.devices[index] = normalized.clone();
+        return Ok((
+            vec![normalized.clone()],
+            vec![RegistryEvent::changed(
+                "device_registry_updated",
+                "device_id",
+                &normalized.id,
+                changes,
+            )],
+        ));
+    }
+
+    let mut unavailable_ids: HashSet<String> = data
+        .devices
+        .iter()
+        .chain(data.deleted_devices.iter())
+        .map(|entry| entry.id.clone())
+        .collect();
+    let split_at = Utc::now();
+    let primary_config_entry = old.config_entry_id.clone();
+    let mut split_devices = Vec::with_capacity(pairs.len());
+    for (config_entry_id, config_subentry_id) in pairs {
+        let mut split = old.clone();
+        let id = loop {
+            let candidate = new_hex_id();
+            if unavailable_ids.insert(candidate.clone()) {
+                break candidate;
+            }
+        };
+        split.id = id;
+        split.config_entry_id = Some(config_entry_id);
+        split.config_subentry_id = config_subentry_id;
+        retain_legacy_owner_subentries(&mut split, &old);
+        split.composite_device_id = Some(composite_device_id.to_owned());
+        split.composite_primary_config_entry = primary_config_entry.clone();
+        split.split_at = Some(split_at);
+        split.has_composite_identifiers = true;
+        split_devices.push(split);
+    }
+
+    let split_for_entity = |entity: &EntityEntry| {
+        entity
+            .config_entry_id
+            .as_deref()
+            .and_then(|config_entry_id| {
+                split_devices
+                    .iter()
+                    .find(|split| {
+                        split.config_entry_id.as_deref() == Some(config_entry_id)
+                            && split.config_subentry_id == entity.config_subentry_id
+                    })
+                    .or_else(|| {
+                        split_devices
+                            .iter()
+                            .find(|split| split.config_entry_id.as_deref() == Some(config_entry_id))
+                    })
+            })
+            .map(|split| split.id.clone())
+    };
+    let split_for_config_entry = |config_entry_id: Option<&str>| {
+        composite_split_from_entries(
+            &split_devices,
+            composite_device_id,
+            config_entry_id,
+            resolver,
+        )
+        .map(|split| split.id.clone())
+    };
+
+    let mut events = vec![RegistryEvent {
+        event_type: "device_registry_updated",
+        action: "remove",
+        id_key: Some("device_id"),
+        id: Some(composite_device_id.to_owned()),
+        changes: None,
+        extra: Some(("device", old.websocket_value())),
+    }];
+    let mut entity_events = Vec::new();
+    let mut parent_events = Vec::new();
+    for entity in &mut data.entities {
+        if entity.device_id.as_deref() != Some(composite_device_id) {
+            continue;
+        }
+        let previous = entity.clone();
+        entity.device_id = split_for_entity(entity);
+        if entity.device_id != previous.device_id {
+            entity_events.push(RegistryEvent::changed(
+                "entity_registry_updated",
+                "entity_id",
+                &entity.entity_id,
+                entity_change_values(&previous, entity),
+            ));
+        }
+    }
+    for entity in &mut data.deleted_entities {
+        if entity.device_id.as_deref() == Some(composite_device_id) {
+            entity.device_id = split_for_entity(entity);
+        }
+    }
+
+    for device in &mut data.devices {
+        if device.id == composite_device_id
+            || device.via_device_id.as_deref() != Some(composite_device_id)
+        {
+            continue;
+        }
+        let previous = device.clone();
+        device.via_device_id = split_for_config_entry(device.config_entry_id.as_deref());
+        if device.via_device_id != previous.via_device_id {
+            parent_events.push(RegistryEvent::changed(
+                "device_registry_updated",
+                "device_id",
+                &device.id,
+                device_change_values(&previous, device),
+            ));
+        }
+    }
+    for device in &mut data.deleted_devices {
+        if device.via_device_id.as_deref() == Some(composite_device_id) {
+            device.via_device_id = split_for_config_entry(device.config_entry_id.as_deref());
+        }
+    }
+
+    data.devices.splice(index..=index, split_devices.clone());
+    for split in &split_devices {
+        events.push(RegistryEvent::item(
+            "device_registry_updated",
+            "create",
+            "device_id",
+            &split.id,
+        ));
+    }
+    events.extend(entity_events);
+    events.extend(parent_events);
+    let members = data
+        .devices
+        .iter()
+        .filter(|entry| entry.composite_device_id.as_deref() == Some(composite_device_id))
+        .cloned()
+        .collect();
+    Ok((members, events))
+}
+
 fn entity_identity_matches_entry(left: &EntityEntry, right: &EntityEntry) -> bool {
     left.domain == right.domain
         && left.platform == right.platform
@@ -2312,6 +2911,12 @@ fn device_change_values(old: &DeviceEntry, new: &DeviceEntry) -> Value {
         };
     }
     changed!(area_id);
+    changed!(config_entry_id);
+    changed!(config_subentry_id);
+    changed!(config_entries);
+    changed!(config_entries_subentries);
+    changed!(composite_device_id);
+    changed!(composite_primary_config_entry);
     changed!(disabled_by);
     changed!(labels);
     changed!(name_by_user);
@@ -2326,6 +2931,8 @@ fn device_change_values(old: &DeviceEntry, new: &DeviceEntry) -> Value {
     changed!(model);
     changed!(model_id);
     changed!(serial_number);
+    changed!(split_at);
+    changed!(has_composite_identifiers);
     changed!(sw_version);
     Value::Object(changes)
 }
@@ -2348,6 +2955,44 @@ fn validate_data(data: &RegistryData) -> Result<()> {
         .collect();
     if all_device_ids.len() != data.devices.len() + data.deleted_devices.len() {
         return Err(invalid("duplicate active or removed device ID"));
+    }
+    let mut composite_metadata: HashMap<&str, (Option<&str>, &DateTime<Utc>)> = HashMap::new();
+    for device in data.devices.iter().chain(data.deleted_devices.iter()) {
+        let Some(composite_device_id) = device.composite_device_id.as_deref() else {
+            if device.composite_primary_config_entry.is_some() || device.split_at.is_some() {
+                return Err(invalid(
+                    "composite split metadata requires a composite device ID",
+                ));
+            }
+            continue;
+        };
+        validate_nonempty(composite_device_id, "composite device ID")?;
+        if all_device_ids.contains(composite_device_id) {
+            return Err(invalid(
+                "composite device ID must not identify a registered device",
+            ));
+        }
+        if device
+            .composite_primary_config_entry
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(invalid("composite primary config entry cannot be empty"));
+        }
+        let split_at = device
+            .split_at
+            .as_ref()
+            .ok_or_else(|| invalid("composite split metadata requires split_at"))?;
+        let metadata = (device.composite_primary_config_entry.as_deref(), split_at);
+        if composite_metadata
+            .get(composite_device_id)
+            .is_some_and(|existing| *existing != metadata)
+        {
+            return Err(invalid(
+                "all members of a composite split must share primary entry and split time",
+            ));
+        }
+        composite_metadata.insert(composite_device_id, metadata);
     }
     let area_ids: HashSet<&str> = data.areas.iter().map(|entry| entry.id.as_str()).collect();
     if area_ids.len() != data.areas.len() {

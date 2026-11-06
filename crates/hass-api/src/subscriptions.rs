@@ -35,9 +35,13 @@ pub(crate) struct NativeSubscriptions {
     zones: Option<hass_zone::ZoneManager>,
     persons: Option<hass_person::PersonManager>,
     images: Option<hass_image_upload::ImageManager>,
+    tags: Option<hass_tag::TagManager>,
 }
 
 enum ActiveSubscription {
+    Tags {
+        receiver: broadcast::Receiver<Event>,
+    },
     Images {
         receiver: broadcast::Receiver<Event>,
     },
@@ -108,6 +112,7 @@ impl NativeSubscriptions {
             zones: None,
             persons: None,
             images: None,
+            tags: None,
         }
     }
 
@@ -134,6 +139,10 @@ impl NativeSubscriptions {
         self.images = manager;
     }
 
+    pub(crate) fn set_tags(&mut self, manager: Option<hass_tag::TagManager>) {
+        self.tags = manager;
+    }
+
     /// Handle a subscription-related WebSocket command, if this manager owns it.
     pub(crate) fn handle_command(
         &mut self,
@@ -148,6 +157,7 @@ impl NativeSubscriptions {
             .ok_or_else(|| Error::InvalidInput("WebSocket command type must be a string".into()))?;
 
         match command_type {
+            "tag/subscribe" => self.subscribe_tags(object).map(Some),
             "image/subscribe" => self.subscribe_images(object).map(Some),
             "person/subscribe" => self.subscribe_persons(object).map(Some),
             "zone/subscribe" => self.subscribe_zones(object).map(Some),
@@ -279,6 +289,38 @@ impl NativeSubscriptions {
             },
         );
         Ok(success_result(Vec::new()))
+    }
+
+    fn subscribe_tags(&mut self, object: &Map<String, Value>) -> Result<SubscriptionCommandResult> {
+        if object
+            .keys()
+            .any(|key| !matches!(key.as_str(), "id" | "type"))
+        {
+            return Err(Error::InvalidInput(
+                "Invalid tag subscription command".into(),
+            ));
+        }
+        let id = command_id(object)?;
+        self.ensure_capacity(id)?;
+        let manager = self
+            .tags
+            .as_ref()
+            .ok_or_else(|| Error::NotFound("Tag collection is not configured".into()))?;
+        let (snapshot, receiver) = manager.snapshot_and_subscribe()?;
+        let initial = snapshot
+            .into_iter()
+            .map(|tag| {
+                serde_json::json!({
+                    "change_type":"added", "tag_id":tag.id, "item":tag
+                })
+            })
+            .collect::<Vec<_>>();
+        self.subscriptions
+            .insert(id, ActiveSubscription::Tags { receiver });
+        Ok(success_result(vec![event_envelope(
+            id,
+            serde_json::json!(initial),
+        )]))
     }
 
     fn subscribe_images(
@@ -638,6 +680,13 @@ impl NativeSubscriptions {
             return Ok(());
         };
         match subscription {
+            ActiveSubscription::Tags { .. } => {
+                if event.event_type == hass_tag::TAG_COLLECTION_UPDATED_SIGNAL
+                    && let Some(changes) = event.data.get("changes")
+                {
+                    output.push(event_envelope(id, changes.clone()));
+                }
+            }
             ActiveSubscription::Images { .. } => {
                 if event.event_type == hass_image_upload::IMAGE_COLLECTION_UPDATED_SIGNAL
                     && let Some(changes) = event.data.get("changes")
@@ -858,6 +907,7 @@ impl ActiveSubscription {
             | Self::Zones { receiver }
             | Self::Persons { receiver }
             | Self::Images { receiver }
+            | Self::Tags { receiver }
             | Self::Entities { receiver, .. }
             | Self::ConfigEntries { receiver, .. }
             | Self::ConfigFlowProgress { receiver, .. }

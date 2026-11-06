@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use hass_core::{Context, Error, Event, Runtime, State, StateChange};
+use hass_core::{Context, Error, Event, Runtime, State, StateChange, StateRecordingPolicy};
 use hass_registry::{
     EntityEntry, EntityRegistration, ProviderEntityInfo, ProviderEntityRegistration, Registries,
 };
@@ -61,6 +61,8 @@ pub struct EntitySpec {
     pub prior_entity_id: Option<String>,
     /// Current provider metadata, separate from user registry overrides.
     pub info: ProviderEntityInfo,
+    /// State attributes retained live but excluded from recorded history.
+    pub recording_policy: StateRecordingPolicy,
 }
 
 impl EntitySpec {
@@ -85,6 +87,7 @@ impl EntitySpec {
             suggested_object_id: None,
             prior_entity_id: None,
             info: ProviderEntityInfo::default(),
+            recording_policy: StateRecordingPolicy::default(),
         }
     }
 
@@ -141,6 +144,17 @@ impl EntitySpec {
     #[must_use]
     pub fn with_info(mut self, info: ProviderEntityInfo) -> Self {
         self.info = info;
+        self
+    }
+
+    /// Omit these attributes from recorded history while keeping them in live
+    /// state and state-change events.
+    #[must_use]
+    pub fn with_unrecorded_attributes(
+        mut self,
+        attributes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        self.recording_policy = self.recording_policy.with_unrecorded_attributes(attributes);
         self
     }
 }
@@ -538,6 +552,7 @@ struct EntityRecord {
     restore_key: String,
     entity_id: String,
     info: ProviderEntityInfo,
+    recording_policy: StateRecordingPolicy,
     latest: Option<EntitySnapshot>,
     owned_state: Option<State>,
     status: EntityStatus,
@@ -799,6 +814,7 @@ impl EntityLifecycleInner {
                 restore_key: entry.id.clone(),
                 entity_id: entry.entity_id.clone(),
                 info,
+                recording_policy: StateRecordingPolicy::default(),
                 latest: Some(snapshot_from_state(&state)),
                 owned_state: Some(state.clone()),
                 status: if entry.disabled_by.is_some() {
@@ -836,13 +852,14 @@ impl EntityLifecycleInner {
             };
             let attributes =
                 self.compose_attributes(&unavailable, Some(&entry), &record.info, true);
-            let Some(state_change) = self.runtime.set_state_if_unchanged(
+            let Some(state_change) = self.runtime.set_state_if_unchanged_with_recording_policy(
                 &entry.entity_id,
                 Some(&state),
                 "unavailable",
                 attributes,
                 unavailable.context,
                 false,
+                &record.recording_policy,
             )?
             else {
                 continue;
@@ -1169,6 +1186,7 @@ impl EntityLifecycleInner {
                     restore_key,
                     entity_id: entity_id.clone(),
                     info,
+                    recording_policy: spec.recording_policy.clone(),
                     latest: None,
                     owned_state: existing_state.clone(),
                     status,
@@ -1408,13 +1426,14 @@ impl EntityLifecycleInner {
                     };
                     let attributes =
                         self.compose_attributes(&unavailable, Some(entry), &record.info, true);
-                    let state_change = self.runtime.set_state_if_unchanged(
+                    let state_change = self.runtime.set_state_if_unchanged_with_recording_policy(
                         &record.entity_id,
                         Some(expected),
                         "unavailable",
                         attributes,
                         unavailable.context,
                         false,
+                        &record.recording_policy,
                     )?;
                     record.owned_state = state_change.map(|change| change.state);
                 } else {
@@ -1731,12 +1750,13 @@ impl EntityLifecycleInner {
             snapshot.state.as_deref().unwrap_or("unknown")
         };
         let attributes = self.compose_attributes(snapshot, registry_entry, &record.info, restored);
-        self.runtime.set_state(
+        self.runtime.set_state_with_recording_policy(
             entity_id,
             state,
             attributes,
             snapshot.context.clone(),
             false,
+            &record.recording_policy,
         )
     }
 
@@ -1755,13 +1775,14 @@ impl EntityLifecycleInner {
             snapshot.state.as_deref().unwrap_or("unknown")
         };
         let attributes = self.compose_attributes(snapshot, registry_entry, &record.info, restored);
-        self.runtime.set_state_if_unchanged(
+        self.runtime.set_state_if_unchanged_with_recording_policy(
             entity_id,
             expected,
             state,
             attributes,
             snapshot.context.clone(),
             false,
+            &record.recording_policy,
         )
     }
 
@@ -2800,6 +2821,92 @@ mod tests {
         assert_eq!(restored.registry_id(), Some(registry_id.as_str()));
         assert_eq!(runtime.get_state(&entity_id).unwrap().state, "21");
         lifecycle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unrecorded_attributes_survive_live_restore_and_are_filtered_from_history() {
+        let (runtime, store) = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries).unwrap();
+        let spec = registered_spec("fixture").with_unrecorded_attributes(["tag_id"]);
+        let handle = lifecycle
+            .register_provider_batch("fixture", vec![spec.clone()])
+            .unwrap()
+            .remove(0);
+        let entity_id = handle.current_entity_id().unwrap();
+        let mut snapshot = EntitySnapshot::new("scanned");
+        snapshot
+            .attributes
+            .insert("tag_id".into(), Value::String("fixture-tag".into()));
+        snapshot
+            .attributes
+            .insert("device_id".into(), Value::String("scanner-1".into()));
+        let mut events = runtime.subscribe();
+
+        handle.publish(snapshot).unwrap().unwrap();
+        let published = runtime.get_state(&entity_id).unwrap();
+        assert_eq!(published.attributes["tag_id"], "fixture-tag");
+        assert_eq!(
+            events.try_recv().unwrap().data["new_state"]["attributes"]["tag_id"],
+            "fixture-tag"
+        );
+        let first_history = store
+            .history(
+                &entity_id,
+                chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                chrono::DateTime::<chrono::Utc>::MAX_UTC,
+            )
+            .unwrap();
+        assert_eq!(first_history.len(), 1);
+        assert!(!first_history[0].attributes.contains_key("tag_id"));
+        assert_eq!(first_history[0].attributes["device_id"], "scanner-1");
+
+        drop(handle);
+        let unavailable = runtime.get_state(&entity_id).unwrap();
+        assert_eq!(unavailable.state, "unavailable");
+        assert_eq!(
+            events.try_recv().unwrap().data["old_state"]["attributes"]["tag_id"],
+            "fixture-tag"
+        );
+        assert!(
+            !store
+                .history(
+                    &entity_id,
+                    chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                    chrono::DateTime::<chrono::Utc>::MAX_UTC,
+                )
+                .unwrap()[1]
+                .attributes
+                .contains_key("tag_id")
+        );
+
+        let restored = lifecycle
+            .register_provider_batch("fixture", vec![spec])
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            runtime.get_state(&entity_id).unwrap().attributes["tag_id"],
+            "fixture-tag"
+        );
+        assert_eq!(
+            events.try_recv().unwrap().data["new_state"]["attributes"]["tag_id"],
+            "fixture-tag"
+        );
+        let history = store
+            .history(
+                &entity_id,
+                chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                chrono::DateTime::<chrono::Utc>::MAX_UTC,
+            )
+            .unwrap();
+        assert_eq!(history.len(), 3);
+        assert!(
+            history
+                .iter()
+                .all(|state| !state.attributes.contains_key("tag_id"))
+        );
+        lifecycle.shutdown().await.unwrap();
+        drop(restored);
     }
 
     #[tokio::test]

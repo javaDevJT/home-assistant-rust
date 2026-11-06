@@ -822,6 +822,7 @@ dependencies = [
  "hass-script",
  "hass-storage",
  "hass-system-sensors",
+ "hass-tag",
  "hass-template",
  "hass-template-entities",
  "hass-webhook",
@@ -850,10 +851,12 @@ dependencies = [
  "hass-auth",
  "hass-config",
  "hass-core",
+ "hass-entity",
  "hass-image-upload",
  "hass-notifications",
  "hass-person",
  "hass-registry",
+ "hass-tag",
  "hass-template",
  "hass-webhook",
  "hass-zone",
@@ -902,8 +905,11 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "hass-core",
+ "hass-entity",
  "hass-notifications",
+ "hass-registry",
  "hass-script",
+ "hass-tag",
  "hass-template",
  "hass-webhook",
  "serde",
@@ -1143,6 +1149,22 @@ dependencies = [
  "serde_yaml",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "hass-tag"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "hass-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

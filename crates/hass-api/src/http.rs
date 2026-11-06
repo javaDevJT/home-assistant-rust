@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, Duration, Utc};
+use futures_util::StreamExt;
 use hass_core::{Error as CoreError, ServiceCall, State as HassState};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -63,6 +64,11 @@ impl From<CoreError> for ApiError {
         match error {
             CoreError::InvalidInput(message) => Self::invalid(message),
             CoreError::NotFound(message) => Self::not_found(message),
+            CoreError::HomeAssistant(message) => Self::invalid(message),
+            CoreError::NotAllowed(message) => Self {
+                status: StatusCode::FORBIDDEN,
+                message,
+            },
             CoreError::Storage(_) => Self::internal(),
             CoreError::Service(_) => Self::internal(),
         }
@@ -81,11 +87,15 @@ pub(crate) async fn authenticate(
     next: Next,
 ) -> Response {
     if state.api.access_token.is_empty() && state.features.auth.is_none() {
-        return ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: "API access token is not configured".into(),
-        }
-        .into_response();
+        return reject_auth_request(
+            request,
+            ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: "API access token is not configured".into(),
+            }
+            .into_response(),
+        )
+        .await;
     }
     let bearer = request
         .headers()
@@ -115,11 +125,15 @@ pub(crate) async fn authenticate(
                     .get::<crate::network::ClientOrigin>()
                     .is_some_and(|origin| origin.is_local)
             {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(json!({"message":"Unauthorized"})),
+                return reject_auth_request(
+                    request,
+                    (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({"message":"Unauthorized"})),
+                    )
+                        .into_response(),
                 )
-                    .into_response();
+                .await;
             }
             if identity.read_only
                 && !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS")
@@ -133,14 +147,43 @@ pub(crate) async fn authenticate(
             next.run(request).await
         }
         Err(CoreError::Storage(_)) | Err(CoreError::Service(_)) => {
-            ApiError::internal().into_response()
+            reject_auth_request(request, ApiError::internal().into_response()).await
         }
-        Err(_) => (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"message":"Unauthorized"})),
-        )
-            .into_response(),
+        Err(_) => {
+            reject_auth_request(
+                request,
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"message":"Unauthorized"})),
+                )
+                    .into_response(),
+            )
+            .await
+        }
     }
+}
+
+async fn reject_auth_request(request: Request<axum::body::Body>, response: Response) -> Response {
+    if request.method() == axum::http::Method::POST && request.uri().path() == "/api/image/upload" {
+        // Discard an in-flight upload within its existing byte limit without
+        // buffering or parsing it. Dropping an unread HTTP/1 body can reset the
+        // connection before the client receives the authentication response.
+        let mut body = request.into_body().into_data_stream();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let mut bytes = 0usize;
+            for _ in 0..4096 {
+                let Some(Ok(chunk)) = body.next().await else {
+                    break;
+                };
+                bytes = bytes.saturating_add(chunk.len());
+                if bytes > crate::images::MAX_UPLOAD_BODY {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
+    response
 }
 
 pub(crate) async fn health() -> Json<Value> {

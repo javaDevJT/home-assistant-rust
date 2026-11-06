@@ -44,6 +44,13 @@ appropriate registry metadata.
 
 ## State, release, and shutdown
 
+`EntitySpec::with_unrecorded_attributes` attaches a `StateRecordingPolicy` to
+every publication, guarded rename, restore and release write for that lease.
+It projects attributes only for state history. Current state and public or
+stored state-change events keep their complete attributes. MemoryStore and
+SqliteStore implement this projection; another Store must override the additive
+`put_state_with_history` hook to honor it.
+
 `publish` checks the current registry status before writing. Disabled or
 removed entities do not publish, and a removed entity is never recreated by a
 publish call. Lifecycle status changes are available through the handle's

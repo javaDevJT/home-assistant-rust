@@ -106,3 +106,11 @@ uptime allows one entry and accepts no fields. Uptime is the fixed UTC timestamp
 captured at provider setup, refreshed on reload/restart. It is not an elapsed
 duration or operating-system boot time. See the
 [system sensor contract](../crates/hass-system-sensors/README.md).
+
+`tag:` accepts null or an empty mapping. Tags are editable persistent collection
+items managed by the authenticated `tag/*` WebSocket commands; names live in
+the shared entity registry. Native reader integrations call `TagManager::scan`,
+which publishes `tag_scanned` and updates the timestamp entity. The automation
+trigger accepts `trigger: tag`, a scalar or list `tag_id`, and an optional
+scalar or list `device_id`. No scan HTTP route or scan service is defined by
+the pinned integration. See the [tag contract](../crates/hass-tag/README.md).

@@ -154,6 +154,7 @@ async fn handle_socket(
     native.set_zones(state.features.zones.clone());
     native.set_persons(state.features.persons.clone());
     native.set_images(state.features.images.clone());
+    native.set_tags(state.features.tags.clone());
     let native = Arc::new(Mutex::new(native));
     let mut stream_tick = tokio::time::interval(Duration::from_millis(100));
     stream_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -639,6 +640,8 @@ fn map_core_error(error: CoreError) -> WsError {
     match error {
         CoreError::InvalidInput(message) => WsError::new("invalid_format", message),
         CoreError::NotFound(message) => WsError::new("not_found", message),
+        CoreError::HomeAssistant(message) => WsError::new("home_assistant_error", message),
+        CoreError::NotAllowed(message) => WsError::new("not_allowed", message),
         CoreError::Storage(_) => WsError::new("unknown_error", "Internal server error"),
         CoreError::Service(_) => WsError::new("service_error", "Service call failed"),
     }

@@ -158,3 +158,14 @@ query values are normalized for the callback. Multipart decoding remains open.
 **webhook/handle** follows the pinned authenticated capability-dispatch policy,
 including read-only users. Callback payloads travel privately to automations
 and are absent from public event subscriptions and recorder entries.
+
+**tag/list** and **tag/subscribe** are readable by authenticated users;
+**tag/create**, **tag/update** and **tag/delete** require administrator
+authority. Update/delete identify the item with **tag_id**. A subscription ACK
+precedes the initial **added** array, followed by private **added**, **updated**
+and **removed** arrays containing **tag_id** and **item**. Generic
+**unsubscribe_events** removes the receiver. Duplicate creates report
+**home_assistant_error**; missing items report **not_found**. Names and
+update/delete IDs are strict strings. Create IDs, descriptions and device IDs
+accept scalar string coercion. The pinned integration has no **tag/scan**
+command or HTTP scan endpoint; actual readers call the native scan manager.

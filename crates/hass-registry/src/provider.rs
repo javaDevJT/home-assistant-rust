@@ -61,6 +61,139 @@ impl ProviderEntityRegistration {
 }
 
 impl Registries {
+    /// Return the removed identity retained for a later provider registration.
+    #[must_use]
+    pub fn removed_provider_entity(
+        &self,
+        domain: &str,
+        platform: &str,
+        unique_id: &str,
+    ) -> Option<EntityEntry> {
+        self.inner
+            .data
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .deleted_entities
+            .iter()
+            .find(|entry| {
+                entry.domain == domain && entry.platform == platform && entry.unique_id == unique_id
+            })
+            .cloned()
+    }
+
+    /// Restore the prior tombstone after a failed provider create, only while
+    /// its exact attempted replacement remains removed and no active identity
+    /// has taken its place. Current Runtime state is preserved.
+    pub fn restore_provider_entity_tombstone(
+        &self,
+        previous: &EntityEntry,
+        replacement: &EntityEntry,
+    ) -> Result<()> {
+        self.transact(|data| {
+            if !crate::entity_identity_matches_entry(previous, replacement)
+                || data
+                    .entities
+                    .iter()
+                    .any(|entry| crate::entity_identity_matches_entry(entry, previous))
+            {
+                return Err(hass_core::Error::Storage(
+                    "provider tombstone restore conflicts with an active identity".into(),
+                ));
+            }
+            let index = data
+                .deleted_entities
+                .iter()
+                .position(|entry| entry == replacement)
+                .ok_or_else(|| {
+                    hass_core::Error::Storage(
+                        "provider tombstone replacement changed during rollback".into(),
+                    )
+                })?;
+            data.deleted_entities[index] = previous.clone();
+            Ok(((), Vec::new()))
+        })
+    }
+
+    /// Restore a name only if this operation's applied value is still current.
+    /// A concurrent user edit wins over compensation.
+    pub fn restore_provider_entity_name_if_unchanged(
+        &self,
+        previous: &EntityEntry,
+        applied_name: &str,
+    ) -> Result<bool> {
+        self.transact(|data| {
+            let entry = data
+                .entities
+                .iter_mut()
+                .find(|entry| {
+                    entry.id == previous.id && crate::entity_identity_matches_entry(entry, previous)
+                })
+                .ok_or_else(|| {
+                    hass_core::Error::Storage(
+                        "cannot restore missing provider registry name".into(),
+                    )
+                })?;
+            if entry.name.as_deref() != Some(applied_name) || entry.name == previous.name {
+                return Ok((false, Vec::new()));
+            }
+            let old = entry.clone();
+            entry.name = previous.name.clone();
+            entry.modified_at = Utc::now();
+            let event = RegistryEvent::changed(
+                "entity_registry_updated",
+                "entity_id",
+                &entry.entity_id,
+                entity_change_values(&old, entry),
+            );
+            Ok((true, vec![event]))
+        })
+    }
+
+    /// Compensate removal of an exact provider entry without allocating a new
+    /// identity because its previous state is still present. This only restores
+    /// an unchanged tombstone and refuses live identity or entity-ID conflicts;
+    /// it does not write Runtime state or replace newer registry data.
+    pub fn restore_removed_provider_entity(&self, previous: &EntityEntry) -> Result<()> {
+        self.transact(|data| {
+            if data.entities.iter().any(|entry| {
+                entry.id == previous.id
+                    && crate::entity_identity_matches_entry(entry, previous)
+                    && entry.entity_id == previous.entity_id
+            }) {
+                return Ok(((), Vec::new()));
+            }
+            if data.entities.iter().any(|entry| {
+                entry.id == previous.id
+                    || entry.entity_id == previous.entity_id
+                    || crate::entity_identity_matches_entry(entry, previous)
+            }) {
+                return Err(hass_core::Error::Storage(
+                    "provider restore conflicts with a live registry identity".into(),
+                ));
+            }
+            let index = data
+                .deleted_entities
+                .iter()
+                .position(|entry| entry == previous)
+                .ok_or_else(|| {
+                    hass_core::Error::Storage(
+                        "provider restore requires the unchanged removed entry".into(),
+                    )
+                })?;
+            let restored = data.deleted_entities.remove(index);
+            data.entities.push(restored);
+            Ok((
+                (),
+                vec![RegistryEvent::item(
+                    "entity_registry_updated",
+                    "create",
+                    "entity_id",
+                    &previous.entity_id,
+                )],
+            ))
+        })
+    }
+
     /// Get or create provider entities and refresh their original metadata in a
     /// single registry transaction.
     ///
@@ -480,6 +613,107 @@ mod tests {
         assert_eq!(restored.entity_id, first.entity_id);
         assert_eq!(restored.original_name.as_deref(), Some("Room renamed"));
         assert!(restored.aliases.is_empty());
+    }
+
+    #[test]
+    fn exact_removal_compensation_keeps_state_and_refuses_newer_identities() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let original = registries
+            .get_or_create_provider_entities(vec![provider_registration("Room")])
+            .unwrap()
+            .remove(0);
+        let state = runtime
+            .set_state(
+                &original.entity_id,
+                "foreign-observation",
+                serde_json::Map::new(),
+                hass_core::Context::default(),
+                false,
+            )
+            .unwrap()
+            .state;
+        registries.remove_entity(&original.entity_id).unwrap();
+        registries
+            .restore_removed_provider_entity(&original)
+            .unwrap();
+        assert_eq!(registries.entity(&original.entity_id).unwrap(), original);
+        assert_eq!(runtime.get_state(&original.entity_id), Some(state));
+        registries.remove_entity(&original.entity_id).unwrap();
+        let mut stale = original.clone();
+        stale.name = Some("A different removed entry".into());
+        let metadata = runtime.get_data("core.registries").unwrap();
+        assert!(registries.restore_removed_provider_entity(&stale).is_err());
+        assert_eq!(runtime.get_data("core.registries").unwrap(), metadata);
+        let foreign = registries
+            .get_or_create_provider_entities(vec![provider_registration("Replacement")])
+            .unwrap()
+            .remove(0);
+        assert_ne!(foreign.id, original.id);
+        let metadata = runtime.get_data("core.registries").unwrap();
+        assert!(
+            registries
+                .restore_removed_provider_entity(&original)
+                .is_err()
+        );
+        assert_eq!(runtime.get_data("core.registries").unwrap(), metadata);
+        assert_eq!(registries.entity(&foreign.entity_id).unwrap(), foreign);
+    }
+
+    #[test]
+    fn name_compensation_preserves_a_concurrent_user_edit() {
+        let registries = registry();
+        let original = registries
+            .get_or_create_provider_entities(vec![provider_registration("Room")])
+            .unwrap()
+            .remove(0);
+        for name in ["Forward", "Concurrent"] {
+            registries
+                .update_entity(
+                    &original.entity_id,
+                    EntityUpdate {
+                        name: Some(Some(name.into())),
+                        ..EntityUpdate::default()
+                    },
+                )
+                .unwrap();
+        }
+        let metadata = registries
+            .inner
+            .runtime
+            .get_data("core.registries")
+            .unwrap();
+        assert!(
+            !registries
+                .restore_provider_entity_name_if_unchanged(&original, "Forward")
+                .unwrap()
+        );
+        assert_eq!(
+            registries
+                .inner
+                .runtime
+                .get_data("core.registries")
+                .unwrap(),
+            metadata
+        );
+        registries
+            .update_entity(
+                &original.entity_id,
+                EntityUpdate {
+                    name: Some(Some("Forward".into())),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            registries
+                .restore_provider_entity_name_if_unchanged(&original, "Forward")
+                .unwrap()
+        );
+        assert_eq!(
+            registries.entity(&original.entity_id).unwrap().name,
+            original.name
+        );
     }
 
     #[test]

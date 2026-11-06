@@ -150,7 +150,7 @@ pub(super) fn handle(registries: &Registries, command: &Value) -> Result<Value> 
         }
         "config/device_registry/list_composite_splits" => {
             check_fields(object, &["type", "id"])?;
-            Ok(json!({}))
+            Ok(json!(registries.composite_splits()))
         }
         "config/device_registry/list_linked_devices" => {
             check_fields(object, &["type", "id", "device_id"])?;
@@ -466,6 +466,12 @@ fn device_update(registries: &Registries, object: &Map<String, Value>) -> Result
         ],
     )?;
     let device_id = required_string(object, "device_id")?;
+    if !registries
+        .devices_for_composite_device_id(device_id)
+        .is_empty()
+    {
+        return Err(Error::NotAllowed("Cannot update a composite device".into()));
+    }
     let disabled_by = if let Some(value) = object.get("disabled_by") {
         let disabled = if value.is_null() {
             None

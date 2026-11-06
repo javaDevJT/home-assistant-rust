@@ -21,6 +21,7 @@ hass-zone.workspace = true
 hass-person.workspace = true
 hass-image-upload.workspace = true
 hass-webhook.workspace = true
+hass-tag.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
@@ -33,6 +34,7 @@ tower.workspace = true
 tower-http.workspace = true
 
 [dev-dependencies]
+hass-entity.workspace = true
 image.workspace = true
 tempfile.workspace = true
 totp-rs = "6"

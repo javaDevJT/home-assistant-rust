@@ -43,8 +43,17 @@ unsupported trigger platforms are rejected.
 ```
 
 Triggers include state, numeric state, template, local `time`, `time_pattern`,
-Home Assistant startup/shutdown, event, MQTT message signals, and persistent
-notification changes. Notification triggers support optional `notification_id`
+Home Assistant startup/shutdown, event, tag scans, MQTT message signals, and
+persistent notification changes. Tag triggers accept a scalar or list of
+`tag_id` values and an optional scalar or list of `device_id` values. They
+listen for public `tag_scanned` events emitted by tag providers; the trigger
+variables include the event, `description: "Tag scanned"`, and the configured
+`id`, `idx`, and `alias`. The scan event's context is passed to the automation
+action. When the application supplies its shared registry through
+`AutomationFeatures`, legacy composite device IDs expand to their active split
+devices; unknown IDs remain as configured. This crate does not add a scan
+service, WebSocket command, QR route, or hardware transport. Notification
+triggers support optional `notification_id`
 and scalar or list `update_type` filters (`current`, `added`, `updated`, or
 `removed`). Empty IDs and update-type lists do not filter. The native notification
 feed does not replay existing items or synthesize `current` updates when the
@@ -77,6 +86,9 @@ persisted state takes precedence on later starts.
 
 Use `start_with_timezone(runtime, automations, "America/New_York")` for wall
 clock triggers. `start` uses the timezone already configured in Runtime.
+`start_with_features(runtime, automations, features)` accepts an optional
+timezone, the shared webhook manager, and the shared registries while keeping
+the existing constructors available.
 `mqtt_topics(&automations)` returns the static broker filters needed by the
 root MQTT integration. MQTT triggers consume only private native
 `mqtt_message` signals dispatched from real broker traffic; this crate does

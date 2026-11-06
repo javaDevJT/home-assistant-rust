@@ -42,6 +42,8 @@ pub struct Config {
     pub device_tracker: hass_device_tracker::TrackerConfig,
     #[serde(default)]
     pub image_upload: serde_yaml::Value,
+    #[serde(default)]
+    pub tag: serde_yaml::Value,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
     pub sensor: Vec<crate::system_sensors::SystemSensorYamlPlatform>,
     #[serde(skip)]
@@ -230,6 +232,7 @@ impl Config {
                 "person",
                 "device_tracker",
                 "image_upload",
+                "tag",
                 "sensor",
                 "timer",
                 "input_button",
@@ -306,6 +309,14 @@ impl Config {
             }
         }
         self.device_tracker.validate()?;
+        if !self.tag.is_null()
+            && self
+                .tag
+                .as_mapping()
+                .is_none_or(|mapping| !mapping.is_empty())
+        {
+            bail!("tag accepts only an empty configuration section");
+        }
         if !self.image_upload.is_null()
             && self
                 .image_upload
@@ -346,6 +357,7 @@ impl Config {
             "person",
             "device_tracker",
             "image_upload",
+            "tag",
             "webhook",
             "time_date",
             "uptime",
