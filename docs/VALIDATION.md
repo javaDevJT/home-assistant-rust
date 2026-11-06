@@ -1,8 +1,8 @@
 # Validation evidence
 
-Status: the current integrated Rust wave passed **304 workspace tests**, formatting, strict full-workspace Clippy, and its optimized build on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. Publication checks are recorded below as they finish. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
+Published checkpoint `7e093fc2bdc5f0a521f932a46f65f9df9a828b5d` passed **304 workspace tests**, formatting, strict full-workspace Clippy, and its optimized build on 2026-11-06 with Rust/Cargo 1.99.1 on macOS. It also passed the Linux CI run linked below. Subsequent person/tracker work remains outside this receipt. Full Home Assistant parity remains open. No deployment to the user's Home Assistant instance was performed.
 
-## Current integrated acceptance
+## Published 17-crate acceptance
 
 `cargo test --workspace --locked --no-fail-fast` passed 304 tests across the 17-crate workspace and every doc-test target, with no failures or ignored tests. `cargo clippy --workspace --all-targets --locked -- -D warnings` passed. Cargo.lock pins all resolved dependencies. The exhaustive upstream inventory reconciles 1,565 unique integration manifests across 32 disjoint batches: 26 partial native domains, 1,539 unported, zero claimed complete. Every partial-domain evidence path exists.
 
@@ -25,6 +25,8 @@ Storage tests verify owned v1→v2 migration, rollback/foreign-schema rejection,
 These receipts establish the implemented subset. They do not verify complete integrations, frontend/browser use, upstream database compatibility, custom authorization policies, hardware operation, or full Home Assistant parity. Synchronous handlers already running must terminate before joined shutdown can complete.
 
 ## Linux checkpoint CI
+
+Checkpoint `7e093fc2bdc5f0a521f932a46f65f9df9a828b5d` passed [Linux run 42180581797](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42180581797): workspace formatting, strict all-target Clippy, all workspace tests, and actual CLI example validation. This immutable run includes groups, notifications, zones and helper corrections; it does not cover subsequent person/tracker/auth-bridge changes.
 
 Implementation `2250d4780f44b4837766fba31b2e150078575c39` is published on the fork. [Linux run 42165900082](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42165900082) passed formatting and strict workspace Clippy, then exposed a timing-dependent automation queue test. Its fixed one-second wait began shutdown before a busy runner had drained initialization events and observed queue overflow. The regression now waits for actual listener termination, then checks the specific pending-queue error. The focused case passed five consecutive local runs; all 14 automation tests and strict automation Clippy passed after the correction.
 
