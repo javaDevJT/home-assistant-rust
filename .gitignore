@@ -1,0 +1,7 @@
+/target/
+/data/
+/examples/data/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env

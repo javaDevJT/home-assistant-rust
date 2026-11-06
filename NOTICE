@@ -1,0 +1,5 @@
+This independent Rust rewrite is based on the interfaces and behavior of
+Home Assistant Core (https://github.com/home-assistant/core), licensed under
+the Apache License, Version 2.0. Upstream history and attribution are preserved
+in the fork. The upstream Python implementation is replaced on this development
+branch; compatibility is partial and no affiliation or endorsement is claimed.

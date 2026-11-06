@@ -1,0 +1,57 @@
+# Supported Rust subset. Use a separate directory from your live HA instance.
+homeassistant:
+  name: Rust Home
+  time_zone: America/New_York
+  unit_system: metric
+
+http:
+  server_host: 127.0.0.1
+  server_port: 8123
+
+recorder:
+  db_path: data/hass.sqlite
+
+input_boolean:
+  demo:
+    name: Demo toggle
+    initial: false
+
+input_number:
+  temperature_target:
+    name: Temperature target
+    min: 10
+    max: 30
+    step: 0.5
+    initial: 20
+
+input_text:
+  note:
+    name: Note
+    initial: Ready
+    max: 100
+
+input_select:
+  mode:
+    name: Mode
+    options: [Home, Away, Sleep]
+    initial: Home
+
+counter:
+  presses:
+    name: Press count
+    initial: 0
+    step: 1
+
+automation:
+  - id: demo_toggle
+    alias: Toggle the demo helper on an explicit API event
+    triggers:
+      - trigger: event
+        event_type: demo_toggle
+    actions:
+      - action: input_boolean.toggle
+        target:
+          entity_id: input_boolean.demo
+      - action: counter.increment
+        target:
+          entity_id: counter.presses
