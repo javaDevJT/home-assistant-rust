@@ -62,7 +62,13 @@ workspace all-target Clippy and release build. The optimized macOS binary
 SHA-256 is `dfa016496a5979e7956843e3c494632d1c9ae3a12335c8b126848125d32c51c9`.
 Example/empty/Hardware-empty/false/ignored CLI configs pass without extra
 files or secret echo; invalid root keys fail. Inventory reconciliation to
-Hardware partial and exact native Linux publication/CI are next.
+Hardware is partial with 44 partial / 1,521 unported / zero complete domains.
+Root resolved all 615 partial-row evidence paths and 345 symbols, confirmed
+only Hardware's three domain-row fields changed and retained all source
+snapshots. Source `4d875e379b9a91d2adcbcec5b2e3279e55dbe48a` is published;
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42385397159)
+passes formatting, strict all-target Clippy, all workspace tests and
+CLI validation. This source excludes the next Credentials SDK/API drafts.
 
 The Application Credentials source audit is released in its indexed contract.
 One owner implements only the isolated next `hass-application-credentials`

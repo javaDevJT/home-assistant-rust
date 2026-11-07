@@ -23,7 +23,9 @@ The final 39-crate workspace passes 970 tests across 110 targets with zero
 failures or ignored cases. Formatting, strict locked offline workspace
 all-target Clippy, optimized build and no-side-effect CLI checks pass.
 Physical collection and full pinned platform acceptance remain open. Source
-publication and exact native Linux CI are pending; this is partial coverage.
+`4d875e379b9a91d2adcbcec5b2e3279e55dbe48a` is published and passed
+[exact native Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42385397159);
+this is partial coverage.
 
 
 Source audited at Home Assistant Core `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf` with `git show`; no HA Python or installed dependency was imported or executed. This records source behavior, not parity acceptance.

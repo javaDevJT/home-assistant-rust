@@ -27,7 +27,10 @@ false-Hardware and ignored-parameter configs, rejects an unknown root key,
 does not echo an ignored fixture secret, and creates no database or extra
 files. Linux conditional metrics code passes supplementary cross-target
 Clippy using the installed Rustup 1.92 and manifest MSRV override. Source
-publication and exact native Linux CI are pending. Physical CPU/memory
+is published at `4d875e379b9a91d2adcbcec5b2e3279e55dbe48a`;
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42385397159)
+passes formatting, strict all-target workspace Clippy, all tests and CLI
+validation. Physical CPU/memory
 collection, Supervisor providers, Windows and full upstream parity are not
 verified by these fixture-only checks.
 
