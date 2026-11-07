@@ -194,7 +194,10 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
         || matches!(kind, "tag/create" | "tag/update" | "tag/delete")
         || matches!(kind, "logger/log_level" | "logger/integration_log_level")
         || matches!(kind, "network" | "network/configure")
-        || matches!(kind, "system_log/list" | "system_log/subscribe_raw")
+        || matches!(
+            kind,
+            "system_log/list" | "system_log/subscribe_raw" | "zeroconf/subscribe_discovery"
+        )
         || kind.starts_with("config/auth_provider/")
         || matches!(
             kind,

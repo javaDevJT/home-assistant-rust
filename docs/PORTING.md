@@ -571,3 +571,93 @@ SQLite, persists adapter/URL settings, then gracefully stops/reaps and restarts
 the child. API and SDK fixtures remain provider-injected. Inventory owner v55
 writes only PARITY.md/upstream-parity.json and may promote only Network. Root
 owns final semantic reconciliation, source publication and exact CI.
+
+Published Network source `cc222d0f556ac06cfe203bac6877632a5c0b902b` passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42360066554).
+The inventory promotes only Network: 40 partial, 1,525 unported, zero complete.
+Root verified the four changed records, new test references, untouched protected
+records and unchanged pin/coverage/batches. Later mDNS work is not included in
+that receipt.
+
+Zeroconf model owner v53 completed 13 pure cases and exact generated metadata
+(120 types, 174 matchers, 124 domains). HomeKit classifier v57 adds the exact
+75-entry model registry, source prefix/glob/case/paired behavior and a retained
+HomeKit admission before a valueless-status diagnostic. Primary source audit
+corrected the initial notes: special browser types are `_hap` TCP and UDP, and
+HomeKit flows target the registry-mapped integration, with source `homekit`.
+Manager v56 owns only the new SDK manifest/lib/manager/README and manager tests;
+it uses cache-first lookup, owned ten-second resolution, weak listener guards
+and synchronous flow admission. Root owns the model/glob helper visibility and
+raw TXT decoder required by update consumers before address filtering.
+
+Backend v52 completed six focused checks, isolated formatting/strict lint, raw
+TXT/cache-order APIs and an explicit provided-interface constructor returning
+the real thread handle. Independent reviewer v58 found no blocking patch
+defect and verified archive hash/provenance; downstream struct-literal
+compatibility is explicitly documented. Wire owner v59 writes only backend.rs,
+its loopback test and optional BACKEND.md, with selected snapshot/custom ports,
+private cache mirror, ordered scoped data, registration and joined close.
+API draft owner v60 writes only its transport and nested protocol test; it must
+register both listeners before ACK, then send the generated-type cache snapshot.
+Root retains all shared manifest/app/API wiring, HomeKit policy, duplicate-ID
+Repairs and config-flow lifecycle integration. No production mDNS traffic or
+Bonjour port 5353 is part of these checks.
+
+### Active 32-crate Zeroconf integration
+
+Root enrolled the native SDK and vendored wire dependency, and owns shared
+app/manifests/discovery wiring. The SDK passes 17 pure/model/HomeKit cases,
+11 manager cases and four actual loopback wire cases, including an idle empty
+selection that binds no UDP socket. API owner v64 activated six passing
+WebSocket protocol fixtures. Repairs guard owner v63 added exact weak platform
+registration ownership with three passing stale/current/dropped-owner cases;
+the Repairs package passes 26 tests and strict Clippy.
+
+Main owns a shared discovery queue for both protocols and one canonical UUID.
+Root added three passing persistent identity/migration/concurrency cases and
+five passing queue lifecycle cases. Restart owner v61 supplies the real service
+and re-exec helper; fixture owner v65 verified the compiled Unix process keeps
+its PID and listener, closes the old WebSocket, and retains SQLite/config state
+across the actual restart, then stops and reaps normally. No test process
+enables production discovery.
+
+Config owner v66 owns only the typed legacy YAML schema and tests. Network
+projection owner v67 owns only zeroconf_network.rs; its injected tests check
+selected families, prefixes, routes and announcement order. Repairs host v62
+owns only zeroconf_repairs.rs, with raw listener/factory guards and the real
+identity/restart action. Host fixture owner v68 owns only zeroconf_tests.rs.
+Independent v69 reviews interface/source semantics; v70 reviews callback,
+repair and restart lifetimes. Primary integration runs the full workspace gate
+after these focused checks and fixes, then reconciles the inventory before
+publishing an exact-source receipt. None of this advances a domain to complete.
+
+The host's actual packet fixture found command-queue saturation when starting
+all 120 generated types against the daemon's 100-command queue. Root fixed
+explicit `Again` retry with a bounded deadline and moves initial browse setup
+onto the blocking pool. The three host fixtures now pass, including real
+advertisement/goodbye and HomeKit/ordinary flow admission with protected-flow
+preservation. Review v70 found name removal must cover both HomeKit and
+ordinary Zeroconf flow sources; root fixed that and added pre-start stale-data
+removal coverage. Review v69 found the empty single-stack selection must use
+V6Only and remain idle; root fixed it with a focused test. Its proposed change
+to announcement ordering was rejected after checking the exact pinned source
+indentation: a truthy default route is prepended even when absent from the
+selected address list. The mapped CPython 3.14.2 address ranges were confirmed.
+The initial full gate found only a fixture expectation that incorrectly
+dropped the non-global documentation IPv6 prefix; root corrected the expected
+four selected addresses and is rerunning the full gate.
+
+The fresh 32-crate full gate now passes 814 tests across 93 targets with zero
+failed or ignored, all formatting, strict locked offline workspace all-target
+Clippy, optimized build and optimized configuration checks. macOS binary
+SHA-256: `b18e3006af3628d797c2a59b735e4f39a5c38663b4eb860986d6411a79fd94be`.
+The optimized CLI accepts empty/deprecated-option configuration, rejects an
+invalid legacy boolean and opens no database. Inventory v72 owns only PARITY.md
+and upstream-parity.json, promoting only Zeroconf to partial. Root reconciles
+its per-domain changes and publishes the exact source before inspecting CI.
+
+The next DHCP wave stays outside this receipt. Source contract v71 completed;
+engine owner v73 audits only pinned package archives/provenance and extends
+DHCP-PORT.md, without importing dependency code or capturing/scanning a LAN.
+SDK owner v74 owns only the future hass-dhcp crate, isolated from this workspace
+gate until root separately enrolls it. Root retains app/API/provider wiring.

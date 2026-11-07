@@ -1,5 +1,52 @@
 # Validation evidence
 
+## Accepted local Zeroconf source (32 crates)
+
+The current native Zeroconf candidate passes the complete workspace gate:
+814 tests across 93 targets, zero failed and zero ignored. Formatting, strict
+locked offline workspace all-target Clippy, and the optimized workspace build
+pass. The optimized macOS `hass` binary SHA-256 is
+`b18e3006af3628d797c2a59b735e4f39a5c38663b4eb860986d6411a79fd94be`.
+Exact-source publication and Linux CI are recorded after publication.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+cargo test --workspace --locked --offline --no-fail-fast
+cargo build --release --workspace --locked --offline
+target/release/hass --config examples/configuration.yaml --check
+```
+
+Optimized CLI checks also accept empty configuration and the deprecated
+Zeroconf booleans, reject an invalid boolean, and create no database or data
+directory. They validate configuration without enabling discovery sockets.
+The initial full run found one incorrect new test expectation: Python keeps
+the documentation IPv6 prefix because it is non-global. The fixture now checks
+all four retained addresses, and the fresh full run passes.
+
+Evidence includes 17 Zeroconf model/matcher/HomeKit cases, 11 manager cases,
+four actual loopback wire cases, six WebSocket protocol cases, three app host
+cases, ten duplicate-instance Repairs host cases and exact weak platform
+registration ownership. The actual host fixtures cover the generated browser
+set exceeding the bounded daemon command queue, source startup gating, typed
+keys, HomeKit vendor flows and alternative-domain context, name removal across
+ordinary/HomeKit flows, protected-flow preservation, UTF-8/TXT bounds, stable
+shared identity, native version, bound HTTP port, and goodbye. Empty interface
+selection binds no UDP socket; all packet fixtures use explicit loopback
+interfaces and custom ports rather than Bonjour port 5353.
+
+Three identity tests cover real SQLite, legacy native SSDP identity migration,
+concurrent initialization and malformed/future-data preservation. Six restart
+unit cases and the compiled Unix process fixture verify the actual owned
+service, authorization/context, WebSocket close, re-exec with the same PID and
+loopback listener, persisted state/config, and normal signal/reap afterward.
+Discovery stop joins browser/resolver work before other integrations stop;
+the shared daemon then sends goodbye and acknowledges shutdown before its
+real thread is joined. Source-level reviews and fixes are in
+[PORTING.md](PORTING.md); remaining compatibility gaps are in
+[ZEROCONF-PORT.md](ZEROCONF-PORT.md). No full upstream domain is accepted as
+complete, and later DHCP work is outside this receipt.
+
 ## Accepted local Network source (31 crates)
 
 The frozen workspace passes **737 tests across 87 targets**, zero failed or
@@ -7,9 +54,10 @@ ignored, formatting, strict locked workspace all-target Clippy, optimized build
 and optimized example CLI validation on 2026-11-07. Optimized macOS executable
 SHA-256:
 `d53d9d1caa008998e671d2f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`.
-The optimized empty-config check creates no database. Source publication and
-exact Linux CI follow separately; unaccepted mDNS/Zeroconf work is outside this
-receipt.
+The optimized empty-config check creates no database. Published source
+`cc222d0f556ac06cfe203bac6877632a5c0b902b` passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42360066554).
+Unaccepted mDNS/Zeroconf work is outside this immutable receipt.
 
 Fourteen Network SDK cases use injected interface/route providers and cover
 selection, unknown/duplicate names, scopes/order, MemoryStore and actual SQLite

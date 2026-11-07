@@ -140,12 +140,13 @@ pub enum RepairsFlowProgressStep {
 }
 
 pub(crate) struct PlatformRegistration {
+    pub(crate) id: u64,
     pub(crate) platform: Arc<dyn RepairsPlatform>,
 }
 
 impl PlatformRegistration {
-    pub(crate) fn new(platform: Arc<dyn RepairsPlatform>) -> Self {
-        Self { platform }
+    pub(crate) fn new(id: u64, platform: Arc<dyn RepairsPlatform>) -> Self {
+        Self { id, platform }
     }
 }
 
@@ -1359,5 +1360,61 @@ mod tests {
             weak.start_fix_flow("fixture", "repair"),
             Err(RepairsError::Core(hass_core::Error::Service(_)))
         ));
+    }
+
+    #[test]
+    fn platform_registration_guard_unregisters_its_registration_on_drop() {
+        let (_integration, manager) = setup();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registration = manager
+            .register_platform_guard("fixture", Arc::new(FixturePlatform { calls }))
+            .unwrap();
+
+        drop(registration);
+
+        assert!(!manager.unregister_platform("fixture").unwrap());
+    }
+
+    #[test]
+    fn stale_platform_registration_guard_does_not_remove_replacement() {
+        let (_integration, manager) = setup();
+        let old_calls = Arc::new(AtomicUsize::new(0));
+        let stale_registration = manager
+            .register_platform_guard("fixture", Arc::new(FixturePlatform { calls: old_calls }))
+            .unwrap();
+
+        assert!(manager.unregister_platform("fixture").unwrap());
+        let replacement_calls = Arc::new(AtomicUsize::new(0));
+        let replacement_registration = manager
+            .register_platform_guard(
+                "fixture",
+                Arc::new(FixturePlatform {
+                    calls: replacement_calls,
+                }),
+            )
+            .unwrap();
+
+        drop(stale_registration);
+
+        assert!(manager.unregister_platform("fixture").unwrap());
+        drop(replacement_registration);
+        assert!(!manager.unregister_platform("fixture").unwrap());
+    }
+
+    #[test]
+    fn platform_registration_guard_is_safe_after_owner_drop() {
+        let (integration, manager) = setup();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registration = manager
+            .register_platform_guard("fixture", Arc::new(FixturePlatform { calls }))
+            .unwrap();
+
+        drop(integration);
+
+        assert!(matches!(
+            manager.unregister_platform("fixture"),
+            Err(RepairsError::Core(hass_core::Error::Service(_)))
+        ));
+        drop(registration);
     }
 }

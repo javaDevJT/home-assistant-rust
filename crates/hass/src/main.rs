@@ -4,15 +4,20 @@ mod config;
 mod discovery;
 mod helpers;
 mod homeassistant;
+mod instance_id;
 mod integration_drivers;
 mod logging;
 mod persons;
 mod recorder;
 mod repairs;
+mod restart;
 mod ssdp;
 mod system_health;
 mod system_sensors;
 mod yaml;
+mod zeroconf;
+mod zeroconf_network;
+mod zeroconf_repairs;
 mod zones;
 
 use anyhow::{Context as _, Result, bail};
@@ -83,6 +88,9 @@ async fn main() -> Result<()> {
         }
         if config.ssdp_has_parameters() {
             eprintln!("{}", ssdp::CONFIGURATION_WARNING);
+        }
+        if config.zeroconf_has_deprecated_parameters() {
+            eprintln!("{}", zeroconf::CONFIGURATION_WARNING);
         }
         println!("Configuration valid (supported Rust subset)");
         return Ok(());
@@ -159,6 +167,7 @@ async fn main() -> Result<()> {
     })
     .await??;
     let repairs_manager = repairs.manager();
+    let restart = restart::RestartHost::start(runtime.clone(), &auth)?;
     let system_health = system_health::start(runtime.clone())?;
     let system_health_manager = system_health.manager();
     let network_runtime = runtime.clone();
@@ -201,12 +210,33 @@ async fn main() -> Result<()> {
     if config.ssdp_has_parameters() {
         tracing::error!(target: "hass::ssdp", "{}", ssdp::CONFIGURATION_WARNING);
     }
+    if config.zeroconf_has_deprecated_parameters() {
+        tracing::warn!(target: "hass::zeroconf", "{}", zeroconf::CONFIGURATION_WARNING);
+    }
+    let discovery_dispatcher = discovery::DiscoveryDispatcher::new(config_entries.clone());
+    let mut zeroconf = if config.zeroconf_enabled {
+        Some(
+            zeroconf::ZeroconfHost::start(
+                runtime.clone(),
+                config_entries.clone(),
+                network_adapter_manager.clone(),
+                repairs_manager.clone(),
+                discovery_dispatcher.handle(),
+                bound_address,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let zeroconf_manager = zeroconf.as_ref().map(zeroconf::ZeroconfHost::manager);
     let mut ssdp = if config.ssdp_enabled {
         Some(
             ssdp::SsdpHost::start(
                 runtime.clone(),
                 config_entries.clone(),
                 network_adapter_manager.clone(),
+                discovery_dispatcher.handle(),
             )
             .await?,
         )
@@ -359,8 +389,12 @@ async fn main() -> Result<()> {
     })
     .await??;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    discovery_dispatcher.mark_started().await;
     if let Some(host) = &mut ssdp {
         host.mark_started(bound_address).await?;
+    }
+    if let Some(host) = &mut zeroconf {
+        host.mark_started().await?;
     }
     let app = hass_api::router_with_features(
         hass_api::ApiState {
@@ -386,6 +420,7 @@ async fn main() -> Result<()> {
             repairs: Some(repairs_manager),
             system_health: Some(system_health_manager),
             ssdp: ssdp_manager,
+            zeroconf: zeroconf_manager,
             network_adapters: Some(network_adapter_manager),
         },
         Some(shutdown_rx),
@@ -394,12 +429,19 @@ async fn main() -> Result<()> {
     warn!(
         "Rust rewrite in progress; consult docs/upstream-parity.json for verified integration coverage"
     );
-    let result = axum_serve(listener, app, shutdown_tx).await;
+    let result = axum_serve(listener, app, shutdown_tx, restart.receiver()).await;
+    let restart_requested = restart.requested();
+    let zeroconf_stop_result = if let Some(zeroconf) = &mut zeroconf {
+        zeroconf.stop_discovery().await
+    } else {
+        Ok(())
+    };
     let ssdp_result = if let Some(ssdp) = ssdp {
         ssdp.shutdown().await
     } else {
         Ok(())
     };
+    discovery_dispatcher.shutdown().await;
     drop(system_health);
     let recorder_result = recorder.shutdown().await;
     let automation_result = automations.shutdown().await;
@@ -419,8 +461,15 @@ async fn main() -> Result<()> {
     let zone_result = zones.shutdown().await;
     let group_result = groups.shutdown().await;
     let notification_result = notifications.shutdown();
+    let zeroconf_result = if let Some(zeroconf) = zeroconf {
+        zeroconf.shutdown().await
+    } else {
+        Ok(())
+    };
     drop(repairs);
     network_adapters.shutdown();
+    drop(_service_targets);
+    let restart_result = restart.shutdown();
     let system_log_result = system_log.shutdown().await;
     let logger_result = logger.shutdown();
     let stop_result = tokio::task::spawn_blocking(move || {
@@ -429,6 +478,8 @@ async fn main() -> Result<()> {
     .await?;
     result?;
     ssdp_result?;
+    zeroconf_result?;
+    zeroconf_stop_result?;
     recorder_result?;
     automation_result?;
     system_sensor_result?;
@@ -450,6 +501,14 @@ async fn main() -> Result<()> {
     logger_result?;
     system_log_result?;
     stop_result?;
+    restart_result?;
+    if restart_requested {
+        match restart::exec_current_process().context("cannot restart native application")? {
+            restart::RestartOutcome::Spawned(child) => {
+                info!(pid = child.id(), "Restarted native application");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -457,13 +516,21 @@ async fn axum_serve(
     listener: tokio::net::TcpListener,
     app: axum::Router,
     shutdown: tokio::sync::watch::Sender<bool>,
+    mut restart: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        shutdown_signal().await;
+        tokio::select! {
+            _ = shutdown_signal() => {},
+            _ = async {
+                if restart.wait_for(|requested| *requested).await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            } => {},
+        }
         let _ = shutdown.send(true);
     })
     .await

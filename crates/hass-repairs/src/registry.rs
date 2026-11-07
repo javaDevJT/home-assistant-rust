@@ -859,6 +859,29 @@ impl RepairsManager {
         domain: impl Into<String>,
         platform: std::sync::Arc<dyn crate::RepairsPlatform>,
     ) -> RepairsResult<()> {
+        self.register_platform_inner(domain, platform).map(|_| ())
+    }
+
+    /// Register one native issue handler and unregister this exact registration
+    /// when the returned guard is dropped.
+    pub fn register_platform_guard(
+        &self,
+        domain: impl Into<String>,
+        platform: std::sync::Arc<dyn crate::RepairsPlatform>,
+    ) -> RepairsResult<crate::RepairsPlatformRegistrationGuard> {
+        let (shared, domain, registration_id) = self.register_platform_inner(domain, platform)?;
+        Ok(crate::RepairsPlatformRegistrationGuard {
+            shared: std::sync::Arc::downgrade(&shared),
+            domain,
+            registration_id,
+        })
+    }
+
+    fn register_platform_inner(
+        &self,
+        domain: impl Into<String>,
+        platform: std::sync::Arc<dyn crate::RepairsPlatform>,
+    ) -> RepairsResult<(std::sync::Arc<crate::Shared>, String, u64)> {
         let shared = self.live()?;
         let domain = domain.into();
         if domain.is_empty() {
@@ -871,8 +894,20 @@ impl RepairsManager {
             ))
             .into());
         }
-        platforms.insert(domain, crate::flows::PlatformRegistration::new(platform));
-        Ok(())
+        let registration_id = shared
+            .next_platform_registration_id
+            .try_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |next| next.checked_add(1),
+            )
+            .map_err(|_| Error::Service("Repairs platform registration IDs exhausted".into()))?;
+        platforms.insert(
+            domain.clone(),
+            crate::flows::PlatformRegistration::new(registration_id, platform),
+        );
+        drop(platforms);
+        Ok((shared, domain, registration_id))
     }
 
     pub fn unregister_platform(&self, domain: &str) -> RepairsResult<bool> {

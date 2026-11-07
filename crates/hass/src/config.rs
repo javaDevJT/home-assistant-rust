@@ -54,6 +54,10 @@ pub struct Config {
     pub ssdp: serde_yaml::Value,
     #[serde(skip)]
     pub ssdp_enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_zeroconf_config")]
+    pub zeroconf: ZeroconfConfig,
+    #[serde(skip)]
+    pub zeroconf_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_sun")]
     pub sun: bool,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
@@ -133,6 +137,58 @@ impl Default for RecorderConfig {
             auto_purge: true,
             auto_repack: true,
         }
+    }
+}
+
+/// Deprecated Zeroconf YAML options retained for compatibility validation.
+/// Home Assistant chooses Zeroconf address families from the network adapters,
+/// so these values are not used to configure the runtime.
+#[derive(Clone, Debug)]
+pub struct ZeroconfConfig {
+    pub default_interface: Option<bool>,
+    /// The upstream schema defaults this value to true when it is omitted.
+    /// It is retained after validation; network adapters choose the families.
+    #[allow(dead_code)]
+    pub ipv6: bool,
+    ipv6_was_configured: bool,
+}
+
+impl Default for ZeroconfConfig {
+    fn default() -> Self {
+        Self {
+            default_interface: None,
+            ipv6: true,
+            ipv6_was_configured: false,
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct ZeroconfConfigInput {
+    #[serde(deserialize_with = "deserialize_optional_cv_boolean")]
+    default_interface: Option<bool>,
+    #[serde(deserialize_with = "deserialize_optional_cv_boolean")]
+    ipv6: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for ZeroconfConfig {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let input = ZeroconfConfigInput::deserialize(deserializer)?;
+        Ok(Self {
+            default_interface: input.default_interface,
+            ipv6: input.ipv6.unwrap_or(true),
+            ipv6_was_configured: input.ipv6.is_some(),
+        })
+    }
+}
+
+impl ZeroconfConfig {
+    fn has_deprecated_parameters(&self) -> bool {
+        self.default_interface.is_some() || self.ipv6_was_configured
     }
 }
 
@@ -249,6 +305,7 @@ impl Config {
                 "system_log",
                 "system_health",
                 "ssdp",
+                "zeroconf",
                 "sun",
                 "sensor",
                 "timer",
@@ -263,6 +320,7 @@ impl Config {
             }
         }
         let ssdp_enabled = mapping.contains_key(serde_yaml::Value::String("ssdp".into()));
+        let zeroconf_enabled = mapping.contains_key(serde_yaml::Value::String("zeroconf".into()));
         let mut config: Self = serde_path_to_error::deserialize(value).map_err(|error| {
             // A typed decoding error can quote an invalid scalar. Preserve
             // its configuration path without printing resolved secret values.
@@ -273,6 +331,7 @@ impl Config {
         })?;
         config.group_order = group_order;
         config.ssdp_enabled = ssdp_enabled;
+        config.zeroconf_enabled = zeroconf_enabled;
         config.validate()?;
         Ok(config)
     }
@@ -363,6 +422,10 @@ impl Config {
         yaml_truthy(&self.ssdp)
     }
 
+    pub fn zeroconf_has_deprecated_parameters(&self) -> bool {
+        self.zeroconf.has_deprecated_parameters()
+    }
+
     pub fn native_config(&self) -> hass_native::NativeConfig {
         hass_native::NativeConfig {
             timer: self.timer.clone(),
@@ -405,6 +468,9 @@ impl Config {
         ];
         if self.ssdp_enabled {
             components.push("ssdp");
+        }
+        if self.zeroconf_enabled {
+            components.push("zeroconf");
         }
         if !self.script.is_empty() {
             components.push("script");
@@ -479,6 +545,80 @@ fn yaml_truthy(value: &serde_yaml::Value) -> bool {
         serde_yaml::Value::Sequence(value) => !value.is_empty(),
         serde_yaml::Value::Mapping(value) => !value.is_empty(),
         serde_yaml::Value::Tagged(value) => yaml_truthy(&value.value),
+    }
+}
+
+fn deserialize_zeroconf_config<'de, D>(
+    deserializer: D,
+) -> std::result::Result<ZeroconfConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    if value.is_null() {
+        return Ok(ZeroconfConfig::default());
+    }
+    serde_yaml::from_value(value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_cv_boolean<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserializer.deserialize_any(CvBooleanVisitor).map(Some)
+}
+
+struct CvBooleanVisitor;
+
+impl serde::de::Visitor<'_> for CvBooleanVisitor {
+    type Value = bool;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a boolean, number, or recognized boolean string")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(value)
+    }
+
+    fn visit_i64<E>(self, value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(value != 0)
+    }
+
+    fn visit_i128<E>(self, value: i128) -> std::result::Result<Self::Value, E> {
+        Ok(value != 0)
+    }
+
+    fn visit_u64<E>(self, value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(value != 0)
+    }
+
+    fn visit_u128<E>(self, value: u128) -> std::result::Result<Self::Value, E> {
+        Ok(value != 0)
+    }
+
+    fn visit_f64<E>(self, value: f64) -> std::result::Result<Self::Value, E> {
+        Ok(value != 0.0)
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        match value.trim().to_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" | "enable" => Ok(true),
+            "0" | "false" | "no" | "off" | "disable" => Ok(false),
+            _ => Err(E::custom("invalid boolean value")),
+        }
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        self.visit_str(&value)
     }
 }
 
@@ -632,6 +772,106 @@ mod tests {
     }
 
     #[test]
+    fn zeroconf_yaml_tracks_section_presence_defaults_and_deprecated_parameters() {
+        let absent = Config::parse("{}\n").unwrap();
+        assert!(!absent.zeroconf_enabled);
+        assert!(absent.zeroconf.ipv6);
+        assert!(!absent.zeroconf_has_deprecated_parameters());
+        assert!(
+            !absent.api_config()["components"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("zeroconf"))
+        );
+
+        for source in ["zeroconf:\n", "zeroconf: {}\n"] {
+            let config = Config::parse(source).unwrap();
+            assert!(config.zeroconf_enabled, "{source}");
+            assert!(config.zeroconf.ipv6, "{source}");
+            assert!(!config.zeroconf_has_deprecated_parameters(), "{source}");
+            assert!(
+                config.api_config()["components"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("zeroconf")),
+                "{source}"
+            );
+        }
+
+        let null_section = Config::parse("zeroconf: null\n").unwrap();
+        assert!(null_section.zeroconf_enabled);
+        assert!(null_section.zeroconf.ipv6);
+        assert!(!null_section.zeroconf_has_deprecated_parameters());
+
+        let explicit_default = Config::parse("zeroconf:\n  ipv6: true\n").unwrap();
+        assert!(explicit_default.zeroconf_has_deprecated_parameters());
+    }
+
+    #[test]
+    fn zeroconf_boolean_values_match_the_pinned_cv_boolean_validator() {
+        for (value, expected) in [
+            ("true", true),
+            ("false", false),
+            ("'  YeS  '", true),
+            ("'ON'", true),
+            ("'Enable'", true),
+            ("'OFF'", false),
+            ("'disable'", false),
+            ("1", true),
+            ("0", false),
+            ("-2", true),
+            ("0.0", false),
+            ("2.5", true),
+        ] {
+            let config = Config::parse(&format!("zeroconf:\n  ipv6: {value}\n")).unwrap();
+            assert_eq!(config.zeroconf.ipv6, expected, "ipv6: {value}");
+            assert!(config.zeroconf_has_deprecated_parameters(), "ipv6: {value}");
+        }
+
+        let config = Config::parse("zeroconf:\n  default_interface: ' YES '\n").unwrap();
+        assert_eq!(config.zeroconf.default_interface, Some(true));
+        assert!(config.zeroconf_has_deprecated_parameters());
+    }
+
+    #[test]
+    fn zeroconf_rejects_invalid_boolean_values_and_unknown_fields() {
+        for source in [
+            "zeroconf: []\n",
+            "zeroconf: true\n",
+            "zeroconf:\n  ipv6: null\n",
+            "zeroconf:\n  default_interface: null\n",
+            "zeroconf:\n  ipv6: maybe\n",
+            "zeroconf:\n  ipv6: []\n",
+            "zeroconf:\n  ipv6: {}\n",
+            "zeroconf:\n  unsupported: true\n",
+        ] {
+            assert!(Config::parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn zeroconf_legacy_values_do_not_change_other_network_configuration() {
+        let baseline = Config::parse("{}\n").unwrap();
+        let configured =
+            Config::parse("zeroconf:\n  default_interface: false\n  ipv6: false\n").unwrap();
+
+        assert_eq!(baseline.http.server_host, configured.http.server_host);
+        assert!(baseline.http.server_host.is_loopback());
+        let baseline_components = baseline.api_config()["components"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let mut configured_components = configured.api_config()["components"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(baseline_components.contains(&json!("network")));
+        assert!(configured_components.contains(&json!("network")));
+        configured_components.retain(|component| component != &json!("zeroconf"));
+        assert_eq!(configured_components, baseline_components);
+    }
+
+    #[test]
     fn system_log_configuration_is_validated_before_runtime_setup() {
         let config = Config::parse("system_log:\n  max_entries: 7\n  fire_event: true\n").unwrap();
         let options = config.system_log.unwrap();
@@ -695,8 +935,14 @@ mod tests {
     fn config_check_does_not_create_database() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("configuration.yaml");
-        std::fs::write(&path, "recorder:\n  db_path: missing/database.sqlite\n").unwrap();
-        Config::load(&path).unwrap();
+        std::fs::write(
+            &path,
+            "recorder:\n  db_path: missing/database.sqlite\nzeroconf:\n  ipv6: false\n",
+        )
+        .unwrap();
+        let config = Config::load(&path).unwrap();
+        assert!(config.zeroconf_enabled);
+        assert!(!config.zeroconf.ipv6);
         assert!(!dir.path().join("missing").exists());
     }
 

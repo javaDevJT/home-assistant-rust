@@ -59,11 +59,12 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | System Health | Native provider SDK, cancellable one-shot WebSocket reports, current native version/timezone |
 | Repairs | Persistent issue registry, refresh scopes, visibility/dismissal, native fix flows and independent child-flow continuation |
 | SSDP | Native discovery cache/callbacks, UDP scanning, UPnP XML/advertisements, config-flow bridge and admin WebSocket feed |
+| Zeroconf | Native DNS-SD wire/cache, generated matching, HomeKit flow policy, local advertisement, duplicate-ID repair and admin WebSocket feed |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
 | WebSocket | Native auth, live entity/config/template/event subscriptions, services, registries |
-| Process | YAML validation, trusted proxy origin checks, local-user policy, joined shutdown |
+| Process | YAML validation, trusted proxy origin checks, local-user policy, joined shutdown and native application restart |
 
 Every integration remains subject to the detailed [parity inventory](docs/PARITY.md); no complete upstream integration is claimed. Unsupported options and commands fail explicitly. The official frontend, additional auth providers and custom permissions, most device integrations, recorder statistics, and upstream database migrations remain open. Event inventory reports actual public wildcard receivers; history requires `filter_entity_id`. Synchronous service handlers must terminate; shutdown waits for in-flight handlers.
 

@@ -1,0 +1,302 @@
+{
+  "3810X": {
+    "always_discover": true,
+    "domain": "roku"
+  },
+  "3820X": {
+    "always_discover": true,
+    "domain": "roku"
+  },
+  "4660X": {
+    "always_discover": true,
+    "domain": "roku"
+  },
+  "7820X": {
+    "always_discover": true,
+    "domain": "roku"
+  },
+  "AC02": {
+    "always_discover": true,
+    "domain": "tado"
+  },
+  "Abode": {
+    "always_discover": true,
+    "domain": "abode"
+  },
+  "BSB002": {
+    "always_discover": false,
+    "domain": "hue"
+  },
+  "C105X": {
+    "always_discover": true,
+    "domain": "roku"
+  },
+  "C135X": {
+    "always_discover": true,
+    "domain": "roku"
+  },
+  "EB": {
+    "always_discover": true,
+    "domain": "ecobee"
+  },
+  "Escea": {
+    "always_discover": false,
+    "domain": "escea"
+  },
+  "HHKBridge*": {
+    "always_discover": true,
+    "domain": "hive"
+  },
+  "Healthy Home Coach": {
+    "always_discover": true,
+    "domain": "netatmo"
+  },
+  "Iota": {
+    "always_discover": true,
+    "domain": "abode"
+  },
+  "LIFX A19": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX A21": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX BR30": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Beam": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Candle": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Ceiling": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Clean": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Color": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Colour": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX DLCOL": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX DLWW": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Dlight": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Downlight": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Filament": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX GU10": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Indoor Neon": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Lightstrip": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Luna": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Mini": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Mirror": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Neon": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Nightvision": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX PAR38": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Path": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Permanent Outdoor": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Pls": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Plus": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Round": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Spot": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Square": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX String": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Tile": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Tube": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX White": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "LIFX Z": {
+    "always_discover": true,
+    "domain": "lifx"
+  },
+  "NL29": {
+    "always_discover": false,
+    "domain": "nanoleaf"
+  },
+  "NL42": {
+    "always_discover": false,
+    "domain": "nanoleaf"
+  },
+  "NL47": {
+    "always_discover": false,
+    "domain": "nanoleaf"
+  },
+  "NL48": {
+    "always_discover": false,
+    "domain": "nanoleaf"
+  },
+  "NL52": {
+    "always_discover": false,
+    "domain": "nanoleaf"
+  },
+  "NL59": {
+    "always_discover": false,
+    "domain": "nanoleaf"
+  },
+  "NL69": {
+    "always_discover": false,
+    "domain": "nanoleaf"
+  },
+  "NL81": {
+    "always_discover": false,
+    "domain": "nanoleaf"
+  },
+  "Netatmo Relay": {
+    "always_discover": true,
+    "domain": "netatmo"
+  },
+  "PowerView": {
+    "always_discover": true,
+    "domain": "hunterdouglas_powerview"
+  },
+  "Presence": {
+    "always_discover": true,
+    "domain": "netatmo"
+  },
+  "Rachio": {
+    "always_discover": true,
+    "domain": "rachio"
+  },
+  "SPK5": {
+    "always_discover": true,
+    "domain": "rainmachine"
+  },
+  "Sensibo": {
+    "always_discover": true,
+    "domain": "sensibo"
+  },
+  "Slide": {
+    "always_discover": true,
+    "domain": "slide_local"
+  },
+  "Smart Bridge": {
+    "always_discover": false,
+    "domain": "lutron_caseta"
+  },
+  "Socket": {
+    "always_discover": false,
+    "domain": "wemo"
+  },
+  "TRADFRI": {
+    "always_discover": true,
+    "domain": "tradfri"
+  },
+  "Touch HD": {
+    "always_discover": true,
+    "domain": "rainmachine"
+  },
+  "Welcome": {
+    "always_discover": true,
+    "domain": "netatmo"
+  },
+  "Wemo": {
+    "always_discover": false,
+    "domain": "wemo"
+  },
+  "YL*": {
+    "always_discover": false,
+    "domain": "yeelight"
+  },
+  "ecobee*": {
+    "always_discover": true,
+    "domain": "ecobee"
+  },
+  "iSmartGate": {
+    "always_discover": true,
+    "domain": "gogogate2"
+  },
+  "iZone": {
+    "always_discover": true,
+    "domain": "izone"
+  },
+  "tado": {
+    "always_discover": true,
+    "domain": "tado"
+  }
+}

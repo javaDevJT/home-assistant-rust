@@ -26,6 +26,7 @@ use tracing::{Instrument, debug_span};
 use crate::AppState;
 use crate::ssdp::SsdpStream;
 use crate::system_health::HealthStream;
+use crate::zeroconf::ZeroconfStream;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -149,6 +150,7 @@ async fn handle_socket(
     let mut raw_log_streams = RawLogStreams::new();
     let mut health_streams = HashMap::<u64, HealthStream>::new();
     let mut ssdp_streams = HashMap::<u64, SsdpStream>::new();
+    let mut zeroconf_streams = HashMap::<u64, ZeroconfStream>::new();
     let mut last_command_id: Option<u64> = None;
     let mut native = crate::subscriptions::NativeSubscriptions::new(
         state.api.runtime.clone(),
@@ -294,6 +296,73 @@ async fn handle_socket(
                         break 'connection;
                     }
                 }
+
+                let mut zeroconf_frames = Vec::new();
+                let mut zeroconf_errors = Vec::new();
+                let mut finished_zeroconf = Vec::new();
+                for (id, stream) in &mut zeroconf_streams {
+                    for _ in 0..stream.capacity() {
+                        match stream.try_recv() {
+                            Ok(frame) => zeroconf_frames.push(frame),
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                finished_zeroconf.push(*id);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(error) = stream.take_error() {
+                        zeroconf_errors.push((*id, error));
+                        if !finished_zeroconf.contains(id) {
+                            finished_zeroconf.push(*id);
+                        }
+                    } else if stream.is_finished() && !finished_zeroconf.contains(id) {
+                        finished_zeroconf.push(*id);
+                    }
+                }
+                for id in finished_zeroconf {
+                    if let Some(stream) = zeroconf_streams.remove(&id) {
+                        if stream.is_finished() {
+                            stream.join().await;
+                        } else {
+                            stream.cancel().await;
+                        }
+                    }
+                }
+                if (!zeroconf_frames.is_empty() || !zeroconf_errors.is_empty())
+                    && identity.user_id.is_some()
+                {
+                    match crate::extensions::authenticate_token(&state, &token).await {
+                        Ok(current)
+                            if crate::extensions::same_authority(&identity, &current)
+                                && current.is_admin
+                                && (!current.local_only || origin.is_local) =>
+                        {
+                            identity = current;
+                        }
+                        _ => {
+                            close_socket(&mut socket).await;
+                            break 'connection;
+                        }
+                    }
+                }
+                for frame in zeroconf_frames {
+                    if send_json(&mut socket, &frame).await.is_err() {
+                        break 'connection;
+                    }
+                }
+                for (id, error) in zeroconf_errors {
+                    if send_error(
+                        &mut socket,
+                        id,
+                        WsError::new("zeroconf_stream_error", error),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break 'connection;
+                    }
+                }
             }
             _ = &mut shutdown_wait => {
                 close_socket(&mut socket).await;
@@ -359,7 +428,7 @@ async fn handle_socket(
                                 }
                             }
                         }
-                        if command_type == "ssdp/subscribe_discovery" && !identity.is_admin {
+                        if matches!(command_type, "ssdp/subscribe_discovery" | "zeroconf/subscribe_discovery") && !identity.is_admin {
                             if send_error(&mut socket,id,WsError::new("unauthorized","Unauthorized")).await.is_err() {break;}
                             continue;
                         }
@@ -369,7 +438,7 @@ async fn handle_socket(
                         }
                         if crate::subscriptions::is_subscription_command(command_type)
                             && !matches!(command_type, "unsubscribe_events" | "config_entries/flow/progress")
-                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams, &ssdp_streams)
+                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams, &ssdp_streams, &zeroconf_streams)
                                 >= MAX_SUBSCRIPTIONS_PER_SOCKET
                         {
                             if send_error(
@@ -411,6 +480,7 @@ async fn handle_socket(
                             &mut raw_log_streams,
                             &mut health_streams,
                             &mut ssdp_streams,
+                            &mut zeroconf_streams,
                             &native,
                             (id, command_type),
                             object,
@@ -539,6 +609,9 @@ async fn handle_socket(
     for (_, stream) in ssdp_streams {
         stream.cancel().await;
     }
+    for (_, stream) in zeroconf_streams {
+        stream.cancel().await;
+    }
 }
 
 async fn receive_auth(socket: &mut WebSocket) -> Option<String> {
@@ -569,6 +642,7 @@ fn active_subscription_count(
     raw_log_streams: &RawLogStreams,
     health_streams: &HashMap<u64, HealthStream>,
     ssdp_streams: &HashMap<u64, SsdpStream>,
+    zeroconf_streams: &HashMap<u64, ZeroconfStream>,
 ) -> usize {
     let native_count = native
         .lock()
@@ -579,6 +653,7 @@ fn active_subscription_count(
         .saturating_add(raw_log_streams.len())
         .saturating_add(health_streams.len())
         .saturating_add(ssdp_streams.len())
+        .saturating_add(zeroconf_streams.len())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -590,6 +665,7 @@ async fn handle_command(
     raw_log_streams: &mut RawLogStreams,
     health_streams: &mut HashMap<u64, HealthStream>,
     ssdp_streams: &mut HashMap<u64, SsdpStream>,
+    zeroconf_streams: &mut HashMap<u64, ZeroconfStream>,
     native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
     command: (u64, &str),
     message: &serde_json::Map<String, Value>,
@@ -598,7 +674,10 @@ async fn handle_command(
     let (identity, origin) = client;
     let (id, command_type) = command;
     if ((crate::extensions::command_requires_admin(command_type)
-        || command_type == "ssdp/subscribe_discovery")
+        || matches!(
+            command_type,
+            "ssdp/subscribe_discovery" | "zeroconf/subscribe_discovery"
+        ))
         && !identity.is_admin)
         || (identity.read_only && matches!(command_type, "call_service" | "fire_event"))
     {
@@ -646,6 +725,7 @@ async fn handle_command(
                 raw_log_streams,
                 health_streams,
                 ssdp_streams,
+                zeroconf_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -748,7 +828,21 @@ async fn handle_command(
                 }
                 None => false,
             };
-            if !removed_event && !removed_raw_log && !removed_health && !removed_ssdp {
+            let mut zeroconf_error = None;
+            let removed_zeroconf = match zeroconf_streams.remove(&subscription_id) {
+                Some(stream) => {
+                    zeroconf_error = stream.take_error();
+                    stream.cancel().await;
+                    true
+                }
+                None => false,
+            };
+            if !removed_event
+                && !removed_raw_log
+                && !removed_health
+                && !removed_ssdp
+                && !removed_zeroconf
+            {
                 return send_error(
                     socket,
                     id,
@@ -762,6 +856,17 @@ async fn handle_command(
                     socket,
                     subscription_id,
                     WsError::new("ssdp_stream_error", error),
+                )
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            if let Some(error) = zeroconf_error
+                && send_error(
+                    socket,
+                    subscription_id,
+                    WsError::new("zeroconf_stream_error", error),
                 )
                 .await
                 .is_err()
@@ -795,6 +900,7 @@ async fn handle_command(
                 raw_log_streams,
                 health_streams,
                 ssdp_streams,
+                zeroconf_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -809,6 +915,55 @@ async fn handle_command(
                 return false;
             }
             ssdp_streams.insert(id, SsdpStream::start(manager, id));
+            true
+        }
+        "zeroconf/subscribe_discovery" => {
+            if message.len() != 2 {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
+            let Some(manager) = state.features.zeroconf.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "Zeroconf integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            if active_subscription_count(
+                native,
+                subscriptions,
+                raw_log_streams,
+                health_streams,
+                ssdp_streams,
+                zeroconf_streams,
+            ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("subscription_limit", "Subscription limit reached"),
+                )
+                .await
+                .is_ok();
+            }
+            let mut stream = match ZeroconfStream::prepare(manager, id) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    return send_error(socket, id, map_core_error(error)).await.is_ok();
+                }
+            };
+            if send_success(socket, id, Value::Null).await.is_err() {
+                return false;
+            }
+            stream.start_snapshot();
+            zeroconf_streams.insert(id, stream);
             true
         }
         "system_health/info" => {
@@ -836,6 +991,7 @@ async fn handle_command(
                 raw_log_streams,
                 health_streams,
                 ssdp_streams,
+                zeroconf_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -939,6 +1095,7 @@ async fn handle_command(
                 raw_log_streams,
                 health_streams,
                 ssdp_streams,
+                zeroconf_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(

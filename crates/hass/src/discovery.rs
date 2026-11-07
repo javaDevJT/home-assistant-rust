@@ -19,23 +19,51 @@ const FLOW_INIT_LIMIT: usize = 20;
 #[derive(Clone)]
 struct Candidate {
     domain: String,
+    source: String,
     context: Map<String, Value>,
     data: Map<String, Value>,
 }
 
 enum Work {
     Create(Candidate),
-    Dismiss {
+    Dismiss(DiscoveryRemoval),
+}
+
+pub enum DiscoveryRemoval {
+    Ssdp {
         st: String,
         location: Option<String>,
     },
+    ZeroconfName(String),
+}
+
+impl DiscoveryRemoval {
+    fn sources(&self) -> &'static [&'static str] {
+        match self {
+            Self::Ssdp { .. } => &["ssdp"],
+            // Both flow sources carry ZeroconfServiceInfo in the pinned
+            // runtime. Removal matches that data type, including HomeKit.
+            Self::ZeroconfName(_) => &["zeroconf", "homekit"],
+        }
+    }
+    fn matches(&self, data: &Map<String, Value>) -> bool {
+        match self {
+            Self::Ssdp { st, location } => {
+                data.get("ssdp_st").and_then(Value::as_str) == Some(st.as_str())
+                    && data.get("ssdp_location").and_then(Value::as_str) == location.as_deref()
+            }
+            Self::ZeroconfName(name) => {
+                data.get("name").and_then(Value::as_str) == Some(name.as_str())
+            }
+        }
+    }
 }
 
 #[derive(Default)]
 struct State {
     started: bool,
     stopping: bool,
-    pending: IndexMap<String, Vec<Candidate>>,
+    pending: IndexMap<(String, String), Vec<Candidate>>,
     queue: VecDeque<Work>,
     in_flight: Vec<Candidate>,
     active: usize,
@@ -50,6 +78,12 @@ struct Inner {
 pub struct DiscoveryDispatcher {
     inner: Arc<Inner>,
     task: Option<JoinHandle<()>>,
+}
+
+/// Protocol hosts borrow admission without owning or stopping the shared queue.
+#[derive(Clone)]
+pub struct DiscoveryHandle {
+    inner: Weak<Inner>,
 }
 
 impl DiscoveryDispatcher {
@@ -69,14 +103,54 @@ impl DiscoveryDispatcher {
         }
     }
 
+    #[cfg(test)]
     pub fn sink(&self) -> DiscoverySink {
-        let inner = Arc::downgrade(&self.inner);
+        self.handle().ssdp_sink()
+    }
+
+    pub fn handle(&self) -> DiscoveryHandle {
+        DiscoveryHandle {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+}
+
+impl DiscoveryHandle {
+    pub fn ssdp_sink(&self) -> DiscoverySink {
+        let handle = self.clone();
         Arc::new(move |action| {
-            let result = submit(&inner, action);
+            let result = submit(&handle, action);
             Box::pin(async move { result })
         })
     }
 
+    pub fn create(
+        &self,
+        domain: String,
+        source: String,
+        key: DiscoveryKey,
+        mut context: Map<String, Value>,
+        data: Map<String, Value>,
+    ) -> Result<()> {
+        context.insert("source".into(), json!(source));
+        context.insert("discovery_key".into(), json!(key));
+        enqueue(
+            &self.inner,
+            Work::Create(Candidate {
+                domain,
+                source,
+                context,
+                data,
+            }),
+        )
+    }
+
+    pub fn dismiss(&self, removal: DiscoveryRemoval) -> Result<()> {
+        enqueue(&self.inner, Work::Dismiss(removal))
+    }
+}
+
+impl DiscoveryDispatcher {
     /// Called after the actual homeassistant_started event. Startup candidates
     /// are deduplicated by domain/source and initial data, then admitted at 20.
     pub async fn mark_started(&self) {
@@ -131,14 +205,7 @@ impl Drop for DiscoveryDispatcher {
     }
 }
 
-fn submit(inner: &Weak<Inner>, action: DiscoveryAction) -> Result<()> {
-    let inner = inner
-        .upgrade()
-        .ok_or_else(|| Error::Service("discovery dispatcher has stopped".into()))?;
-    let mut state = lock(&inner.state);
-    if state.stopping {
-        return Ok(());
-    }
+fn submit(handle: &DiscoveryHandle, action: DiscoveryAction) -> Result<()> {
     match action {
         DiscoveryAction::Create { domain, info, udn } => {
             let data = serde_json::to_value(info)
@@ -151,17 +218,33 @@ fn submit(inner: &Weak<Inner>, action: DiscoveryAction) -> Result<()> {
                 key: DiscoveryKeyValue::String(udn),
                 version: 1,
             };
-            let context = Map::from_iter([
-                ("source".into(), json!("ssdp")),
-                ("discovery_key".into(), json!(key)),
-            ]);
-            let candidate = Candidate {
-                domain: domain.clone(),
-                context,
-                data,
-            };
+            handle.create(domain, "ssdp".into(), key, Map::new(), data)
+        }
+        DiscoveryAction::Dismiss {
+            ssdp_st,
+            ssdp_location,
+        } => handle.dismiss(DiscoveryRemoval::Ssdp {
+            st: ssdp_st,
+            location: ssdp_location,
+        }),
+    }
+}
+
+fn enqueue(inner: &Weak<Inner>, work: Work) -> Result<()> {
+    let inner = inner
+        .upgrade()
+        .ok_or_else(|| Error::Service("discovery dispatcher has stopped".into()))?;
+    let mut state = lock(&inner.state);
+    if state.stopping {
+        return Ok(());
+    }
+    match work {
+        Work::Create(candidate) => {
             if !state.started {
-                let pending = state.pending.entry(domain).or_default();
+                let pending = state
+                    .pending
+                    .entry((candidate.domain.clone(), candidate.source.clone()))
+                    .or_default();
                 if !pending
                     .iter()
                     .any(|existing| existing.data == candidate.data)
@@ -172,14 +255,14 @@ fn submit(inner: &Weak<Inner>, action: DiscoveryAction) -> Result<()> {
                 state.queue.push_back(Work::Create(candidate));
             }
         }
-        DiscoveryAction::Dismiss {
-            ssdp_st,
-            ssdp_location,
-        } => {
-            state.queue.push_back(Work::Dismiss {
-                st: ssdp_st,
-                location: ssdp_location,
-            });
+        Work::Dismiss(removal) => {
+            for ((_, source), candidates) in &mut state.pending {
+                if removal.sources().contains(&source.as_str()) {
+                    candidates.retain(|candidate| !removal.matches(&candidate.data));
+                }
+            }
+            state.pending.retain(|_, candidates| !candidates.is_empty());
+            state.queue.push_back(Work::Dismiss(removal));
         }
     }
     drop(state);
@@ -196,7 +279,7 @@ async fn run(inner: Arc<Inner>, entries: ConfigEntries) {
                 let mut state = lock(&inner.state);
                 // Preserve causal dismissal: let admitted callbacks publish
                 // their forms before dismissing those discovery flows.
-                if matches!(state.queue.front(), Some(Work::Dismiss { .. })) && !jobs.is_empty() {
+                if matches!(state.queue.front(), Some(Work::Dismiss(_))) && !jobs.is_empty() {
                     None
                 } else {
                     let work = state.queue.pop_front();
@@ -209,7 +292,7 @@ async fn run(inner: Arc<Inner>, entries: ConfigEntries) {
             let Some(work) = work else {
                 break;
             };
-            let is_dismiss = matches!(&work, Work::Dismiss { .. });
+            let is_dismiss = matches!(&work, Work::Dismiss(_));
             let candidate = match &work {
                 Work::Create(candidate) => Some(candidate.clone()),
                 _ => None,
@@ -219,6 +302,7 @@ async fn run(inner: Arc<Inner>, entries: ConfigEntries) {
                 if state.stopping
                     || state.in_flight.iter().any(|existing| {
                         existing.domain == candidate.domain
+                            && existing.source == candidate.source
                             && existing.data == candidate.data
                             && candidate
                                 .context
@@ -245,7 +329,7 @@ async fn run(inner: Arc<Inner>, entries: ConfigEntries) {
                         if lock(&complete.state).stopping
                             || entries.has_matching_discovery_flow(
                                 &candidate.domain,
-                                "ssdp",
+                                &candidate.source,
                                 &candidate.context,
                                 &candidate.data,
                             )
@@ -255,24 +339,24 @@ async fn run(inner: Arc<Inner>, entries: ConfigEntries) {
                             entries
                                 .init_config_flow_with_input(
                                     &candidate.domain,
-                                    "ssdp",
+                                    &candidate.source,
                                     candidate.context,
                                     Some(candidate.data),
                                 )
                                 .map(|_| ())
                         }
                     }
-                    Work::Dismiss { st, location } => {
+                    Work::Dismiss(removal) => {
                         let mut result = Ok(());
                         for domain in entries.flow_handlers() {
-                            if let Err(error) =
-                                entries.dismiss_discovery_flows(&domain, "ssdp", |data| {
-                                    data.get("ssdp_st").and_then(Value::as_str) == Some(st.as_str())
-                                        && data.get("ssdp_location").and_then(Value::as_str)
-                                            == location.as_deref()
-                                })
-                            {
-                                result = Err(error);
+                            for source in removal.sources() {
+                                if let Err(error) =
+                                    entries.dismiss_discovery_flows(&domain, source, |data| {
+                                        removal.matches(data)
+                                    })
+                                {
+                                    result = Err(error);
+                                }
                             }
                         }
                         result
@@ -318,6 +402,7 @@ impl Drop for Completion {
         if let Some(candidate) = &self.candidate {
             state.in_flight.retain(|existing| {
                 existing.domain != candidate.domain
+                    || existing.source != candidate.source
                     || existing.context != candidate.context
                     || existing.data != candidate.data
             });
@@ -472,6 +557,84 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].unique_id.as_deref(), Some("uuid:stored"));
         assert!(found[0].public_json().get("discovery_keys").is_none());
+        dispatcher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shared_startup_queue_deduplicates_sources_and_dismisses_both_zeroconf_sources() {
+        let (entries, driver, dispatcher) = fixture(false, false);
+        let handle = dispatcher.handle();
+        let data = Map::from_iter([("name".into(), json!("same-instance"))]);
+        for source in ["ssdp", "zeroconf", "homekit"] {
+            let key = DiscoveryKey {
+                domain: source.into(),
+                key: DiscoveryKeyValue::String("test-key".into()),
+                version: 1,
+            };
+            for _ in 0..2 {
+                handle
+                    .create(
+                        "discovery_fixture".into(),
+                        source.into(),
+                        key.clone(),
+                        Map::new(),
+                        data.clone(),
+                    )
+                    .unwrap();
+            }
+        }
+        dispatcher.mark_started().await;
+        let requests = lock(&driver.requests).clone();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| request.source.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["ssdp", "zeroconf", "homekit"])
+        );
+        handle
+            .dismiss(DiscoveryRemoval::ZeroconfName("same-instance".into()))
+            .unwrap();
+        dispatcher.wait_idle().await;
+        for request in requests {
+            assert_eq!(
+                entries.flow_result(&request.flow_id).is_ok(),
+                request.source == "ssdp"
+            );
+        }
+        dispatcher.shutdown().await;
+        assert!(
+            handle
+                .dismiss(DiscoveryRemoval::ZeroconfName("same-instance".into()))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn removal_before_start_discards_stale_pending_service_data() {
+        let (_, driver, dispatcher) = fixture(false, false);
+        let handle = dispatcher.handle();
+        for source in ["zeroconf", "homekit"] {
+            handle
+                .create(
+                    "discovery_fixture".into(),
+                    source.into(),
+                    DiscoveryKey {
+                        domain: "zeroconf".into(),
+                        key: DiscoveryKeyValue::Tuple(vec!["type".into(), "gone".into()]),
+                        version: 1,
+                    },
+                    Map::new(),
+                    Map::from_iter([("name".into(), json!("gone"))]),
+                )
+                .unwrap();
+        }
+        handle
+            .dismiss(DiscoveryRemoval::ZeroconfName("gone".into()))
+            .unwrap();
+        dispatcher.mark_started().await;
+        assert!(lock(&driver.requests).is_empty());
         dispatcher.shutdown().await;
     }
 

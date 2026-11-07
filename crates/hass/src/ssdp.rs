@@ -1,7 +1,7 @@
 //! Strong app ownership of the discovery scanner, flow bridge and UPnP server.
 
-use crate::discovery::DiscoveryDispatcher;
-use anyhow::{Context, Result};
+use crate::discovery::{DiscoveryDispatcher, DiscoveryHandle};
+use anyhow::Result;
 use hass_config::{
     ConfigEntries, DiscoveryKeyRemoval, DiscoveryKeyRemovalObserver,
     DiscoveryKeyRemovalObserverGuard, DiscoveryKeyValue,
@@ -14,7 +14,8 @@ use hass_ssdp::{
 use std::{net::SocketAddr, sync::Arc};
 
 pub const CONFIGURATION_WARNING: &str = "The ssdp integration does not support configuration parameters; remove the parameters from configuration.";
-const INSTANCE_KEY: &str = "ssdp.instance_id";
+#[cfg(test)]
+const INSTANCE_KEY: &str = crate::instance_id::STORAGE_KEY;
 
 struct RemovedKeys(SsdpManager);
 impl DiscoveryKeyRemovalObserver for RemovedKeys {
@@ -48,21 +49,51 @@ impl SsdpHost {
         runtime: Runtime,
         entries: ConfigEntries,
         network: hass_network::NetworkManager,
+        admission: DiscoveryHandle,
     ) -> Result<Self> {
         let sources = selected_sources(&network)?;
-        Self::start_with_sources(runtime, entries, sources, SsdpScannerOptions::default()).await
+        Self::start_with_admission(
+            runtime,
+            entries,
+            sources,
+            SsdpScannerOptions::default(),
+            admission,
+            None,
+        )
+        .await
     }
 
+    #[cfg(test)]
     async fn start_with_sources(
         runtime: Runtime,
         entries: ConfigEntries,
         sources: Vec<SsdpInterface>,
         options: SsdpScannerOptions,
     ) -> Result<Self> {
-        let instance_id = tokio::task::spawn_blocking(move || instance_id(&runtime)).await??;
         let dispatcher = DiscoveryDispatcher::new(entries.clone());
+        let admission = dispatcher.handle();
+        Self::start_with_admission(
+            runtime,
+            entries,
+            sources,
+            options,
+            admission,
+            Some(dispatcher),
+        )
+        .await
+    }
+
+    async fn start_with_admission(
+        runtime: Runtime,
+        entries: ConfigEntries,
+        sources: Vec<SsdpInterface>,
+        options: SsdpScannerOptions,
+        admission: DiscoveryHandle,
+        dispatcher: Option<DiscoveryDispatcher>,
+    ) -> Result<Self> {
+        let instance_id = tokio::task::spawn_blocking(move || instance_id(&runtime)).await??;
         let integration =
-            SsdpIntegration::new(pinned_integration_matchers(), Some(dispatcher.sink()))?;
+            SsdpIntegration::new(pinned_integration_matchers(), Some(admission.ssdp_sink()))?;
         let manager = integration.manager();
         let observer =
             entries.observe_discovery_key_removals(Arc::new(RemovedKeys(manager.clone())))?;
@@ -71,7 +102,7 @@ impl SsdpHost {
             observer: Some(observer),
             scanner: Some(scanner),
             servers: Vec::new(),
-            dispatcher: Some(dispatcher),
+            dispatcher,
             integration: Some(integration),
             entries,
             sources,
@@ -201,16 +232,7 @@ fn selected_sources(
 }
 
 fn instance_id(runtime: &Runtime) -> Result<String> {
-    if let Some(value) = runtime.get_data(INSTANCE_KEY)? {
-        let value = value
-            .as_str()
-            .context("invalid stored SSDP instance identity")?;
-        device_udn(value)?;
-        return Ok(value.into());
-    }
-    let value = uuid::Uuid::new_v4().simple().to_string();
-    runtime.set_data(INSTANCE_KEY, &serde_json::json!(value))?;
-    Ok(value)
+    crate::instance_id::get(runtime)
 }
 
 fn device_udn(instance_id: &str) -> Result<String> {

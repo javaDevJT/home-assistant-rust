@@ -18,7 +18,7 @@ pub use registry::{
 };
 
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock, Weak, atomic::AtomicU64};
 
 use hass_config::{ConfigEntries, ConfigFlowType};
 use hass_core::{Error, Runtime};
@@ -234,6 +234,17 @@ pub struct RepairsManager {
     shared: Weak<Shared>,
 }
 
+/// Owns one Repairs platform registration and unregisters it when dropped.
+///
+/// The guard holds only a weak reference to the Repairs integration, so keeping
+/// it alive does not keep the integration or its Runtime alive.
+#[must_use = "dropping the registration guard unregisters the Repairs platform"]
+pub struct RepairsPlatformRegistrationGuard {
+    shared: Weak<Shared>,
+    domain: String,
+    registration_id: u64,
+}
+
 pub(crate) struct Shared {
     pub(crate) runtime: Runtime,
     pub(crate) entries: Arc<dyn ConfigEntryResolver>,
@@ -242,6 +253,7 @@ pub(crate) struct Shared {
     pub(crate) registry_gate: Mutex<()>,
     pub(crate) registry: Mutex<RegistryState>,
     pub(crate) platforms: RwLock<std::collections::HashMap<String, PlatformRegistration>>,
+    pub(crate) next_platform_registration_id: AtomicU64,
     pub(crate) flows: Mutex<std::collections::HashMap<String, Arc<Mutex<FlowSession>>>>,
 }
 
@@ -287,6 +299,7 @@ impl RepairsIntegration {
                 registry_gate: Mutex::new(()),
                 registry: Mutex::new(registry),
                 platforms: RwLock::new(std::collections::HashMap::new()),
+                next_platform_registration_id: AtomicU64::new(1),
                 flows: Mutex::new(std::collections::HashMap::new()),
             }),
         })
@@ -312,6 +325,21 @@ impl Drop for RepairsIntegration {
     fn drop(&mut self) {
         // Weak handles naturally fail after this owner releases its Arc. Flow
         // sessions are process-local and are dropped with the same owner.
+    }
+}
+
+impl Drop for RepairsPlatformRegistrationGuard {
+    fn drop(&mut self) {
+        let Some(shared) = self.shared.upgrade() else {
+            return;
+        };
+        let mut platforms = write_lock(&shared.platforms);
+        let owns_current_registration = platforms
+            .get(&self.domain)
+            .is_some_and(|registration| registration.id == self.registration_id);
+        if owns_current_registration {
+            platforms.remove(&self.domain);
+        }
     }
 }
 

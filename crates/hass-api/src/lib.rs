@@ -26,6 +26,7 @@ mod system_health;
 mod tags;
 mod webhooks;
 mod websocket;
+mod zeroconf;
 mod zones;
 
 use std::sync::Arc;
@@ -71,6 +72,7 @@ pub struct ApiFeatures {
     pub repairs: Option<hass_repairs::RepairsManager>,
     pub system_health: Option<hass_system_health::SystemHealthManager>,
     pub ssdp: Option<hass_ssdp::SsdpManager>,
+    pub zeroconf: Option<hass_zeroconf::ZeroconfManager>,
     pub network_adapters: Option<hass_network::NetworkManager>,
 }
 
