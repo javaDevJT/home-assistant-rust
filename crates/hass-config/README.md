@@ -93,7 +93,22 @@ debug output also redacts those maps. Trusted driver callbacks and typed
   Older config records that predate subentries load with an empty subentry set.
 - Lifecycle observer errors are reported after the config mutation is durable;
   observers run outside manager locks and cannot roll back that committed
-  mutation. Failed registry cleanup has no durable replay journal yet.
+  mutation. Parent and child removals atomically store a pending cleanup record
+  with the config deletion. Records contain only a stable UUID and the typed
+  parent/child identity needed by cleanup observers; they never copy entry,
+  subentry, or option data. Parent cleanup supersedes queued child records for
+  that entry. After installing the real cleanup observers, the host calls
+  `ConfigEntries::replay_pending_cleanup` to retry records left by a callback
+  failure or restart. Registration and manager construction do not replay.
+  Successful cleanup durably acknowledges only its exact UUID; an ack-write
+  failure leaves the record for another idempotent retry. Replay delivers only
+  lifecycle cleanup callbacks and does not replay public
+  `config_entry_changed` Runtime events.
+- Child cleanup may reenter the manager and remove its parent. The following
+  update reads the current parent and checks that snapshot under the state
+  lock before publishing; a removed or superseded snapshot is skipped. Driver
+  capability callbacks stay outside that lock. This keeps a stale `updated`
+  event from following the parent's `removed` event.
 - Successful core updates emit `core_config_updated` after persistence, with
   accepted request fields and no WebSocket envelope fields. Invalid or
   unsupported fields produce no update event. The app uses this event to

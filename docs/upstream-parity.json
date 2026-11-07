@@ -913,7 +913,7 @@
     {
       "area": "Startup, configuration, loader and config-entry lifecycle",
       "coverage_status": "partial_or_unported",
-      "gap": "Native config entries execute real registered setup/unload/retry/migration/config/options callbacks with persistent state and HTTP adapters. Typed subentry records now have stable parent-scoped identities, private data, source-compatible migration, registered native flows and post-commit lifecycle observers; focused HTTP/WebSocket fixtures cover the public subset and persisted children. Manifest-aware loading, complete dependency ordering, remaining discovery/platform flows, exhaustive pinned subentry acceptance and rollback/reload contracts remain open.",
+      "gap": "Native config entries execute real registered setup/unload/retry/migration/config/options callbacks with persistent state and HTTP adapters. Typed subentry records now have stable parent-scoped identities, private data, source-compatible migration, registered native flows and post-commit lifecycle observers and a minimal durable removal-cleanup journal with exact-ID acknowledgement/startup replay; focused HTTP/WebSocket fixtures cover the public subset and persisted children. Manifest-aware loading, complete dependency ordering, remaining discovery/platform flows, exhaustive pinned subentry acceptance and rollback/reload contracts remain open.",
       "id": "loader_setup_config_entries",
       "local_evidence_paths": [
         "crates/hass/src/config.rs",
@@ -1869,7 +1869,7 @@
     {
       "area": "Backup, repairs, diagnostics, onboarding and system-level services",
       "coverage_status": "partial_or_unported",
-      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. System Log list/write/raw-stream support is partial; its LLM consumers, coercion parity, observable overflow, reader-backed backlog and complete pinned acceptance remain open. Repairs now has a partial native registry/fix-flow manager, HTTP/WebSocket subset, post-commit host lifecycle and actual-process persistence/event/confirmation/restart evidence. System Health now has a native provider SDK, authenticated system_health/info stream, core native-version/current-timezone callback, privacy-safe config warning, and focused protocol/process evidence; only the core provider is included, and full pinned provider coverage, Python/platform discovery, frontend/LLM metadata and real external health probes remain open. Arbitrary provider callback values remain generic and source-compatible for authenticated readers without blanket redaction. Cross-document cleanup is not atomic and has no durable registry replay journal; fine-grained POLICY_EDIT, exhaustive pinned acceptance, frontend/translations, Python loader, and real provider activity remain open. Backup/restore, diagnostics and remaining system/frontend operating workflows are unported.",
+      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. System Log list/write/raw-stream support is partial; its LLM consumers, coercion parity, observable overflow, reader-backed backlog and complete pinned acceptance remain open. Repairs now has a partial native registry/fix-flow manager, HTTP/WebSocket subset, post-commit host lifecycle and actual-process persistence/event/confirmation/restart evidence. System Health now has a native provider SDK, authenticated system_health/info stream, core native-version/current-timezone callback, privacy-safe config warning, and focused protocol/process evidence; only the core provider is included, and full pinned provider coverage, Python/platform discovery, frontend/LLM metadata and real external health probes remain open. Arbitrary provider callback values remain generic and source-compatible for authenticated readers without blanket redaction. Cross-document cleanup uses a minimal durable removal journal with startup replay and exact-ID acknowledgement; replay does not backfill public change events and cross-document writes remain non-atomic; fine-grained POLICY_EDIT, exhaustive pinned acceptance, frontend/translations, Python loader, and real provider activity remain open. Backup/restore, diagnostics and remaining system/frontend operating workflows are unported.",
       "id": "backup_repairs_diagnostics_and_system_services",
       "local_evidence_paths": [
         "crates/hass/src/main.rs",
@@ -1892,7 +1892,7 @@
         "crates/hass/src/repairs.rs",
         "crates/hass/tests/end_to_end.rs"
       ],
-      "next_acceptance": "Complete the pinned Repairs storage, lifecycle, authorization, HTTP/WebSocket and failure acceptance; exercise recovery after explicit post-commit cross-document cleanup failures; finish System Log LLM/coercion/dedup/overflow/backlog parity; and expand System Health beyond the native core callback with full pinned provider, stream, Python/platform, frontend and LLM acceptance. Then port backup/restore, diagnostics and remaining system-service families with failure-safe persistence, authorization, restore/rollback and pinned API/test shape.",
+      "next_acceptance": "Complete the pinned Repairs storage, lifecycle, authorization, HTTP/WebSocket and failure acceptance; expand failure-recovery acceptance beyond the native registry/issue removal-cleanup journal; finish System Log LLM/coercion/dedup/overflow/backlog parity; and expand System Health beyond the native core callback with full pinned provider, stream, Python/platform, frontend and LLM acceptance. Then port backup/restore, diagnostics and remaining system-service families with failure-safe persistence, authorization, restore/rollback and pinned API/test shape.",
       "pinned_upstream_sources": [
         {
           "path_count": 23,
@@ -26412,6 +26412,14 @@
       "config_flow_classes": [],
       "domain": "config",
       "local_evidence_paths": [
+        "crates/hass-config/src/lib.rs::failed_parent_cleanup_survives_reopen_and_replays_with_domain",
+        "crates/hass-config/src/lib.rs::child_cleanup_journal_keeps_exact_identity_and_sibling_unchanged",
+        "crates/hass-config/src/lib.rs::parent_cleanup_supersedes_pending_child_records",
+        "crates/hass-config/src/lib.rs::failed_cleanup_acknowledgement_remains_retriable",
+        "crates/hass-config/src/lib.rs::replay_is_reentrant_and_allows_removal_and_self_unregistration",
+        "crates/hass-config/src/lib.rs::child_cleanup_that_removes_parent_does_not_publish_a_stale_update",
+        "crates/hass-config/src/lib.rs::overlapping_replay_dispatches_a_record_once_and_preserves_it_until_ack",
+        "crates/hass/src/repairs.rs::failed_registry_cleanup_replays_from_sqlite_after_parent_or_child_removal",
         "crates/hass/src/config.rs::system_health_yaml_accepts_ignored_values_and_preserves_source_truthiness",
         "crates/hass-registry/src/lib.rs",
         "crates/hass-api/src/websocket.rs",
@@ -26435,7 +26443,7 @@
       },
       "manifest_blob_oid": "32aacff2c6fc2096829df4a1270b2f8346e28e31",
       "manifest_path": "homeassistant/components/config/manifest.json",
-      "outstanding_acceptance": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation, and a focused HTTP/WebSocket subset now have evidence. The subentry API test passes through graceful fixture teardown. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
+      "outstanding_acceptance": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation and durable removal-cleanup replay, and a focused HTTP/WebSocket subset now have evidence. The subentry API test passes through graceful fixture teardown. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -115788,6 +115796,8 @@
       "config_flow_classes": [],
       "domain": "repairs",
       "local_evidence_paths": [
+        "crates/hass-config/src/lib.rs::failed_parent_cleanup_survives_reopen_and_replays_with_domain",
+        "crates/hass/src/repairs.rs::failed_registry_cleanup_replays_from_sqlite_after_parent_or_child_removal",
         "crates/hass-repairs/src/lib.rs",
         "crates/hass-repairs/src/registry.rs",
         "crates/hass-repairs/src/flows.rs",
@@ -115814,7 +115824,7 @@
       },
       "manifest_blob_oid": "218bea3555e25d5c7b2b48dc408d5a9443b77a70",
       "manifest_path": "homeassistant/components/repairs/manifest.json",
-      "outstanding_acceptance": "A native Repairs SDK/registry/fix-flow manager, limited HTTP/WebSocket adapters, post-commit config lifecycle hooks, and actual-process persistence/event/confirmation/restart evidence now exist. Session issues restore as inactive identity shells with is_fixable null. The manager is weakly owned; source-style minimal updates use the ordinary public event bus and appear in native event history. Parent/child cleanup precedes issue removal/update announcements, disable visibility refresh follows committed entry changes, and terminal Repairs results leave linked next flows independent. This remains partial: cross-document config/registry issue writes are not atomic; post-commit cleanup errors are explicit but have no durable registry replay journal; fine-grained POLICY_EDIT is unavailable; exhaustive pinned storage/lifecycle/API/error/auth acceptance, frontend/translations, Python loader, real provider activity, and complete parity remain open. Repairs has no Python bridge or LLM behavior.",
+      "outstanding_acceptance": "A native Repairs SDK/registry/fix-flow manager, limited HTTP/WebSocket adapters, post-commit config lifecycle hooks, and actual-process persistence/event/confirmation/restart evidence now exist. Session issues restore as inactive identity shells with is_fixable null. The manager is weakly owned; source-style minimal updates use the ordinary public event bus and appear in native event history. Parent/child cleanup precedes issue removal/update announcements, disable visibility refresh follows committed entry changes, and terminal Repairs results leave linked next flows independent. This remains partial: cross-document config/registry issue writes are not atomic; post-commit cleanup errors retain a minimal durable journal with exact-ID acknowledgement and startup replay; cleanup replay does not backfill public config-entry events; fine-grained POLICY_EDIT is unavailable; exhaustive pinned storage/lifecycle/API/error/auth acceptance, frontend/translations, Python loader, real provider activity, and complete parity remain open. Repairs has no Python bridge or LLM behavior.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -168074,9 +168084,9 @@
             ]
           }
         ],
-        "remaining": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation, and a focused HTTP/WebSocket subset now have evidence. The subentry protocol fixture passes with graceful teardown. Native System Health YAML accepts the pinned empty-schema values and tracks source truthiness for a generic startup/check warning without echoing values. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
+        "remaining": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation and durable removal-cleanup replay, and a focused HTTP/WebSocket subset now have evidence. The subentry protocol fixture passes with graceful teardown. Native System Health YAML accepts the pinned empty-schema values and tracks source truthiness for a generic startup/check warning without echoing values. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
         "status": "partial",
-        "verification": "Root reports the System Health YAML truthiness case passing within the unpublished 29-crate candidate app checks. The inventory writer inspected source and did not run tests; primary acceptance is tracked separately."
+        "verification": "Primary verified all 25 config cases and three app cleanup cases. The journal covers atomic removal records, exact-ID durable acknowledgement, retry after callback/ack failure, parent-child coalescing and overlapping/reentrant replay. Real SQLite recovery preserves siblings, unrelated parents and foreign current state. Full workspace receipts are tracked in VALIDATION.md."
       },
       {
         "domain": "counter",
@@ -168682,9 +168692,9 @@
             ]
           }
         ],
-        "remaining": "A native Repairs SDK/registry, scoped refresh lifecycle, typed fix-flow manager, HTTP/WebSocket subset, post-commit config lifecycle hooks, and actual-process persistence/event/confirmation/restart evidence now exist. Session issues restore as inactive identity shells with is_fixable null. The manager is weakly owned; source-style minimal updates use the ordinary public event bus and appear in native event history. Parent/child cleanup precedes issue removal/update announcements, disable visibility refresh follows committed entry changes, and terminal Repairs results leave linked next flows independent. This remains partial: cross-document config/registry issue writes are not atomic; post-commit cleanup errors are explicit but have no durable registry replay journal; fine-grained POLICY_EDIT is unavailable; exhaustive pinned storage/lifecycle/API/error/auth acceptance, frontend/translations, Python loader, real provider activity, and complete parity remain open. Repairs has no Python bridge or LLM behavior.",
+        "remaining": "A native Repairs SDK/registry, scoped refresh lifecycle, typed fix-flow manager, HTTP/WebSocket subset, post-commit config lifecycle hooks, and actual-process persistence/event/confirmation/restart evidence now exist. Session issues restore as inactive identity shells with is_fixable null. The manager is weakly owned; source-style minimal updates use the ordinary public event bus and appear in native event history. Parent/child cleanup precedes issue removal/update announcements, disable visibility refresh follows committed entry changes, and terminal Repairs results leave linked next flows independent. This remains partial: cross-document config/registry issue writes are not atomic; post-commit cleanup errors retain a minimal durable journal with exact-ID acknowledgement and startup replay; cleanup replay does not backfill public config-entry events; fine-grained POLICY_EDIT is unavailable; exhaustive pinned storage/lifecycle/API/error/auth acceptance, frontend/translations, Python loader, real provider activity, and complete parity remain open. Repairs has no Python bridge or LLM behavior.",
         "status": "partial",
-        "verification": "Root reports the frozen 28-crate gate passed formatting, strict locked all-target Clippy, 617 tests across 75 targets, release build, and optimized CLI validation. Focused Repairs and actual-process receipts are included in that gate. This inventory writer did not run tests; complete pinned Repairs parity remains open."
+        "verification": "Primary verified 25 config cases and three app cleanup cases, including actual SQLite failure/reopen for parent and child removal and a red/green reentrant notification regression. Full workspace and immutable publication receipts are recorded in VALIDATION.md. Complete pinned Repairs parity remains open."
       },
       {
         "domain": "rest",

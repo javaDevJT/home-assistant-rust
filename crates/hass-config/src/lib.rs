@@ -3,7 +3,7 @@
 //! Integration behavior is supplied by registered [`ConfigEntryDriver`]s. An
 //! entry without a driver cannot be reported as successfully configured.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
@@ -40,7 +40,7 @@ impl ConfigEntryState {
 
 /// Persisted config entry data. `data` and `options` are available to trusted
 /// native drivers, but are intentionally omitted from ordinary API fragments.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigEntry {
     pub entry_id: String,
@@ -840,8 +840,92 @@ struct PersistedState {
     entries: BTreeMap<String, ConfigEntry>,
     core_config: CoreConfig,
     core_config_initialized: bool,
+    pending_cleanup: Vec<PendingCleanup>,
     flows: BTreeMap<String, FlowSession>,
     subentry_flows: BTreeMap<String, ConfigSubentryFlowSession>,
+}
+
+/// The deliberately small, non-secret identity needed to retry registry cleanup.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum PendingCleanupEvent {
+    EntryRemoved {
+        entry_id: String,
+        domain: String,
+    },
+    SubentryRemoved {
+        entry_id: String,
+        subentry_id: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct PendingCleanup {
+    id: Uuid,
+    event: PendingCleanupEvent,
+}
+
+impl PendingCleanup {
+    fn lifecycle_event(&self) -> ConfigLifecycleEvent {
+        match &self.event {
+            PendingCleanupEvent::EntryRemoved { entry_id, domain } => {
+                ConfigLifecycleEvent::EntryRemoved {
+                    entry_id: entry_id.clone(),
+                    domain: domain.clone(),
+                }
+            }
+            PendingCleanupEvent::SubentryRemoved {
+                entry_id,
+                subentry_id,
+            } => ConfigLifecycleEvent::SubentryRemoved {
+                entry_id: entry_id.clone(),
+                subentry_id: subentry_id.clone(),
+            },
+        }
+    }
+}
+
+enum CleanupDispatch {
+    Acknowledged,
+    Pending,
+    InFlight,
+}
+
+struct CleanupFlightGuard<'a> {
+    manager: &'a ConfigEntries,
+    id: Uuid,
+}
+
+impl Drop for CleanupFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.manager
+            .cleanup_in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.id);
+    }
+}
+
+fn queue_pending_cleanup(state: &mut PersistedState, event: PendingCleanupEvent) -> PendingCleanup {
+    if let PendingCleanupEvent::EntryRemoved { entry_id, .. } = &event {
+        // A parent cleanup covers every child, so obsolete child records do not
+        // outlive the parent that now owns their cleanup scope.
+        state.pending_cleanup.retain(|pending| {
+            !matches!(
+                &pending.event,
+                PendingCleanupEvent::SubentryRemoved {
+                    entry_id: pending_entry_id,
+                    ..
+                } if pending_entry_id == entry_id
+            )
+        });
+    }
+    let pending = PendingCleanup {
+        id: Uuid::new_v4(),
+        event,
+    };
+    state.pending_cleanup.push(pending.clone());
+    pending
 }
 
 #[derive(Deserialize, Serialize)]
@@ -852,6 +936,8 @@ struct PersistedDocument {
     core_config: CoreConfig,
     #[serde(default)]
     core_config_initialized: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_cleanup: Vec<PendingCleanup>,
 }
 
 /// Persistent config-entry, config-flow, and core-config manager.
@@ -862,6 +948,7 @@ pub struct ConfigEntries {
     drivers: Arc<RwLock<HashMap<String, Arc<dyn ConfigEntryDriver>>>>,
     operation_lock: Arc<Mutex<()>>,
     lifecycle_observers: Arc<RwLock<Vec<Arc<dyn ConfigLifecycleObserver>>>>,
+    cleanup_in_flight: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 /// Owned registration for one config lifecycle observer.
@@ -884,6 +971,7 @@ impl ConfigEntries {
         let mut entries = BTreeMap::new();
         let mut core_config = CoreConfig::default();
         let mut core_config_initialized = false;
+        let mut pending_cleanup = Vec::new();
         if let Some(value) = runtime.get_data(METADATA_KEY)? {
             let document: PersistedDocument = serde_json::from_value(value).map_err(|error| {
                 Error::Storage(format!("invalid persisted config document: {error}"))
@@ -896,6 +984,7 @@ impl ConfigEntries {
             }
             core_config = document.core_config;
             core_config_initialized = document.core_config_initialized;
+            pending_cleanup = document.pending_cleanup;
             core_config
                 .validate()
                 .map_err(|error| Error::Storage(format!("invalid stored core config: {error}")))?;
@@ -929,12 +1018,14 @@ impl ConfigEntries {
                 entries,
                 core_config,
                 core_config_initialized,
+                pending_cleanup,
                 flows: BTreeMap::new(),
                 subentry_flows: BTreeMap::new(),
             })),
             drivers: Arc::new(RwLock::new(HashMap::new())),
             operation_lock: Arc::new(Mutex::new(())),
             lifecycle_observers: Arc::new(RwLock::new(Vec::new())),
+            cleanup_in_flight: Arc::new(Mutex::new(HashSet::new())),
         };
         // Persist any restart state normalization before returning.
         {
@@ -1064,6 +1155,33 @@ impl ConfigEntries {
         };
         observers.remove(index);
         true
+    }
+
+    /// Retry durable parent and child cleanup notifications.
+    ///
+    /// Hosts call this after installing the cleanup observers that own their
+    /// registries. Observer registration and manager construction do not
+    /// replay or acknowledge pending records. This retries cleanup callbacks
+    /// only; it does not replay public config-entry change events.
+    pub fn replay_pending_cleanup(&self) -> Result<usize> {
+        let pending = self.lock_state().pending_cleanup.clone();
+        let mut acknowledged = 0;
+        let mut errors = Vec::new();
+        for record in pending {
+            match self.dispatch_pending_cleanup(&record) {
+                Ok(CleanupDispatch::Acknowledged) => acknowledged += 1,
+                Ok(CleanupDispatch::Pending | CleanupDispatch::InFlight) => {}
+                Err(error) => errors.push(error.to_string()),
+            }
+        }
+        if errors.is_empty() {
+            Ok(acknowledged)
+        } else {
+            Err(Error::Service(format!(
+                "pending config cleanup replay failed: {}",
+                errors.join("; ")
+            )))
+        }
     }
 
     /// Return a registered integration driver by domain.
@@ -1307,7 +1425,7 @@ impl ConfigEntries {
 
     /// Persist subentry removal and notify lifecycle observers after commit.
     pub fn remove_subentry(&self, entry_id: &str, subentry_id: &str) -> Result<bool> {
-        let removed = self.mutate(|state| {
+        let pending = self.mutate(|state| {
             let entry = state
                 .entries
                 .get_mut(entry_id)
@@ -1319,16 +1437,19 @@ impl ConfigEntries {
                 .ok_or_else(|| Error::NotFound("Config subentry not found".into()))?;
             let subentry = entry.subentries.remove(index);
             entry.modified_at = Utc::now();
-            Ok((entry.clone(), subentry))
+            let pending = queue_pending_cleanup(
+                state,
+                PendingCleanupEvent::SubentryRemoved {
+                    entry_id: entry_id.to_owned(),
+                    subentry_id: subentry.subentry_id.clone(),
+                },
+            );
+            Ok(pending)
         })?;
-        let event = ConfigLifecycleEvent::SubentryRemoved {
-            entry_id: entry_id.to_owned(),
-            subentry_id: removed.1.subentry_id,
-        };
         // Home Assistant clears child registry references before notifying
         // update listeners; Repairs cleanup follows the same post-commit order.
-        let observer_result = self.notify_lifecycle_observers(&event);
-        let entry_change_result = self.emit_entry_change("updated", &removed.0);
+        let observer_result = self.dispatch_direct_cleanup(&pending);
+        let entry_change_result = self.emit_current_entry_change("updated", entry_id);
         observer_result?;
         entry_change_result?;
         Ok(true)
@@ -1548,7 +1669,19 @@ impl ConfigEntries {
         }
         let entry = self.require_entry(entry_id)?;
         driver.remove(&self.runtime, &entry)?;
-        self.mutate(|state| {
+        let pending = self.mutate(|state| {
+            let current = state
+                .entries
+                .get(entry_id)
+                .ok_or_else(|| Error::NotFound(format!("unknown config entry {entry_id}")))?;
+            let domain = current.domain.clone();
+            let pending = queue_pending_cleanup(
+                state,
+                PendingCleanupEvent::EntryRemoved {
+                    entry_id: entry_id.to_owned(),
+                    domain,
+                },
+            );
             state.entries.remove(entry_id);
             state
                 .flows
@@ -1556,15 +1689,12 @@ impl ConfigEntries {
             state
                 .subentry_flows
                 .retain(|_, flow| flow.request.entry_id != entry_id);
-            Ok(())
+            Ok(pending)
         })?;
         drop(operation);
         // Source removal dispatch follows registry/issue cleanup. Keep both
         // outside manager locks so observers can reenter the committed state.
-        self.notify_lifecycle_observers(&ConfigLifecycleEvent::EntryRemoved {
-            entry_id: entry_id.to_owned(),
-            domain: entry.domain.clone(),
-        })?;
+        self.dispatch_direct_cleanup(&pending)?;
         self.emit_entry_change("removed", &entry)
     }
 
@@ -2750,17 +2880,107 @@ impl ConfigEntries {
         Ok(result)
     }
 
+    fn dispatch_direct_cleanup(&self, pending: &PendingCleanup) -> Result<()> {
+        match self.dispatch_pending_cleanup(pending)? {
+            CleanupDispatch::InFlight => Err(Error::Service(
+                "config cleanup is already being dispatched".into(),
+            )),
+            CleanupDispatch::Acknowledged | CleanupDispatch::Pending => Ok(()),
+        }
+    }
+
+    fn dispatch_pending_cleanup(&self, pending: &PendingCleanup) -> Result<CleanupDispatch> {
+        // Reserve only while the record is still current. The state and
+        // in-flight locks are both released before any observer is invoked.
+        let state = self.lock_state();
+        if !state
+            .pending_cleanup
+            .iter()
+            .any(|candidate| candidate.id == pending.id)
+        {
+            return Ok(CleanupDispatch::Pending);
+        }
+        let mut in_flight = self
+            .cleanup_in_flight
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !in_flight.insert(pending.id) {
+            return Ok(CleanupDispatch::InFlight);
+        }
+        drop(in_flight);
+        drop(state);
+        let _flight_guard = CleanupFlightGuard {
+            manager: self,
+            id: pending.id,
+        };
+
+        let delivered =
+            self.notify_lifecycle_observers_with_presence(&pending.lifecycle_event())?;
+        if !delivered {
+            return Ok(CleanupDispatch::Pending);
+        }
+        if self.acknowledge_pending_cleanup(pending.id)? {
+            Ok(CleanupDispatch::Acknowledged)
+        } else {
+            // A parent record may have superseded a child while the callback
+            // was running. Its cleanup record remains authoritative.
+            Ok(CleanupDispatch::Pending)
+        }
+    }
+
+    fn acknowledge_pending_cleanup(&self, id: Uuid) -> Result<bool> {
+        let mut current = self.lock_state();
+        if !current
+            .pending_cleanup
+            .iter()
+            .any(|pending| pending.id == id)
+        {
+            return Ok(false);
+        }
+        let mut next = current.clone();
+        next.pending_cleanup.retain(|pending| pending.id != id);
+        self.persist(&next).map_err(|error| {
+            Error::Storage(format!(
+                "config cleanup succeeded but its journal acknowledgement failed: {error}"
+            ))
+        })?;
+        *current = next;
+        Ok(true)
+    }
+
     fn persist(&self, state: &PersistedState) -> Result<()> {
         let document = PersistedDocument {
             document_version: DOCUMENT_VERSION,
             entries: state.entries.values().cloned().collect(),
             core_config: state.core_config.clone(),
             core_config_initialized: state.core_config_initialized,
+            pending_cleanup: state.pending_cleanup.clone(),
         };
         let value = serde_json::to_value(document).map_err(|error| {
             Error::InvalidInput(format!("cannot encode config metadata: {error}"))
         })?;
         self.runtime.set_data(METADATA_KEY, &value)
+    }
+
+    fn emit_current_entry_change(&self, change: &str, entry_id: &str) -> Result<()> {
+        let snapshot = { self.lock_state().entries.get(entry_id).cloned() };
+        let Some(snapshot) = snapshot else {
+            return Ok(());
+        };
+        // Driver capability callbacks remain outside the state lock. Recheck
+        // the raw snapshot before sending so parent removal cannot be followed
+        // by a stale child-update announcement, including concurrent removal.
+        let entry = self.with_supported_subentry_types(snapshot.clone());
+        let mut data = Map::new();
+        data.insert("type".into(), json!(change));
+        data.insert("entry".into(), entry.public_json());
+        let current = self.lock_state();
+        if current.entries.get(entry_id) != Some(&snapshot) {
+            return Ok(());
+        }
+        self.runtime
+            .fire_event("config_entry_changed", data, Context::default())?;
+        Ok(())
     }
 
     fn emit_entry_change(&self, change: &str, entry: &ConfigEntry) -> Result<()> {
@@ -2774,11 +2994,20 @@ impl ConfigEntries {
     }
 
     fn notify_lifecycle_observers(&self, event: &ConfigLifecycleEvent) -> Result<()> {
+        self.notify_lifecycle_observers_with_presence(event)
+            .map(|_| ())
+    }
+
+    fn notify_lifecycle_observers_with_presence(
+        &self,
+        event: &ConfigLifecycleEvent,
+    ) -> Result<bool> {
         let observers = self
             .lifecycle_observers
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
+        let had_observers = !observers.is_empty();
         let mut first_error = None;
         for observer in observers {
             if let Err(error) = observer.config_lifecycle_changed(event)
@@ -2791,7 +3020,7 @@ impl ConfigEntries {
             Some(error) => Err(Error::Service(format!(
                 "config lifecycle committed but observer failed: {error}"
             ))),
-            None => Ok(()),
+            None => Ok(had_observers),
         }
     }
 
@@ -3528,6 +3757,125 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[derive(Default)]
+    struct CleanupObserver {
+        events: std::sync::Mutex<Vec<ConfigLifecycleEvent>>,
+        manager: std::sync::Mutex<Option<ConfigEntries>>,
+        observer: std::sync::Mutex<Option<std::sync::Weak<dyn ConfigLifecycleObserver>>>,
+        fail_once: AtomicBool,
+        replay_in_callback: AtomicBool,
+        nested_replay_counts: std::sync::Mutex<Vec<usize>>,
+        remove_other_entry: std::sync::Mutex<Option<String>>,
+        unregister_self: AtomicBool,
+        fail_store_after_success: std::sync::Mutex<Option<Arc<FailingMetadataStore>>>,
+    }
+
+    impl ConfigLifecycleObserver for CleanupObserver {
+        fn config_lifecycle_changed(&self, event: &ConfigLifecycleEvent) -> Result<()> {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
+
+            if self.fail_once.swap(false, Ordering::SeqCst) {
+                return Err(Error::Service("injected cleanup failure".into()));
+            }
+
+            let manager = self
+                .manager
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(manager) = manager {
+                if self.replay_in_callback.swap(false, Ordering::SeqCst) {
+                    let count = manager.replay_pending_cleanup()?;
+                    self.nested_replay_counts
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(count);
+                }
+
+                let other_entry = self
+                    .remove_other_entry
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(entry_id) = other_entry {
+                    manager.remove_entry(&entry_id)?;
+                }
+
+                if self.unregister_self.swap(false, Ordering::SeqCst)
+                    && let Some(observer) = self
+                        .observer
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .as_ref()
+                        .and_then(std::sync::Weak::upgrade)
+                {
+                    manager.unregister_lifecycle_observer(&observer);
+                }
+            }
+
+            if let Some(store) = self
+                .fail_store_after_success
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                store.fail_metadata.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    fn register_cleanup_observer(
+        manager: &ConfigEntries,
+        observer: &Arc<CleanupObserver>,
+    ) -> Arc<dyn ConfigLifecycleObserver> {
+        let observer_trait: Arc<dyn ConfigLifecycleObserver> = observer.clone();
+        manager
+            .register_lifecycle_observer(observer_trait.clone())
+            .expect("cleanup observer registers");
+        *observer
+            .manager
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(manager.clone());
+        *observer
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::downgrade(&observer_trait));
+        observer_trait
+    }
+
+    struct BlockingCleanupObserver {
+        events: std::sync::Mutex<Vec<ConfigLifecycleEvent>>,
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl ConfigLifecycleObserver for BlockingCleanupObserver {
+        fn config_lifecycle_changed(&self, event: &ConfigLifecycleEvent) -> Result<()> {
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
+            self.entered
+                .send(())
+                .map_err(|error| Error::Service(error.to_string()))?;
+            self.release
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .recv()
+                .map_err(|error| Error::Service(error.to_string()))?;
+            Ok(())
+        }
+    }
+
+    fn store_has_pending_cleanup(manager: &ConfigEntries) -> bool {
+        !manager.lock_state().pending_cleanup.is_empty()
     }
 
     #[derive(Default)]
@@ -4340,6 +4688,318 @@ mod tests {
     }
 
     #[test]
+    fn failed_parent_cleanup_survives_reopen_and_replays_with_domain() {
+        let store = Arc::new(FailingMetadataStore::default());
+        let runtime = Runtime::new(store.clone()).unwrap();
+        let manager = ConfigEntries::new(runtime.clone()).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let mut data = Map::new();
+        data.insert("credential".into(), json!("parent-private-value"));
+        let entry = manager
+            .create_entry(NewConfigEntry::new("fixture", "Parent", data))
+            .unwrap();
+
+        let failed = Arc::new(CleanupObserver::default());
+        failed.fail_once.store(true, Ordering::SeqCst);
+        let _failed_trait = register_cleanup_observer(&manager, &failed);
+        assert!(manager.remove_entry(&entry.entry_id).is_err());
+        assert!(manager.get_entry(&entry.entry_id).is_none());
+
+        let persisted = store.get_data(METADATA_KEY).unwrap().unwrap();
+        let pending = persisted["pending_cleanup"].as_array().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["event"]["type"], "entry_removed");
+        assert_eq!(pending[0]["event"]["entry_id"], entry.entry_id);
+        assert_eq!(pending[0]["event"]["domain"], "fixture");
+        assert!(!persisted.to_string().contains("parent-private-value"));
+
+        // Construction and observer registration deliberately do not replay.
+        let reopened = ConfigEntries::new(runtime).unwrap();
+        let mut runtime_events = reopened.runtime.subscribe();
+        let replay = Arc::new(CleanupObserver::default());
+        let replay_trait = register_cleanup_observer(&reopened, &replay);
+        assert!(replay.events.lock().unwrap().is_empty());
+        assert_eq!(reopened.replay_pending_cleanup().unwrap(), 1);
+        assert_eq!(
+            *replay.events.lock().unwrap(),
+            vec![ConfigLifecycleEvent::EntryRemoved {
+                entry_id: entry.entry_id.clone(),
+                domain: "fixture".into(),
+            }]
+        );
+        let persisted = store.get_data(METADATA_KEY).unwrap().unwrap();
+        assert!(
+            !persisted
+                .as_object()
+                .unwrap()
+                .contains_key("pending_cleanup")
+        );
+        assert!(matches!(
+            runtime_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(reopened.unregister_lifecycle_observer(&replay_trait));
+    }
+
+    #[test]
+    fn child_cleanup_journal_keeps_exact_identity_and_sibling_unchanged() {
+        let store = Arc::new(MemoryStore::default());
+        let manager = ConfigEntries::new(runtime(store.clone())).unwrap();
+        let entry = manager
+            .create_entry(NewConfigEntry::new("fixture", "Parent", Map::new()))
+            .unwrap();
+        let mut private_data = Map::new();
+        private_data.insert("credential".into(), json!("removed-child-private"));
+        let child = manager
+            .create_subentry(
+                &entry.entry_id,
+                NewConfigSubentry::new("fixture_child", "Removed child", private_data),
+            )
+            .unwrap();
+        let mut sibling_data = Map::new();
+        sibling_data.insert("setting".into(), json!("sibling-retained"));
+        let sibling = manager
+            .create_subentry(
+                &entry.entry_id,
+                NewConfigSubentry::new("fixture_child", "Sibling", sibling_data),
+            )
+            .unwrap();
+
+        let observer = Arc::new(CleanupObserver::default());
+        observer.fail_once.store(true, Ordering::SeqCst);
+        let _observer_trait = register_cleanup_observer(&manager, &observer);
+        assert!(
+            manager
+                .remove_subentry(&entry.entry_id, &child.subentry_id)
+                .is_err()
+        );
+        assert!(!manager.subentry_exists(&entry.entry_id, &child.subentry_id));
+        assert!(manager.subentry_exists(&entry.entry_id, &sibling.subentry_id));
+        let sibling_after = manager
+            .get_subentry(&entry.entry_id, &sibling.subentry_id)
+            .unwrap();
+        assert_eq!(sibling_after.title, sibling.title);
+        assert_eq!(sibling_after.data, sibling.data);
+
+        let persisted = store.get_data(METADATA_KEY).unwrap().unwrap();
+        let pending = persisted["pending_cleanup"].as_array().unwrap();
+        assert_eq!(pending.len(), 1);
+        let record = pending[0].as_object().unwrap();
+        assert_eq!(
+            record.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["event", "id"]
+        );
+        let event = record["event"].as_object().unwrap();
+        assert_eq!(
+            event.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["entry_id", "subentry_id", "type"]
+        );
+        assert_eq!(event["type"], "subentry_removed");
+        assert_eq!(event["entry_id"], entry.entry_id);
+        assert_eq!(event["subentry_id"], child.subentry_id);
+        assert!(!persisted.to_string().contains("removed-child-private"));
+
+        assert_eq!(manager.replay_pending_cleanup().unwrap(), 1);
+        assert_eq!(
+            observer.events.lock().unwrap().last(),
+            Some(&ConfigLifecycleEvent::SubentryRemoved {
+                entry_id: entry.entry_id.clone(),
+                subentry_id: child.subentry_id.clone(),
+            })
+        );
+        assert!(
+            store
+                .get_data(METADATA_KEY)
+                .unwrap()
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .get("pending_cleanup")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parent_cleanup_supersedes_pending_child_records() {
+        let store = Arc::new(MemoryStore::default());
+        let manager = ConfigEntries::new(runtime(store.clone())).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager
+            .create_entry(NewConfigEntry::new("fixture", "Parent", Map::new()))
+            .unwrap();
+        let child = manager
+            .create_subentry(
+                &entry.entry_id,
+                NewConfigSubentry::new("fixture_child", "Child", Map::new()),
+            )
+            .unwrap();
+        let observer = Arc::new(CleanupObserver::default());
+        observer.fail_once.store(true, Ordering::SeqCst);
+        let _observer_trait = register_cleanup_observer(&manager, &observer);
+
+        assert!(
+            manager
+                .remove_subentry(&entry.entry_id, &child.subentry_id)
+                .is_err()
+        );
+        observer.fail_once.store(true, Ordering::SeqCst);
+        assert!(manager.remove_entry(&entry.entry_id).is_err());
+
+        let persisted = store.get_data(METADATA_KEY).unwrap().unwrap();
+        let pending = persisted["pending_cleanup"].as_array().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0]["event"]["type"], "entry_removed");
+        assert_eq!(pending[0]["event"]["entry_id"], entry.entry_id);
+
+        assert_eq!(manager.replay_pending_cleanup().unwrap(), 1);
+        assert_eq!(observer.events.lock().unwrap().len(), 3);
+        assert_eq!(
+            observer.events.lock().unwrap().last(),
+            Some(&ConfigLifecycleEvent::EntryRemoved {
+                entry_id: entry.entry_id,
+                domain: "fixture".into(),
+            })
+        );
+        assert!(!store_has_pending_cleanup(&manager));
+    }
+
+    #[test]
+    fn failed_cleanup_acknowledgement_remains_retriable() {
+        let store = Arc::new(FailingMetadataStore::default());
+        let runtime = Runtime::new(store.clone()).unwrap();
+        let manager = ConfigEntries::new(runtime).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager
+            .create_entry(NewConfigEntry::new("fixture", "Parent", Map::new()))
+            .unwrap();
+        let observer = Arc::new(CleanupObserver::default());
+        *observer
+            .fail_store_after_success
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(store.clone());
+        let _observer_trait = register_cleanup_observer(&manager, &observer);
+
+        assert!(manager.remove_entry(&entry.entry_id).is_err());
+        assert!(manager.get_entry(&entry.entry_id).is_none());
+        assert_eq!(
+            store.get_data(METADATA_KEY).unwrap().unwrap()["pending_cleanup"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        store.fail_metadata.store(false, Ordering::SeqCst);
+        assert_eq!(manager.replay_pending_cleanup().unwrap(), 1);
+        assert_eq!(observer.events.lock().unwrap().len(), 2);
+        let persisted = store.get_data(METADATA_KEY).unwrap().unwrap();
+        assert!(
+            !persisted
+                .as_object()
+                .unwrap()
+                .contains_key("pending_cleanup")
+        );
+    }
+
+    #[test]
+    fn replay_is_reentrant_and_allows_removal_and_self_unregistration() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let first = manager
+            .create_entry(NewConfigEntry::new("fixture", "First", Map::new()))
+            .unwrap();
+        let second = manager
+            .create_entry(NewConfigEntry::new("fixture", "Second", Map::new()))
+            .unwrap();
+
+        // Leave only the first cleanup pending until the observer is installed.
+        manager.remove_entry(&first.entry_id).unwrap();
+        let observer = Arc::new(CleanupObserver::default());
+        observer.replay_in_callback.store(true, Ordering::SeqCst);
+        observer.unregister_self.store(true, Ordering::SeqCst);
+        *observer
+            .remove_other_entry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(second.entry_id.clone());
+        let observer_trait = register_cleanup_observer(&manager, &observer);
+
+        assert_eq!(manager.replay_pending_cleanup().unwrap(), 1);
+        assert_eq!(*observer.nested_replay_counts.lock().unwrap(), vec![0]);
+        assert_eq!(observer.events.lock().unwrap().len(), 2);
+        assert!(manager.get_entry(&second.entry_id).is_none());
+        assert!(!manager.unregister_lifecycle_observer(&observer_trait));
+        assert!(!store_has_pending_cleanup(&manager));
+    }
+
+    #[test]
+    fn child_cleanup_that_removes_parent_does_not_publish_a_stale_update() {
+        let runtime = runtime(Arc::new(MemoryStore::default()));
+        let manager = ConfigEntries::new(runtime.clone()).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let parent = manager
+            .create_entry(NewConfigEntry::new("fixture", "Parent", Map::new()))
+            .unwrap();
+        let child = manager
+            .create_subentry(
+                &parent.entry_id,
+                NewConfigSubentry::new("child", "Child", Map::new()),
+            )
+            .unwrap();
+        let observer = Arc::new(CleanupObserver::default());
+        *observer.remove_other_entry.lock().unwrap() = Some(parent.entry_id.clone());
+        observer.unregister_self.store(true, Ordering::SeqCst);
+        let _observer_trait = register_cleanup_observer(&manager, &observer);
+        let mut events = runtime.subscribe();
+        manager
+            .remove_subentry(&parent.entry_id, &child.subentry_id)
+            .unwrap();
+        assert!(manager.get_entry(&parent.entry_id).is_none());
+        let changes: Vec<_> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|event| event.event_type == "config_entry_changed")
+            .filter(|event| event.data["entry"]["entry_id"] == parent.entry_id)
+            .map(|event| event.data["type"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(
+            changes.last().map(String::as_str),
+            Some("removed"),
+            "{changes:?}"
+        );
+        assert!(!store_has_pending_cleanup(&manager));
+    }
+
+    #[test]
+    fn overlapping_replay_dispatches_a_record_once_and_preserves_it_until_ack() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager
+            .create_entry(NewConfigEntry::new("fixture", "Parent", Map::new()))
+            .unwrap();
+        manager.remove_entry(&entry.entry_id).unwrap();
+
+        let (entered_sender, entered_receiver) = std::sync::mpsc::channel();
+        let (release_sender, release_receiver) = std::sync::mpsc::channel();
+        let observer = Arc::new(BlockingCleanupObserver {
+            events: std::sync::Mutex::new(Vec::new()),
+            entered: entered_sender,
+            release: std::sync::Mutex::new(release_receiver),
+        });
+        let observer_trait: Arc<dyn ConfigLifecycleObserver> = observer.clone();
+        manager.register_lifecycle_observer(observer_trait).unwrap();
+        let replay_manager = manager.clone();
+        let replay = std::thread::spawn(move || replay_manager.replay_pending_cleanup());
+
+        entered_receiver
+            .recv_timeout(StdDuration::from_secs(2))
+            .expect("first replay enters observer");
+        assert_eq!(manager.replay_pending_cleanup().unwrap(), 0);
+        assert_eq!(observer.events.lock().unwrap().len(), 1);
+        release_sender.send(()).unwrap();
+        assert_eq!(replay.join().unwrap().unwrap(), 1);
+        assert_eq!(observer.events.lock().unwrap().len(), 1);
+        assert!(!store_has_pending_cleanup(&manager));
+    }
+
+    #[test]
     fn failed_persistence_never_notifies_lifecycle_observers() {
         let store = Arc::new(FailingMetadataStore::default());
         let runtime = Runtime::new(store.clone()).unwrap();
@@ -4377,6 +5037,13 @@ mod tests {
             None
         );
         assert!(observer.events.lock().unwrap().is_empty());
+        let persisted = store.get_data(METADATA_KEY).unwrap().unwrap();
+        assert!(
+            !persisted
+                .as_object()
+                .unwrap()
+                .contains_key("pending_cleanup")
+        );
 
         store.fail_metadata.store(false, Ordering::SeqCst);
         manager

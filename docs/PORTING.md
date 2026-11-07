@@ -432,3 +432,36 @@ idempotent observer cleanup. Root will wire its replay method after observer
 registration in the app owner. Do not use a blanket staging command while this
 future writer runs. Current 29-crate receipts still explicitly retain the
 absence of registry-cleanup replay in that published source.
+
+System Health source is published as `2724b8e4a68b8b8cd29124afa0f5da42c2b51db1`;
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42342899022)
+passes. Root wired the future replay call after the actual composed cleanup
+observer is installed and added a real SQLite fault/reopen test for both parent
+and child removals. These app edits and v32's config-model implementation are
+unaccepted next-wave work, outside the published 636-test source and its hash.
+The fault test requires stale registry rows to survive the injected write error,
+Repairs cleanup still to run, and a fresh file-backed runtime to clear the
+correct rows while preserving siblings, other parents and foreign current state.
+
+Cleanup model owner v32 completed/released 24 package cases, strict Clippy and
+formatting. Root's actual SQLite fault/reopen app case passes both parent and
+child removals, and app all-target strict Clippy passes. Primary review then
+reproduced a reentrant public-event bug: child cleanup removing its own parent
+produced `[removed, updated]`. The new falsifier failed before correction.
+Root now reads the current raw parent snapshot after callbacks, computes driver
+capabilities outside the state lock and checks that snapshot under the state
+lock through publication; absent/superseded parents do not emit stale updates.
+All 25 config cases pass after correction. No operation lock is acquired around
+the driver callback or cleanup callback. Root owns all journal/app source and
+is running the frozen workspace gate before updating inventory/publication.
+
+The cleanup candidate passes the complete local gate: 644 tests across 78
+targets, zero failed/ignored, formatting, strict locked workspace all-target
+Clippy, optimized build and optimized example CLI. macOS executable SHA-256:
+`6b0114feba68c1aeef564c1e3a76fe494d79e41c3270e8c6e579d6c642b6897f`.
+Inventory integration changes are limited to config and Repairs; all 1,565
+statuses are unchanged at 38 partial, 1,527 unported and zero complete. Eight
+new named evidence references resolve. Policy export/line-count snapshots are
+retained. `difflib` patch generation uses `lineterm=''` and wrapped Base64 so
+native patches retain exact lines without a spurious empty context line.
+Source publication and exact Linux CI follow.

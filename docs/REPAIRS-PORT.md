@@ -189,10 +189,16 @@ removal/update announcement; callbacks run outside manager locks. See the
 Entry removal clears issues only after unload/remove succeeds and removal is
 persisted. Config, registry and issue documents use separate metadata writes;
 there is no cross-document transaction. Observer failures are reported as
-post-commit failures. Repairs startup prunes linked orphan issues, but there is
-no durable registry-cleanup replay journal yet; retrying an already removed
-config record does not repeat its observer. Do not claim automatic recovery of
-every registry write failure.
+post-commit failures. A minimal pending-cleanup record now commits atomically
+with each parent/child deletion. After installing the actual registry/Repairs
+observer, app startup calls `replay_pending_cleanup`; only successful cleanup
+durably acknowledges its UUID. Failure retains the record for retry, and parent
+cleanup supersedes its pending children. Journal records contain typed IDs and
+the original parent domain, excluding private entry/subentry data. Replay
+retries cleanup and does not backfill public config-entry change events.
+Repairs startup also prunes linked orphan issues. These journal changes are the
+current acceptance candidate, outside the published 29-crate System Health
+receipt until its separate gate completes.
 
 ## Repair flows and protocol contract
 
