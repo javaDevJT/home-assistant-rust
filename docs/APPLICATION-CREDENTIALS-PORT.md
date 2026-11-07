@@ -1,5 +1,25 @@
 # Application Credentials Port
 
+## Native local acceptance
+
+The member-40 implementation provides private version-1 storage, loaded-provider
+factories, alias-aware in-use checks, source-compatible admin CRUD/streams,
+secret-free authenticated configuration and YAML/app lifetime wiring. Twelve
+SDK cases, five slug cases, nine protocol cases and compiled-process restart
+coverage pass within the final 998-test/114-target workspace gate. Formatting,
+strict all-target Clippy, optimized build and seven optimized CLI cases pass.
+The macOS binary SHA-256 is
+`6a517d876da5d337f80f8656e91ddb29b6a1f4f3a0604178db097c448bb17d57`.
+Publication and exact Linux CI are pending.
+
+The native subset is partial. The app registers no production credential
+platforms and does not advertise the 54 upstream providers as working. OAuth
+exchange, callbacks, refresh and provider acceptance are separate work in the
+[OAuth source contract](OAUTH2-CLIENT-PORT.md). Admin serialization includes
+secrets by source design; no physical memory-zeroization guarantee is claimed.
+See the [SDK](../crates/hass-application-credentials/README.md) and its
+[data provenance](../crates/hass-application-credentials/PROVENANCE/NOTICE.md).
+
 ## Source and boundary
 
 The source of truth is Home Assistant Core
@@ -107,6 +127,12 @@ route:
 | `application_credentials/list`, `create`, `update`, `delete`, `subscribe` | Generic collection commands. Admin-only; `create` returns the record and generated `id`; `list` returns stored records. `update` is unsupported. |
 | `application_credentials/config` | Returns the available domain catalog and per-domain `description_placeholders`; the handler has no `require_admin` decorator and returns no credential records. |
 | `application_credentials/config_entry` | Requires administrator authority and a string `config_entry_id`. Returns only `application_credentials_id` when the entry uses a credential, otherwise `{}`. An unknown entry returns `invalid_config_entry_id` / `Config entry not found: <id>`. |
+
+The lookup first requires an available application-credentials platform for
+the entry's domain; pinned `_async_config_entry_app_credentials` explicitly
+calls `_get_platform` before matching records (`__init__.py:249-266`, especially
+line 254). Native loaded-platform availability is the current boundary;
+persisted records alone do not imply an available provider.
 
 Concrete error shapes asserted by the component tests:
 

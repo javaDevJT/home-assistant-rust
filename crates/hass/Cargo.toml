@@ -49,6 +49,7 @@ hass-usb.workspace = true
 hass-usb-backend.workspace = true
 hass-hardware.workspace = true
 hass-hardware-metrics.workspace = true
+hass-application-credentials.workspace = true
 mdns-sd.workspace = true
 indexmap.workspace = true
 serde.workspace = true

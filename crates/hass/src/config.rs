@@ -70,6 +70,10 @@ pub struct Config {
     pub hardware: serde_yaml::Value,
     #[serde(skip)]
     pub hardware_enabled: bool,
+    #[serde(default)]
+    pub application_credentials: serde_yaml::Value,
+    #[serde(skip)]
+    pub application_credentials_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_sun")]
     pub sun: bool,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
@@ -321,6 +325,7 @@ impl Config {
                 "dhcp",
                 "usb",
                 "hardware",
+                "application_credentials",
                 "sun",
                 "sensor",
                 "timer",
@@ -339,6 +344,8 @@ impl Config {
         let dhcp_enabled = mapping.contains_key(serde_yaml::Value::String("dhcp".into()));
         let usb_enabled = mapping.contains_key(serde_yaml::Value::String("usb".into()));
         let hardware_enabled = mapping.contains_key(serde_yaml::Value::String("hardware".into()));
+        let application_credentials_enabled =
+            mapping.contains_key(serde_yaml::Value::String("application_credentials".into()));
         let mut config: Self = serde_path_to_error::deserialize(value).map_err(|error| {
             // A typed decoding error can quote an invalid scalar. Preserve
             // its configuration path without printing resolved secret values.
@@ -353,6 +360,7 @@ impl Config {
         config.dhcp_enabled = dhcp_enabled;
         config.usb_enabled = usb_enabled;
         config.hardware_enabled = hardware_enabled;
+        config.application_credentials_enabled = application_credentials_enabled;
         config.validate()?;
         Ok(config)
     }
@@ -455,6 +463,10 @@ impl Config {
         yaml_truthy(&self.hardware)
     }
 
+    pub fn application_credentials_has_parameters(&self) -> bool {
+        yaml_truthy(&self.application_credentials)
+    }
+
     pub fn zeroconf_has_deprecated_parameters(&self) -> bool {
         self.zeroconf.has_deprecated_parameters()
     }
@@ -513,6 +525,9 @@ impl Config {
         }
         if self.hardware_enabled {
             components.push("hardware");
+        }
+        if self.application_credentials_enabled {
+            components.push("application_credentials");
         }
         if !self.script.is_empty() {
             components.push("script");
@@ -896,6 +911,33 @@ mod tests {
                     .unwrap()
                     .contains(&json!("hardware"))
             );
+        }
+    }
+
+    #[test]
+    fn application_credentials_yaml_does_not_export_ignored_secret_parameters() {
+        assert!(
+            !Config::parse("{}\n")
+                .unwrap()
+                .application_credentials_enabled
+        );
+        for (value, warns) in [
+            ("null", false),
+            ("false", false),
+            ("{}", false),
+            ("{client_secret: ignored-fixture-secret}", true),
+        ] {
+            let config = Config::parse(&format!("application_credentials: {value}\n")).unwrap();
+            assert!(config.application_credentials_enabled);
+            assert_eq!(config.application_credentials_has_parameters(), warns);
+            let public = config.api_config();
+            assert!(
+                public["components"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("application_credentials"))
+            );
+            assert!(!public.to_string().contains("ignored-fixture-secret"));
         }
     }
 

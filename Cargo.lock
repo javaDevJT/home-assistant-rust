@@ -816,6 +816,7 @@ dependencies = [
  "clap",
  "futures-util",
  "hass-api",
+ "hass-application-credentials",
  "hass-auth",
  "hass-automation",
  "hass-config",
@@ -876,6 +877,7 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "hass-application-credentials",
  "hass-auth",
  "hass-config",
  "hass-core",
@@ -890,6 +892,7 @@ dependencies = [
  "hass-registry",
  "hass-repairs",
  "hass-ssdp",
+ "hass-storage",
  "hass-system-health",
  "hass-system-log",
  "hass-tag",
@@ -916,6 +919,24 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "hass-application-credentials"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures-util",
+ "hass-config",
+ "hass-core",
+ "hass-storage",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -3387,9 +3408,9 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "unicode-normalization"
-version = "0.1.26"
+version = "0.1.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
+checksum = "5033c97c4262335cded6d6fc3e5c18ab755e1a3dc96376350f3d8e9f009ad956"
 dependencies = [
  "tinyvec",
 ]

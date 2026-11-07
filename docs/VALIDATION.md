@@ -1,5 +1,42 @@
 # Validation evidence
 
+## Accepted local Application Credentials source (40 crates)
+
+The final exact-source workspace passes **998 tests across 114 targets**, with
+zero failed or ignored cases, including 145 app-bin cases and 20 compiled-process
+cases. Formatting, strict locked offline workspace all-target Clippy and the
+optimized workspace build pass. The optimized macOS `hass` SHA-256 is
+`6a517d876da5d337f80f8656e91ddb29b6a1f4f3a0604178db097c448bb17d57`.
+Source publication and exact Linux CI remain pending.
+
+New proof includes 12 credential SDK cases, five slug cases, nine loopback API
+cases, one YAML-presence case and one process restart case. Storage is private
+Runtime metadata; persistence precedes events and failed writes leave state
+unchanged. Factory destructors release nested guards outside registry locks.
+Imports protect stable IDs and effective aliases used by matching-domain entries.
+The exact text-unidecode table and 252 HTML4 entity entries were independently
+hash/AST checked; Unicode 16 normalization, legacy numeric-pass rollback,
+surrogates, whitespace and collision suffixes have focused coverage.
+
+API fixtures cover schema validation before authorization, exact unsubscribe
+fields without losing the stream, quiet session revocation, added/removed
+events, shared limits, lag and one terminal error on owner shutdown. Admin
+CRUD deliberately includes client secrets for source compatibility. The catalog
+is secret-free and lists actual registered providers only. A compiled process
+restores synthetic private SQLite records and streaming after restart and exits
+on SIGTERM with an open socket. No real credential or provider was used.
+
+Seven optimized CLI cases accept the example and empty configurations, null,
+empty, false and ignored Credentials parameters, and reject an unknown root
+key. They create no database or extra files and do not echo the ignored secret.
+The mDNS backend retains actual joins and port-release assertions; fixtures now
+claim process-unique custom ports after a prior overlap-compatible failure.
+
+The inventory is 45 partial / 1,520 unported / zero complete. Production OAuth
+platforms, autoload, the full provider catalog, code exchange, callback flows,
+refresh and real-provider acceptance remain open. The isolated next OAuth SDK
+and its checks are outside this 40-crate acceptance.
+
 ## Accepted local Hardware source (39 crates)
 
 The final workspace passes **970 tests across 110 targets**, with no failed

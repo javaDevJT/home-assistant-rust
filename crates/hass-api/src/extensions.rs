@@ -186,6 +186,8 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
     }
     kind.starts_with("config/auth/")
         || kind.starts_with("config_entries/")
+        || (kind.starts_with("application_credentials/")
+            && kind != "application_credentials/config")
         || kind == "config/core/update"
         || matches!(kind, "zone/create" | "zone/update" | "zone/delete")
         || matches!(kind, "person/create" | "person/update" | "person/delete")
@@ -275,6 +277,27 @@ pub(crate) fn same_authority(left: &Identity, right: &Identity) -> bool {
         && left.can_read_states == right.can_read_states
         && left.can_control == right.can_control
         && left.local_only == right.local_only
+}
+
+/// Revalidate an administrator identity immediately before delivering a
+/// secret-bearing Application Credentials result or subscription frame.
+pub(crate) async fn revalidate_admin_authority(
+    state: &AppState,
+    token: &str,
+    identity: &mut Identity,
+    origin: &crate::network::ClientOrigin,
+) -> bool {
+    match authenticate_token(state, token).await {
+        Ok(current)
+            if current.is_admin
+                && same_authority(identity, &current)
+                && (!current.local_only || origin.is_local) =>
+        {
+            *identity = current;
+            true
+        }
+        _ => false,
+    }
 }
 
 pub(crate) async fn handle_ws(

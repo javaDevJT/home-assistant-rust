@@ -1,0 +1,23 @@
+[package]
+name = "hass-application-credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+futures-util.workspace = true
+hass-config.workspace = true
+hass-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+unicode-normalization.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+hass-storage.workspace = true
+tempfile.workspace = true

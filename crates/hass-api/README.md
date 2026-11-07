@@ -315,3 +315,22 @@ Unsubscribe/disconnect releases the exact sampler guard; the final subscriber
 stops further reads. Owner shutdown closes receivers and joins admitted
 metrics and hardware-info callbacks, including canceled callers. See the
 [Hardware contract](../../docs/HARDWARE-PORT.md) for payloads and platform limits.
+
+### Application Credentials
+
+`application_credentials/list`, `create`, `update`, `delete`, `subscribe` and
+`config_entry` require an administrator. The source-compatible admin records
+include `client_secret`. `application_credentials/config` is available to
+authenticated users and returns the secret-free catalog of loaded providers
+and their placeholders. No provider is inferred from static manifest metadata.
+
+Command schemas are validated before administrator checks. Updates remain
+unsupported; deletion checks actual config-entry use, including imported
+authorization aliases. A subscription acknowledges with null, then sends an
+array of `added` items, including an empty array for an empty collection. Live
+arrays use `change_type`, `application_credentials_id` and `item`. It shares
+the 32-subscription limit and rejects bounded-queue overflow explicitly.
+Delivery and idle polls revalidate the administrator session. Unsubscribe,
+disconnect and shutdown cancel and join the exact private forwarding task.
+Unexpected unsubscribe fields are rejected before any receiver is removed.
+See the [credential contract](../../docs/APPLICATION-CREDENTIALS-PORT.md).

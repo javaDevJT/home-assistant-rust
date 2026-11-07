@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, UdpSocket};
+use std::sync::Mutex;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -84,11 +86,16 @@ fn loopback_snapshot() -> Vec<NetworkInterface> {
 }
 
 fn custom_port() -> u16 {
+    // Daemon sockets intentionally use SO_REUSEPORT. An ephemeral reservation
+    // is released before their asynchronous bind, so parallel fixtures must
+    // never select the same port, even after another fixture releases it.
+    static CLAIMED: Mutex<Option<HashSet<u16>>> = Mutex::new(None);
     loop {
         let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("reserve custom UDP port");
         let port = socket.local_addr().expect("read custom UDP port").port();
-        drop(socket);
-        if port != mdns_sd::MDNS_PORT {
+        let fresh = port != mdns_sd::MDNS_PORT
+            && CLAIMED.lock().unwrap().get_or_insert_default().insert(port);
+        if fresh {
             return port;
         }
     }
@@ -175,8 +182,9 @@ async fn next_update_matching(
 }
 
 async fn assert_custom_port_released(port: u16) {
-    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
-        .expect("custom UDP port is released after daemon joins");
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).unwrap_or_else(|error| {
+        panic!("custom UDP port {port} remains bound after daemon joins: {error}")
+    });
     drop(socket);
 }
 

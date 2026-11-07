@@ -12959,7 +12959,55 @@
       "component_directory": "homeassistant/components/application_credentials/",
       "config_flow_classes": [],
       "domain": "application_credentials",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-application-credentials/Cargo.toml",
+        "crates/hass-application-credentials/README.md",
+        "crates/hass-application-credentials/PROVENANCE/NOTICE.md",
+        "crates/hass-application-credentials/data/cpython-PSF-2.0-LICENSE.txt",
+        "crates/hass-application-credentials/data/html4-name2codepoint.tsv",
+        "crates/hass-application-credentials/data/text-unidecode-1.3.bin",
+        "crates/hass-application-credentials/data/text-unidecode-LICENSE.txt",
+        "crates/hass-application-credentials/data/unicode-license.txt",
+        "crates/hass-application-credentials/data/unicode16-decimal-zeroes.txt",
+        "crates/hass-application-credentials/src/lib.rs",
+        "crates/hass-application-credentials/src/slug.rs",
+        "crates/hass-application-credentials/tests/native_sdk.rs",
+        "crates/hass-application-credentials/tests/native_sdk.rs#platform_closure_destructors_can_release_nested_registration_guards",
+        "crates/hass-application-credentials/tests/native_sdk.rs#unicode_credential_ids_follow_pinned_transliteration_and_collision_suffixes",
+        "crates/hass-application-credentials/tests/native_sdk.rs#create_trims_required_values_persists_optional_fields_and_builds_default_descriptor",
+        "crates/hass-application-credentials/tests/native_sdk.rs#source_config_catalog_invokes_placeholders_and_lists_only_loaded_providers",
+        "crates/hass-application-credentials/tests/native_sdk.rs#imported_alias_is_resolved_and_delete_guard_protects_alias_and_stable_id",
+        "crates/hass-application-credentials/tests/native_sdk.rs#duplicate_aliases_preserve_source_last_value_and_block_live_deletion",
+        "crates/hass-application-credentials/tests/native_sdk.rs#custom_factory_is_invoked_and_wins_over_default_factory",
+        "crates/hass-application-credentials/tests/native_sdk.rs#duplicate_or_absent_provider_and_unsupported_update_follow_source_contract",
+        "crates/hass-application-credentials/tests/native_sdk.rs#observer_snapshot_is_race_free_and_stream_is_bounded_to_64_events",
+        "crates/hass-application-credentials/tests/native_sdk.rs#failed_persistence_does_not_change_memory_or_publish_events",
+        "crates/hass-application-credentials/tests/native_sdk.rs#sqlite_reopen_retains_exact_record_and_future_or_malformed_store_is_preserved",
+        "crates/hass-application-credentials/tests/native_sdk.rs#shutdown_clears_callbacks_closes_subscriptions_and_joins_admitted_callbacks",
+        "crates/hass-application-credentials/src/slug.rs#keeps_empty_input_and_uses_unknown_for_empty_slugs",
+        "crates/hass-application-credentials/src/slug.rs#transliterates_latin_cjk_and_greek_with_the_pinned_table",
+        "crates/hass-application-credentials/src/slug.rs#decodes_named_decimal_and_hex_entities_after_transliteration",
+        "crates/hass-application-credentials/src/slug.rs#numeric_reference_passes_roll_back_on_conversion_errors",
+        "crates/hass-application-credentials/src/slug.rs#follows_ascii_delimiters_and_default_unbounded_length",
+        "crates/hass-api/src/application_credentials.rs",
+        "crates/hass-api/src/lib.rs",
+        "crates/hass-api/src/websocket.rs",
+        "crates/hass-api/tests/application_credentials_protocol.rs",
+        "crates/hass-api/tests/application_credentials_protocol.rs#schema_validation_precedes_admin_checks_and_invalid_unsubscribe_keeps_stream",
+        "crates/hass-api/tests/application_credentials_protocol.rs#revoked_admin_session_closes_a_quiet_credential_subscription",
+        "crates/hass-api/tests/application_credentials_protocol.rs#owner_shutdown_emits_one_terminal_error_and_keeps_the_socket_usable",
+        "crates/hass-api/tests/application_credentials_protocol.rs#websocket_admin_boundary_and_public_catalog_match_source_contract",
+        "crates/hass-api/tests/application_credentials_protocol.rs#config_entry_returns_stable_id_and_delete_guard_checks_compatibility_alias",
+        "crates/hass-api/tests/application_credentials_protocol.rs#subscription_ack_precedes_snapshot_and_unsubscribe_stops_live_changes",
+        "crates/hass-api/tests/application_credentials_protocol.rs#subscription_limit_is_shared_with_native_subscriptions_and_releases_slots",
+        "crates/hass-api/tests/application_credentials_protocol.rs#admin_subscription_closes_before_a_secret_event_after_role_demotion",
+        "crates/hass-api/tests/application_credentials_protocol.rs#bounded_subscription_overflow_is_terminal_and_releases_the_subscription_id",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/main.rs",
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass/src/config.rs#application_credentials_yaml_does_not_export_ignored_secret_parameters",
+        "crates/hass/tests/end_to_end.rs#real_process_credentials_restore_private_records_and_stream_after_restart"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -12977,10 +13025,10 @@
       },
       "manifest_blob_oid": "80566448af85ed716be8005bb211c938dfc0dde3",
       "manifest_path": "homeassistant/components/application_credentials/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "The native host has no production registered OAuth providers, provider autoloading, or static 54-provider catalog. The config_entry flow remains dependent on an actually loaded platform callback, and the app currently registers none. OAuth code exchange, callbacks, token refresh, and real provider behavior are not implemented or tested. Full pinned upstream setup, authorization, provider, and failure acceptance remains open. No secret zeroization guarantee is claimed.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "15_cloud_http_auth_webhook",
       "protocol_families": [
         "cloud_http_auth_webhook"
@@ -168414,6 +168462,109 @@
         "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests."
       },
       {
+        "domain": "application_credentials",
+        "local_evidence": [
+          {
+            "path": "crates/hass-application-credentials/Cargo.toml"
+          },
+          {
+            "path": "crates/hass-application-credentials/README.md"
+          },
+          {
+            "path": "crates/hass-application-credentials/PROVENANCE/NOTICE.md"
+          },
+          {
+            "path": "crates/hass-application-credentials/data/cpython-PSF-2.0-LICENSE.txt"
+          },
+          {
+            "path": "crates/hass-application-credentials/data/html4-name2codepoint.tsv"
+          },
+          {
+            "path": "crates/hass-application-credentials/data/text-unidecode-1.3.bin"
+          },
+          {
+            "path": "crates/hass-application-credentials/data/text-unidecode-LICENSE.txt"
+          },
+          {
+            "path": "crates/hass-application-credentials/data/unicode-license.txt"
+          },
+          {
+            "path": "crates/hass-application-credentials/data/unicode16-decimal-zeroes.txt"
+          },
+          {
+            "path": "crates/hass-application-credentials/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-application-credentials/src/slug.rs",
+            "test_functions_present": [
+              "keeps_empty_input_and_uses_unknown_for_empty_slugs",
+              "transliterates_latin_cjk_and_greek_with_the_pinned_table",
+              "decodes_named_decimal_and_hex_entities_after_transliteration",
+              "numeric_reference_passes_roll_back_on_conversion_errors",
+              "follows_ascii_delimiters_and_default_unbounded_length"
+            ]
+          },
+          {
+            "path": "crates/hass-application-credentials/tests/native_sdk.rs",
+            "test_functions_present": [
+              "platform_closure_destructors_can_release_nested_registration_guards",
+              "unicode_credential_ids_follow_pinned_transliteration_and_collision_suffixes",
+              "create_trims_required_values_persists_optional_fields_and_builds_default_descriptor",
+              "source_config_catalog_invokes_placeholders_and_lists_only_loaded_providers",
+              "imported_alias_is_resolved_and_delete_guard_protects_alias_and_stable_id",
+              "duplicate_aliases_preserve_source_last_value_and_block_live_deletion",
+              "custom_factory_is_invoked_and_wins_over_default_factory",
+              "duplicate_or_absent_provider_and_unsupported_update_follow_source_contract",
+              "observer_snapshot_is_race_free_and_stream_is_bounded_to_64_events",
+              "failed_persistence_does_not_change_memory_or_publish_events",
+              "sqlite_reopen_retains_exact_record_and_future_or_malformed_store_is_preserved",
+              "shutdown_clears_callbacks_closes_subscriptions_and_joins_admitted_callbacks"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/application_credentials.rs"
+          },
+          {
+            "path": "crates/hass-api/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-api/src/websocket.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/application_credentials_protocol.rs",
+            "test_functions_present": [
+              "schema_validation_precedes_admin_checks_and_invalid_unsubscribe_keeps_stream",
+              "revoked_admin_session_closes_a_quiet_credential_subscription",
+              "owner_shutdown_emits_one_terminal_error_and_keeps_the_socket_usable",
+              "websocket_admin_boundary_and_public_catalog_match_source_contract",
+              "config_entry_returns_stable_id_and_delete_guard_checks_compatibility_alias",
+              "subscription_ack_precedes_snapshot_and_unsubscribe_stops_live_changes",
+              "subscription_limit_is_shared_with_native_subscriptions_and_releases_slots",
+              "admin_subscription_closes_before_a_secret_event_after_role_demotion",
+              "bounded_subscription_overflow_is_terminal_and_releases_the_subscription_id"
+            ]
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "application_credentials_yaml_does_not_export_ignored_secret_parameters"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_credentials_restore_private_records_and_stream_after_restart"
+            ]
+          }
+        ],
+        "remaining": "The native host has no production registered OAuth providers, provider autoloading, or static 54-provider catalog. The config_entry flow remains dependent on an actually loaded platform callback, and the app currently registers none. OAuth code exchange, callbacks, token refresh, and real provider behavior are not implemented or tested. Full pinned upstream setup, authorization, provider, and failure acceptance remains open. No secret zeroization guarantee is claimed.",
+        "status": "partial",
+        "verification": "Root's final exact-source 40-crate gate passes 998 tests across 114 targets (0 failed, 0 ignored), formatting, strict locked offline all-target Clippy and the optimized workspace build. Focused evidence is 12 SDK tests, five slug tests, nine API protocol tests, one YAML configuration test, and one compiled-process restart test. SDK evidence covers owned/weak handles, loaded-provider callbacks/catalog, persistence-before-events and failure atomicity, temporary SQLite reopen, stable IDs and import-alias in-use guards. API evidence covers schema validation before authorization, subscription lifecycle/revocation, overflow, and the shared limit. Seven optimized CLI cases pass without database/extra-file creation or ignored-secret echo. Optimized macOS SHA-256 is 6a517d876da5d337f80f8656e91ddb29b6a1f4f3a0604178db097c448bb17d57. Publication and exact Linux CI are pending. No production OAuth provider, external code exchange, or real-provider activity is claimed; the inventory writer did not run tests."
+      },
+      {
         "domain": "auth",
         "local_evidence": [
           {
@@ -170650,10 +170801,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 44,
+    "partial": 45,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1521
+    "unported": 1520
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

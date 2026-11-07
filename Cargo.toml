@@ -22,6 +22,7 @@ members = [
     "crates/hass-usb-backend",
     "crates/hass-hardware",
     "crates/hass-hardware-metrics",
+    "crates/hass-application-credentials",
 ]
 
 [workspace.package]
@@ -39,6 +40,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+unicode-normalization = "=0.1.24"
 hass-core = { path = "crates/hass-core" }
 hass-storage = { path = "crates/hass-storage" }
 hass-automation = { path = "crates/hass-automation" }
@@ -77,6 +79,7 @@ hass-usb = { path = "crates/hass-usb" }
 hass-usb-backend = { path = "crates/hass-usb-backend" }
 hass-hardware = { path = "crates/hass-hardware" }
 hass-hardware-metrics = { path = "crates/hass-hardware-metrics" }
+hass-application-credentials = { path = "crates/hass-application-credentials" }
 idna = "=1.1.0"
 pnet_datalink = "=0.35.0"
 stringprep = "=0.1.5"

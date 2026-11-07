@@ -43,6 +43,7 @@ use tracing_subscriber::prelude::*;
 const DHCP_CONFIGURATION_WARNING: &str = "The dhcp integration does not support configuration parameters; remove the parameters from configuration.";
 const USB_CONFIGURATION_WARNING: &str = "The usb integration does not support configuration parameters; remove the parameters from configuration.";
 const HARDWARE_CONFIGURATION_WARNING: &str = "The hardware integration does not support configuration parameters; remove the parameters from configuration.";
+const APPLICATION_CREDENTIALS_CONFIGURATION_WARNING: &str = "The application_credentials integration does not support configuration parameters; remove the parameters from configuration.";
 
 #[derive(Parser)]
 #[command(
@@ -110,6 +111,9 @@ async fn main() -> Result<()> {
         }
         if config.hardware_has_parameters() {
             eprintln!("{HARDWARE_CONFIGURATION_WARNING}");
+        }
+        if config.application_credentials_has_parameters() {
+            eprintln!("{APPLICATION_CREDENTIALS_CONFIGURATION_WARNING}");
         }
         println!("Configuration valid (supported Rust subset)");
         return Ok(());
@@ -241,6 +245,22 @@ async fn main() -> Result<()> {
     if config.hardware_has_parameters() {
         tracing::error!(target: "hass::hardware", "{HARDWARE_CONFIGURATION_WARNING}");
     }
+    if config.application_credentials_has_parameters() {
+        tracing::error!(target: "hass::application_credentials", "{APPLICATION_CREDENTIALS_CONFIGURATION_WARNING}");
+    }
+    let application_credentials = if config.application_credentials_enabled {
+        Some(
+            hass_application_credentials::ApplicationCredentialsIntegration::new(
+                runtime.clone(),
+                config_entries.clone(),
+            )?,
+        )
+    } else {
+        None
+    };
+    let application_credentials_manager = application_credentials
+        .as_ref()
+        .map(hass_application_credentials::ApplicationCredentialsIntegration::manager);
     let discovery_dispatcher = discovery::DiscoveryDispatcher::new(config_entries.clone());
     let mut dhcp = if config.dhcp_enabled {
         Some(dhcp::DhcpHost::start(
@@ -496,6 +516,7 @@ async fn main() -> Result<()> {
             usb: usb_manager,
             usb_usage,
             hardware: hardware_manager,
+            application_credentials: application_credentials_manager,
             network_adapters: Some(network_adapter_manager),
         },
         Some(shutdown_rx),
@@ -506,6 +527,9 @@ async fn main() -> Result<()> {
     );
     let result = axum_serve(listener, app, shutdown_tx, restart.receiver()).await;
     let restart_requested = restart.requested();
+    if let Some(application_credentials) = &application_credentials {
+        application_credentials.shutdown().await;
+    }
     let hardware_result = if let Some(hardware) = &mut hardware {
         hardware.shutdown().await
     } else {

@@ -8,6 +8,110 @@ The primary owns the workspace manifest/dependencies, app configuration and inte
 
 ## Current wave contracts
 
+### Credentials integration and OAuth client corrections (2026-11-07)
+
+Root owns the enrolled member-40 Credentials SDK, API, app wiring and shared
+manifests. Released builders v107/v108 and reviews v110/v113 are consumed;
+root fixed platform-destructor lock reentry and retains the source's loaded
+platform prerequisite for config-entry lookup. Root corrected schema-before-
+authorization ordering and strict unsubscribe fields. Unicode owner v115 is
+released; root integrated its corrected module/data/notices, dependency and call
+site. The first full member-40 gate exposed an mDNS loopback port collision;
+the read-only investigation found that fixtures release ephemeral reservations
+and reuse-port sockets can overlap. Root owns deterministic fixture isolation
+and the final release check. The final exact-source gate passes 998 tests over
+114 targets (zero failed or ignored), formatting and strict locked offline
+workspace all-target Clippy and the optimized workspace build. Seven optimized
+CLI cases pass without extra files/database or ignored-secret echo. The macOS
+binary SHA-256 is `6a517d876da5d337f80f8656e91ddb29b6a1f4f3a0604178db097c448bb17d57`.
+Publication and exact Linux CI remain pending. Inventory correction v99 is
+released with 45 partial / 1,520 unported / zero complete; root reviews its
+semantic delta and evidence before publishing.
+
+The primary's nine loopback API cases now pass, including malformed non-admin
+requests, strict unsubscribe without removing the stream, quiet session
+revocation, live removal and one terminal error on owner shutdown. The previous
+full API run and strict workspace Clippy pass; they predate the final owner-stop
+correction and Unicode integration and are not the final wave receipt. All four
+mDNS backend fixtures pass with process-unique custom ports; the real join and
+port-release assertions remain. The collision mechanism is consistent with
+reuse-port fixture overlap; the original failure did not record its port, so a
+particular competing holder was not identified. No production socket behavior
+was weakened.
+
+The first final-gate compilation was interrupted before any test target ran:
+the host had only 6.9 GiB free. Root stopped its Cargo and the reviewer stopped
+its isolated probe, verified no compiler remained, and used Cargo's scoped
+debug-profile cleanup. Cargo reports 197.3 GiB of generated artifacts removed;
+free space recovered to 154 GiB. Source, stores, optimized binaries and other
+projects were retained. Subsequent gates use four build jobs with incremental
+compilation disabled; this changes cache use, not test behavior. The interrupted
+log is not a passing test receipt.
+
+Correction `/root/oauth_client_corrections_v116` is released: root consumes the released v111 SDK and
+v112 review. Exclusive write scope is `crates/hass-oauth2-client/**`, still an
+isolated future workspace outside member 40. Correct fresh-token validation,
+reserved authorization query parameters, transport policy and cancellation-safe
+refresh persistence without overwriting newer account credentials. Verify with
+owned loopback fixtures and injected stores/clocks; no real providers, tokens,
+credentials, root manifests, shared docs or Git changes. Base is
+`5ea6c85f6f257e558a467f70ade512632f8ec87d` plus the released isolated SDK.
+The live native catalog exposes one Luna member, `gpt-6-luna`, at maximum
+supported effort `max`; dispatch requests both explicitly with no history fork.
+Backend identity and tier remain unexposed. No children. Release on a concise
+handoff with changes, checks, lifecycle proof and residual decisions; root
+reviews and integrates independently.
+
+v116 reports 21 isolated loopback/store tests plus strict Clippy and formatting
+passing. Its session-bound authorization carries a factory account revision;
+unbound tokens can create only empty, untouched accounts. Admitted refresh/save
+commits have tracked ownership and an explicit shutdown barrier. Actual store
+failure after provider rotation remains an explicit error. No member-41
+acceptance or root enrollment is implied. Released `/root/oauth_commit_review_v118`
+reads only the frozen isolated crate to challenge cancellation, admission,
+job joining and account-revision races. Same explicit `gpt-6-luna`/`max` native
+policy and base; no children or source edits. Root consumes a concise evidence-
+backed handoff and performs integration checks; completion releases the reviewer.
+
+v118 is released with three confirmed concerns: token-save permits lacked
+factory/client identity, an unreachable pending job could retain its factory,
+and pruning finished job handles could hide a panic from shutdown. The loopback
+probe accepted a cross-factory save; its follow-up overwrite probe did not run
+because of a compile error. Root owns corrections and focused regression tests.
+Primary review also found valid expiry coercions and receipt-time expiry need
+correction. These findings remain outside member 40.
+
+Root corrected those three findings with factory/client-bound permits, a
+separate last-owner cancellation guard and retained panic results during join
+handle reaping. Successful shutdown joins admitted commits; last-owner Drop
+closes admission and aborts retained work as a cleanup fallback. Token loads now
+share the owned job path. Refresh expiry uses response receipt time; valid
+Python integer coercions, Unicode 16 decimal digits and finite floats normalize
+to integer lifetimes, while bool/null/invalid/zero/overflow remain typed errors.
+All 27 isolated tests, strict all-target Clippy and formatting pass. Queued
+`oauth_lifecycle_review_v119` reads the frozen corrected SDK to challenge the
+new owner/abort/coordinator path and permit binding. No source changes,
+providers, children or Git; same explicit native `gpt-6-luna`/`max` policy.
+Root consumes the evidence and performs final integration checks; completion
+releases the reviewer. This is still outside the member-40 receipt.
+
+Released `/root/oauth_flow_contract_v117` owns only an additive host-flow section in
+`docs/OAUTH2-CLIENT-PORT.md`. Root will consume its pinned-source contracts for
+external-step/done serialization, callback routing, private flow proof state,
+config-entry creation and reauthentication. It must distinguish provider OAuth
+from native login and identify current Rust seams and concrete loopback
+falsifiers. Read-only source analysis plus that document; no SDK/API/app or
+manifest edits, code execution from upstream, real providers or child agents.
+Same base and explicit native `gpt-6-luna`/`max` policy as v116; backend/tier
+unexposed. Release after evidence-backed handoff; root integrates the contract.
+
+Released inventory correction `/root/usb_inventory_v99` owns only PARITY.md and
+upstream-parity.json for Application Credentials. Its native subset evidence
+must keep OAuth engines/providers and full upstream acceptance open. Root supplies
+the final build/hash/CI receipts; no worker Git mutations or inferred receipts.
+This intentional same-scope follow-up retains the already configured native
+`gpt-6-luna`/`max` worker; root verifies semantic row deltas and all evidence.
+
 ### USB native boundary and next Hardware audit (2026-11-07)
 
 Root integrates the released USB SDK, Linux/Darwin backend, admin API adapter,

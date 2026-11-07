@@ -8,6 +8,7 @@
 //! request handlers while draining; this hook closes WebSocket sessions so that
 //! an idle client cannot hold that drain open indefinitely.
 
+mod application_credentials;
 mod config_entries;
 mod config_subentries;
 mod dhcp;
@@ -81,6 +82,10 @@ pub struct ApiFeatures {
     pub network_adapters: Option<hass_network::NetworkManager>,
     pub usb: Option<hass_usb::UsbManager>,
     pub usb_usage: Option<Arc<dyn UsbUsageProvider>>,
+    /// Weak bridge to the application's owned Application Credentials integration.
+    /// The application must keep the integration itself alive.
+    pub application_credentials:
+        Option<hass_application_credentials::ApplicationCredentialsManager>,
 }
 
 pub use usb::{UsbDiscoveryFlowUsage, UsbUsageClaim, UsbUsageProvider, UsbUsageSnapshot};

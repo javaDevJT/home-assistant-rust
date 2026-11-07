@@ -222,6 +222,121 @@ automation:
 
 #[cfg(unix)]
 #[tokio::test]
+async fn real_process_credentials_restore_private_records_and_stream_after_restart() {
+    use futures_util::StreamExt;
+    use hass_application_credentials::{
+        ApplicationCredentialsIntegration, ApplicationCredentialsPlatform, AuthorizationServer,
+        CreateCredential,
+    };
+    use std::sync::Arc;
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("state.sqlite");
+    let expected = {
+        let store = Arc::new(hass_storage::SqliteStore::open(&database).unwrap());
+        let runtime = hass_core::Runtime::new(store).unwrap();
+        let entries = hass_config::ConfigEntries::new(runtime.clone()).unwrap();
+        let owner = ApplicationCredentialsIntegration::new(runtime, entries).unwrap();
+        let _platform = owner
+            .platform_registry()
+            .register(
+                "fixture_credentials",
+                ApplicationCredentialsPlatform::new().with_authorization_server_factory(|_| {
+                    Box::pin(async {
+                        Ok(AuthorizationServer {
+                            authorize_url: "https://provider.invalid/authorize".into(),
+                            token_url: "https://provider.invalid/token".into(),
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        let record = owner
+            .manager()
+            .create_admin(CreateCredential {
+                domain: "fixture_credentials".into(),
+                client_id: " fixture-client ".into(),
+                client_secret: " dummy-fixture-secret ".into(),
+                auth_domain: None,
+                name: Some("Fixture application".into()),
+            })
+            .unwrap();
+        owner.shutdown().await;
+        serde_json::to_value(record).unwrap()
+    };
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        "application_credentials:\nrecorder:\n  db_path: state.sqlite\n",
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let mut server = Server::start(&config).await;
+        let public: Value = server.get("/api/config").await.json().await.unwrap();
+        assert!(
+            public["components"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("application_credentials"))
+        );
+        assert!(!public.to_string().contains("dummy-fixture-secret"));
+        let mut socket = authenticated_socket(&server).await;
+        let listed = ws_command(
+            &mut socket,
+            json!({"id":1,"type":"application_credentials/list"}),
+        )
+        .await;
+        assert_eq!(listed["success"], true, "{listed}");
+        assert_eq!(listed["result"], json!([expected.clone()]));
+        let acknowledgement = ws_command(
+            &mut socket,
+            json!({"id":2,"type":"application_credentials/subscribe"}),
+        )
+        .await;
+        assert_eq!(acknowledgement["success"], true, "{acknowledgement}");
+        assert_eq!(acknowledgement["result"], Value::Null);
+        let initial = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let initial: Value = serde_json::from_str(initial.to_text().unwrap()).unwrap();
+        assert_eq!(
+            initial,
+            json!({"id":2,"type":"event","event":[{"change_type":"added","application_credentials_id":expected["id"].clone(),"item":expected.clone()}]})
+        );
+        let catalog = ws_command(
+            &mut socket,
+            json!({"id":3,"type":"application_credentials/config"}),
+        )
+        .await;
+        assert_eq!(catalog["success"], true, "{catalog}");
+        assert_eq!(
+            catalog["result"]["domains"],
+            json!([]),
+            "stored credentials do not fabricate a loaded native provider"
+        );
+        assert!(!catalog.to_string().contains("dummy-fixture-secret"));
+        let pid = server.child.id().unwrap();
+        assert!(
+            std::process::Command::new("/bin/kill")
+                .arg("-TERM")
+                .arg(pid.to_string())
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(5), server.child.wait())
+                .await
+                .expect("credential owner must join with a subscribed socket open")
+                .unwrap()
+                .success()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn real_process_hardware_info_uses_loaded_providers_and_joins_idle_sampler() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("configuration.yaml");

@@ -63,6 +63,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | DHCP | Native observation cache/matching, selected passive capture, Linux PTR/neighbor scans, tracker and config-flow bridges, admin WebSocket feed |
 | USB | Native Linux/Darwin serial enumeration, owned hotplug/polling, scanner SDK, discovery/removal and admin port usage APIs |
 | Hardware | Loaded-provider records, shared native CPU/memory sampler and authenticated private status subscriptions |
+| Application Credentials | Private client registrations, loaded-provider factories, admin CRUD and bounded private collection streams |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -94,6 +95,8 @@ cargo test --workspace --locked
 - [Native Hardware SDK, provider ownership and sampler checks](crates/hass-hardware/README.md)
 - [Native platform metrics and psutil source provenance](crates/hass-hardware-metrics/README.md)
 - [Application Credentials storage, provider and OAuth boundary](docs/APPLICATION-CREDENTIALS-PORT.md)
+- [External OAuth client and host-flow source contracts](docs/OAUTH2-CLIENT-PORT.md)
+- [Native Application Credentials SDK and private collection lifecycle](crates/hass-application-credentials/README.md)
 - [Native USB SDK and synthetic lifecycle checks](crates/hass-usb/README.md)
 - [Native serial backend provenance](crates/hass-usb-backend/THIRD-PARTY-NOTICES.md)
 - [Native SSDP SDK, scanner and UPnP server APIs](crates/hass-ssdp/README.md)

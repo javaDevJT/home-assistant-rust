@@ -24,6 +24,7 @@ use tokio::{
 use tracing::{Instrument, debug_span};
 
 use crate::AppState;
+use crate::application_credentials::CredentialStream;
 use crate::dhcp::DhcpStream;
 use crate::hardware::HardwareStatusStream;
 use crate::ssdp::SsdpStream;
@@ -155,6 +156,7 @@ async fn handle_socket(
     let mut zeroconf_streams = HashMap::<u64, ZeroconfStream>::new();
     let mut dhcp_streams = HashMap::<u64, DhcpStream>::new();
     let mut hardware_streams = HashMap::<u64, HardwareStatusStream>::new();
+    let mut credential_streams = HashMap::<u64, CredentialStream>::new();
     let mut last_command_id: Option<u64> = None;
     let mut native = crate::subscriptions::NativeSubscriptions::new(
         state.api.runtime.clone(),
@@ -498,6 +500,88 @@ async fn handle_socket(
                         break 'connection;
                     }
                 }
+
+                let mut credential_frames = Vec::new();
+                let mut credential_errors = Vec::new();
+                let mut finished_credentials = Vec::new();
+                for (id, stream) in &mut credential_streams {
+                    let mut pending_frames = Vec::new();
+                    let mut disconnected = false;
+                    for _ in 0..stream.capacity() {
+                        match stream.try_recv() {
+                            Ok(frame) => pending_frames.push(frame),
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                disconnected = true;
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(error) = stream.take_error() {
+                        // Once the SDK reports lag, buffered frames are an
+                        // incomplete change history and must not be delivered.
+                        credential_errors.push((*id, error.to_string()));
+                        finished_credentials.push(*id);
+                    } else if disconnected {
+                        credential_errors.push((*id, "Credential subscription event channel is closed".to_owned()));
+                        finished_credentials.push(*id);
+                    } else {
+                        credential_frames.extend(pending_frames);
+                        if stream.is_finished() && !finished_credentials.contains(id) {
+                            finished_credentials.push(*id);
+                        }
+                    }
+                }
+                for id in finished_credentials {
+                    if let Some(stream) = credential_streams.remove(&id) {
+                        stream.cancel().await;
+                    }
+                }
+
+                // Recheck even while an admin stream is quiet, then again
+                // immediately before each secret-bearing frame is sent.
+                if (!credential_streams.is_empty()
+                    || !credential_frames.is_empty()
+                    || !credential_errors.is_empty())
+                    && !crate::extensions::revalidate_admin_authority(
+                        &state,
+                        &token,
+                        &mut identity,
+                        &origin,
+                    )
+                    .await
+                {
+                    close_socket(&mut socket).await;
+                    break 'connection;
+                }
+                for frame in credential_frames {
+                    if !crate::extensions::revalidate_admin_authority(
+                        &state,
+                        &token,
+                        &mut identity,
+                        &origin,
+                    )
+                    .await
+                    {
+                        close_socket(&mut socket).await;
+                        break 'connection;
+                    }
+                    if send_json(&mut socket, &frame).await.is_err() {
+                        break 'connection;
+                    }
+                }
+                for (id, error) in credential_errors {
+                    if send_error(
+                        &mut socket,
+                        id,
+                        WsError::new("application_credentials_stream_error", error),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break 'connection;
+                    }
+                }
             }
             _ = &mut shutdown_wait => {
                 close_socket(&mut socket).await;
@@ -563,6 +647,17 @@ async fn handle_socket(
                                 }
                             }
                         }
+                        if let Err(error) = crate::application_credentials::validate_schema(command_type, object) {
+                            if send_error(&mut socket, id, map_application_credentials_error(error)).await.is_err() { break; }
+                            continue;
+                        }
+                        if command_type == "unsubscribe_events"
+                            && (!object.keys().all(|key| matches!(key.as_str(), "id" | "type" | "subscription"))
+                                || !object.get("subscription").and_then(Value::as_u64).is_some_and(|id| id > 0))
+                        {
+                            if send_error(&mut socket, id, WsError::new("invalid_format", "Expected only id, type and a positive subscription id")).await.is_err() { break; }
+                            continue;
+                        }
                         if matches!(command_type, "ssdp/subscribe_discovery" | "zeroconf/subscribe_discovery" | "dhcp/subscribe_discovery") && !identity.is_admin {
                             if send_error(&mut socket,id,WsError::new("unauthorized","Unauthorized")).await.is_err() {break;}
                             continue;
@@ -574,7 +669,7 @@ async fn handle_socket(
                         if (crate::subscriptions::is_subscription_command(command_type)
                             || matches!(command_type, "dhcp/subscribe_discovery" | "hardware/subscribe_system_status"))
                             && !matches!(command_type, "unsubscribe_events" | "config_entries/flow/progress")
-                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams, &ssdp_streams, &zeroconf_streams, &dhcp_streams, &hardware_streams)
+                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams, &ssdp_streams, &zeroconf_streams, &dhcp_streams, &hardware_streams, &credential_streams)
                                 >= MAX_SUBSCRIPTIONS_PER_SOCKET
                         {
                             if send_error(
@@ -591,6 +686,7 @@ async fn handle_socket(
                         }
                         if crate::subscriptions::is_subscription_command(command_type)
                             && command_type != "unsubscribe_events"
+                            && command_type != "application_credentials/subscribe"
                         {
                             let manager=native.clone();let command=value.clone();
                             match run_blocking(move || manager.lock().map_err(|_|CoreError::Service("Subscription lock failed".into()))?.handle_command(&command)).await {
@@ -619,10 +715,12 @@ async fn handle_socket(
                             &mut zeroconf_streams,
                             &mut dhcp_streams,
                             &mut hardware_streams,
+                            &mut credential_streams,
                             &native,
                             (id, command_type),
                             object,
-                            (&identity, origin.clone()),
+                            (&mut identity, origin.clone()),
+                            &token,
                         )
                         .await
                         {
@@ -753,6 +851,9 @@ async fn handle_socket(
     for (_, stream) in dhcp_streams {
         stream.cancel().await;
     }
+    for (_, stream) in credential_streams {
+        stream.cancel().await;
+    }
 }
 
 async fn receive_auth(socket: &mut WebSocket) -> Option<String> {
@@ -787,6 +888,7 @@ fn active_subscription_count(
     zeroconf_streams: &HashMap<u64, ZeroconfStream>,
     dhcp_streams: &HashMap<u64, DhcpStream>,
     hardware_streams: &HashMap<u64, HardwareStatusStream>,
+    credential_streams: &HashMap<u64, CredentialStream>,
 ) -> usize {
     let native_count = native
         .lock()
@@ -800,6 +902,7 @@ fn active_subscription_count(
         .saturating_add(zeroconf_streams.len())
         .saturating_add(dhcp_streams.len())
         .saturating_add(hardware_streams.len())
+        .saturating_add(credential_streams.len())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -814,10 +917,15 @@ async fn handle_command(
     zeroconf_streams: &mut HashMap<u64, ZeroconfStream>,
     dhcp_streams: &mut HashMap<u64, DhcpStream>,
     hardware_streams: &mut HashMap<u64, HardwareStatusStream>,
+    credential_streams: &mut HashMap<u64, CredentialStream>,
     native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
     command: (u64, &str),
     message: &serde_json::Map<String, Value>,
-    client: (&crate::extensions::Identity, crate::network::ClientOrigin),
+    client: (
+        &mut crate::extensions::Identity,
+        crate::network::ClientOrigin,
+    ),
+    token: &str,
 ) -> bool {
     let (identity, origin) = client;
     let (id, command_type) = command;
@@ -835,8 +943,13 @@ async fn handle_command(
             .await
             .is_ok();
     }
-    if let Some(result) =
-        crate::extensions::handle_ws(state, identity, origin, &Value::Object(message.clone())).await
+    if let Some(result) = crate::extensions::handle_ws(
+        state,
+        identity,
+        origin.clone(),
+        &Value::Object(message.clone()),
+    )
+    .await
     {
         return send_core_result(socket, id, result.map_err(map_core_error))
             .await
@@ -846,6 +959,238 @@ async fn handle_command(
         "ping" => send_json(socket, &json!({ "id": id, "type": "pong" }))
             .await
             .is_ok(),
+        "application_credentials/list" => {
+            let Some(manager) = state.features.application_credentials.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "not_found",
+                        "Application Credentials integration is not loaded",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            match crate::application_credentials::list_admin(&manager, message) {
+                Ok(result) => {
+                    if !crate::extensions::revalidate_admin_authority(
+                        state, token, identity, &origin,
+                    )
+                    .await
+                    {
+                        close_socket(socket).await;
+                        return false;
+                    }
+                    send_success(socket, id, result).await.is_ok()
+                }
+                Err(error) => send_error(socket, id, map_application_credentials_error(error))
+                    .await
+                    .is_ok(),
+            }
+        }
+        "application_credentials/create" => {
+            let Some(manager) = state.features.application_credentials.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "not_found",
+                        "Application Credentials integration is not loaded",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            match crate::application_credentials::create_admin(&manager, message) {
+                Ok(result) => {
+                    if !crate::extensions::revalidate_admin_authority(
+                        state, token, identity, &origin,
+                    )
+                    .await
+                    {
+                        close_socket(socket).await;
+                        return false;
+                    }
+                    send_success(socket, id, result).await.is_ok()
+                }
+                Err(error) => send_error(socket, id, map_application_credentials_error(error))
+                    .await
+                    .is_ok(),
+            }
+        }
+        "application_credentials/update" => {
+            let Some(manager) = state.features.application_credentials.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "not_found",
+                        "Application Credentials integration is not loaded",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            match crate::application_credentials::update_admin(&manager, message) {
+                Ok(result) => send_success(socket, id, result).await.is_ok(),
+                Err(error) => send_error(socket, id, map_application_credentials_error(error))
+                    .await
+                    .is_ok(),
+            }
+        }
+        "application_credentials/delete" => {
+            let Some(manager) = state.features.application_credentials.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "not_found",
+                        "Application Credentials integration is not loaded",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            match crate::application_credentials::delete_admin(&manager, message) {
+                Ok(result) => send_success(socket, id, result).await.is_ok(),
+                Err(error) => send_error(socket, id, map_application_credentials_error(error))
+                    .await
+                    .is_ok(),
+            }
+        }
+        "application_credentials/config" => {
+            let Some(manager) = state.features.application_credentials.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "not_found",
+                        "Application Credentials integration is not loaded",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            match crate::application_credentials::config(&manager, message).await {
+                Ok(result) => send_success(socket, id, result).await.is_ok(),
+                Err(error) => send_error(socket, id, map_application_credentials_error(error))
+                    .await
+                    .is_ok(),
+            }
+        }
+        "application_credentials/config_entry" => {
+            let Some(manager) = state.features.application_credentials.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "not_found",
+                        "Application Credentials integration is not loaded",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            match crate::application_credentials::config_entry(&manager, message) {
+                Ok(result) => send_success(socket, id, result).await.is_ok(),
+                Err(error) => send_error(socket, id, map_application_credentials_error(error))
+                    .await
+                    .is_ok(),
+            }
+        }
+        "application_credentials/subscribe" => {
+            let Some(manager) = state.features.application_credentials.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "not_found",
+                        "Application Credentials integration is not loaded",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            if active_subscription_count(
+                native,
+                subscriptions,
+                raw_log_streams,
+                health_streams,
+                ssdp_streams,
+                zeroconf_streams,
+                dhcp_streams,
+                hardware_streams,
+                credential_streams,
+            ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("subscription_limit", "Subscription limit reached"),
+                )
+                .await
+                .is_ok();
+            }
+            let stream =
+                match crate::application_credentials::subscribe_admin(&manager, id, message) {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        return send_error(socket, id, map_application_credentials_error(error))
+                            .await
+                            .is_ok();
+                    }
+                };
+            credential_streams.insert(id, stream);
+            if send_success(socket, id, Value::Null).await.is_err() {
+                if let Some(stream) = credential_streams.remove(&id) {
+                    stream.cancel().await;
+                }
+                return false;
+            }
+            if !crate::extensions::revalidate_admin_authority(state, token, identity, &origin).await
+            {
+                close_socket(socket).await;
+                return false;
+            }
+            let Some(stream) = credential_streams.get_mut(&id) else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "application_credentials_stream_error",
+                        "Subscription closed",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            let Some(snapshot) = stream.initial_snapshot() else {
+                if let Some(stream) = credential_streams.remove(&id) {
+                    stream.cancel().await;
+                }
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new(
+                        "application_credentials_stream_error",
+                        "Subscription closed before its initial snapshot",
+                    ),
+                )
+                .await
+                .is_ok();
+            };
+            if !crate::extensions::revalidate_admin_authority(state, token, identity, &origin).await
+            {
+                close_socket(socket).await;
+                return false;
+            }
+            if send_json(socket, &snapshot).await.is_err() {
+                return false;
+            }
+            stream.start();
+            true
+        }
         "get_states" => {
             if !identity.can_read_states {
                 return send_success(socket, id, json!([])).await.is_ok();
@@ -920,6 +1265,7 @@ async fn handle_command(
                 zeroconf_streams,
                 dhcp_streams,
                 hardware_streams,
+                credential_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -952,6 +1298,7 @@ async fn handle_command(
                 zeroconf_streams,
                 dhcp_streams,
                 hardware_streams,
+                credential_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1073,6 +1420,15 @@ async fn handle_command(
                 None => false,
             };
             let removed_hardware = hardware_streams.remove(&subscription_id).is_some();
+            let mut credential_error = None;
+            let removed_credentials = match credential_streams.remove(&subscription_id) {
+                Some(stream) => {
+                    credential_error = stream.take_error().map(|error| error.to_string());
+                    stream.cancel().await;
+                    true
+                }
+                None => false,
+            };
             if !removed_event
                 && !removed_raw_log
                 && !removed_health
@@ -1080,6 +1436,7 @@ async fn handle_command(
                 && !removed_zeroconf
                 && !removed_dhcp
                 && !removed_hardware
+                && !removed_credentials
             {
                 return send_error(
                     socket,
@@ -1122,6 +1479,17 @@ async fn handle_command(
             {
                 return false;
             }
+            if let Some(error) = credential_error
+                && send_error(
+                    socket,
+                    subscription_id,
+                    WsError::new("application_credentials_stream_error", error),
+                )
+                .await
+                .is_err()
+            {
+                return false;
+            }
             send_success(socket, id, Value::Null).await.is_ok()
         }
         "ssdp/subscribe_discovery" => {
@@ -1152,6 +1520,7 @@ async fn handle_command(
                 zeroconf_streams,
                 dhcp_streams,
                 hardware_streams,
+                credential_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1196,6 +1565,7 @@ async fn handle_command(
                 zeroconf_streams,
                 dhcp_streams,
                 hardware_streams,
+                credential_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1247,6 +1617,7 @@ async fn handle_command(
                 zeroconf_streams,
                 dhcp_streams,
                 hardware_streams,
+                credential_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1391,6 +1762,7 @@ async fn handle_command(
                 zeroconf_streams,
                 dhcp_streams,
                 hardware_streams,
+                credential_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1497,6 +1869,7 @@ async fn handle_command(
                 zeroconf_streams,
                 dhcp_streams,
                 hardware_streams,
+                credential_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1822,6 +2195,10 @@ fn map_core_error(error: CoreError) -> WsError {
         CoreError::Storage(_) => WsError::new("unknown_error", "Internal server error"),
         CoreError::Service(_) => WsError::new("service_error", "Service call failed"),
     }
+}
+
+fn map_application_credentials_error(error: crate::application_credentials::ApiError) -> WsError {
+    WsError::new(error.code, error.message)
 }
 
 fn map_repairs_error(error: hass_repairs::RepairsError) -> WsError {
