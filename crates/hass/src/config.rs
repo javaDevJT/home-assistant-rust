@@ -46,6 +46,10 @@ pub struct Config {
     pub tag: serde_yaml::Value,
     #[serde(default)]
     pub logger: Option<hass_logger::LoggerConfig>,
+    #[serde(default)]
+    pub system_log: Option<hass_system_log::SystemLogConfig>,
+    #[serde(default, deserialize_with = "deserialize_sun")]
+    pub sun: bool,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
     pub sensor: Vec<crate::system_sensors::SystemSensorYamlPlatform>,
     #[serde(skip)]
@@ -236,6 +240,8 @@ impl Config {
                 "image_upload",
                 "tag",
                 "logger",
+                "system_log",
+                "sun",
                 "sensor",
                 "timer",
                 "input_button",
@@ -264,6 +270,9 @@ impl Config {
     fn validate(&self) -> Result<()> {
         if let Some(logger) = &self.logger {
             hass_logger::validate_config(logger)?;
+        }
+        if let Some(system_log) = &self.system_log {
+            hass_system_log::validate_config(system_log)?;
         }
         if !(1..=365_000).contains(&self.recorder.purge_keep_days) {
             bail!("recorder.purge_keep_days must be between 1 and 365000");
@@ -365,6 +374,8 @@ impl Config {
             "image_upload",
             "tag",
             "logger",
+            "system_log",
+            "sun",
             "webhook",
             "time_date",
             "uptime",
@@ -433,6 +444,20 @@ impl Config {
     }
 }
 
+fn deserialize_sun<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    if value.is_null() || value.as_mapping().is_some_and(|mapping| mapping.is_empty()) {
+        Ok(true)
+    } else {
+        Err(serde::de::Error::custom(
+            "sun accepts only an empty configuration section",
+        ))
+    }
+}
+
 fn deserialize_sensor_platforms<'de, D>(
     deserializer: D,
 ) -> std::result::Result<Vec<crate::system_sensors::SystemSensorYamlPlatform>, D::Error>
@@ -495,6 +520,38 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sun_yaml_import_requires_an_explicit_empty_section() {
+        assert!(!Config::parse("{}").unwrap().sun);
+        for source in ["sun:\n", "sun: {}\n"] {
+            assert!(Config::parse(source).unwrap().sun);
+        }
+        for source in ["sun: true\n", "sun: []\n", "sun:\n  unknown: true\n"] {
+            assert!(Config::parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn system_log_configuration_is_validated_before_runtime_setup() {
+        let config = Config::parse("system_log:\n  max_entries: 7\n  fire_event: true\n").unwrap();
+        let options = config.system_log.unwrap();
+        assert_eq!(options.max_entries, 7);
+        assert!(options.fire_event);
+        let config =
+            Config::parse("system_log:\n  max_entries: '0'\n  fire_event: ' yes '\n").unwrap();
+        let options = config.system_log.unwrap();
+        assert_eq!(options.max_entries, 0);
+        assert!(options.fire_event);
+        for source in [
+            "system_log:\n  max_entries: -1\n",
+            "system_log:\n  fire_event: invalid\n",
+            "system_log: []\n",
+            "system_log:\n  unsupported: true\n",
+        ] {
+            assert!(Config::parse(source).is_err(), "{source}");
+        }
+    }
 
     #[test]
     fn logger_configuration_is_validated_before_runtime_setup() {

@@ -179,3 +179,24 @@ Both require administrator authority, uppercase **level** and **persistence**
 The administrator-only HTTP/WebSocket logger services accept case-insensitive
 levels. These paths change the same filter attached to the application's real
 tracing output layer and publish **logging_changed** with an empty payload.
+
+**system_log/list** and **system_log/subscribe_raw** require an administrator.
+The list result is a newest-first array of retained warning-and-higher entries;
+messages remain arrays, source is a two-item array, and timestamps are Unix
+seconds. The raw subscription accepts an optional string **integration**;
+non-strings are
+invalid and unknown integrations return **not_found** / **Integration not
+found**. It acknowledges before its initial array event, including an empty
+array when no backlog is available, then sends coalesced arrays of formatted
+log lines at 500 ms intervals. Use **unsubscribe_events** with the subscription
+command id to stop it. Raw streams share the ordinary per-connection
+subscription limit and are released when unsubscribed, when the socket closes,
+or during API shutdown. The optional **system_log_event** bus event remains
+disabled by default and follows generic event permissions.
+
+Socket read, send and close future polling runs in the named
+**hass_raw_stream_delivery** tracing span so transport-level DEBUG and TRACE
+records do not echo into the raw stream. Command handling stays outside that
+span, preserving real DEBUG records emitted by **system_log.write**. The
+protocol fixture exercises this with logger level **NOTSET**, a WebSocket
+DEBUG write, and a 1.2-second quiet-stream window.

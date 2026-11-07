@@ -1,0 +1,14 @@
+This crate contains a Rust adaptation of solar position and event calculation
+formulas from Astral 2.2, Copyright 2009-2019 Simon Kennedy. The Astral 2.2
+source distribution is licensed under the Apache License, Version 2.0; this
+crate is also licensed under Apache-2.0.
+
+Upstream source: https://github.com/sffjunkie/astral
+Official Astral 2.2 source distribution:
+https://files.pythonhosted.org/packages/ad/c3/76dfe55a68c48a1a6f3d2eeab2793ebffa9db8adfba82774a7e0f5f43980/astral-2.2.tar.gz
+SHA-256: e41d9967d5c48be421346552f0f4dedad43ff39a83574f5ff2ad32b6627b6fbe
+
+Astral 2.2 documents its solar formulas as adapted from NOAA solar-calculator
+spreadsheets. Its refraction formula credits John C. Zimmerman and Robert
+Walraven. The upstream Apache License 2.0 text is included in this crate's
+`LICENSE` file.

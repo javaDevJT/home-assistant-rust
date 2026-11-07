@@ -71,6 +71,16 @@ Each script step must contain exactly one of:
 Choose/repeat conditions support state, numeric-state, template, and nested
 and/or/not forms. Templates in service data, target values, variables, and
 template conditions use the bounded `hass-template` expression interface.
+Sun elevation conditions accept `above` and `below` thresholds through
+`value`, and `between` and `outside` thresholds through `value_min` and
+`value_max`. Each bound uses either `number` or `entity`; entity-backed
+thresholds need a numeric Runtime state with `unit_of_measurement: "°"` or the
+condition evaluates false. Range endpoints are inclusive for `between` and
+exclusive for `outside`. Sun condition offsets accept `HH:MM` or
+`HH:MM:SS` with fractional seconds, retaining microseconds. This follows
+Home Assistant Core `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf`'s
+`components/sun/condition.py`, `helpers/selector.py`,
+`helpers/condition/entity_condition.py`, and `helpers/config_validation.py`.
 Every struct rejects unknown configuration keys. `for_each`, script `fields`,
 `max_exceeded`, blueprints, parallel/if/then action blocks, wait/event/time
 triggers, response variables, traces, and dynamic includes are unsupported and
@@ -127,3 +137,8 @@ and `--check` flows. `validate_sequence(&serde_json::Value)` and
 `run_sequence(runtime, sequence, variables, context, cancel)` expose the same
 action validator/executor for other native integrations; `run_sequence`
 preserves the caller-supplied causal context.
+
+Verification checkpoint: `cargo test -p hass-script --locked --offline` passed
+all 10 tests; strict package Clippy and formatting checks passed. Sun condition
+regressions are `script_sun_condition_offsets_accept_clocks_and_preserve_microseconds`
+and `script_sun_elevation_condition_matches_selector_and_degree_units`.

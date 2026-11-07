@@ -62,6 +62,7 @@ pub struct ApiFeatures {
     pub tags: Option<hass_tag::TagManager>,
     pub logger: Option<hass_logger::LoggerManager>,
     pub logger_catalog: Option<hass_logger::IntegrationCatalogProvider>,
+    pub system_log: Option<hass_system_log::SystemLogManager>,
 }
 
 #[derive(Clone)]

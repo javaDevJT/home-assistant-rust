@@ -52,7 +52,9 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Tags | Registry-backed collection, native reader callback, scan-triggered actions, private WebSocket feeds and history attribute projection |
 | Automation | State/event/numeric/template/time/MQTT/notification/webhook/tag/lifecycle triggers, conditions, execution modes |
 | Clock sensors | Time/date formats, timezone and DST scheduling, fixed setup-time uptime, YAML and config-entry flows |
+| Sun | Native astronomical calculations, singleton/config-entry entities, location updates, solar conditions and scheduled actions |
 | Logging | Actual dynamic tracing levels/message filters, admin controls, persistent and once-only settings, public change notifications |
+| System Log | Deduplicated retained errors, actual write/clear services, admin raw streams and integration filters |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -72,6 +74,8 @@ cargo test --workspace --locked
 - [Rewrite status, baseline inventory, and task ledger](docs/REWRITE.md)
 - [Active full-rewrite execution ledger](docs/PORTING.md)
 - [Pinned Sun port contracts and astronomical reference cases](docs/SUN-PORT.md)
+- [System Log source contracts and stream acceptance cases](docs/SYSTEM-LOG-PORT.md)
+- [Repairs and issue registry port contracts](docs/REPAIRS-PORT.md)
 - [Exhaustive upstream integration and subsystem parity](docs/PARITY.md)
 - [Module contracts and ownership](docs/CONTRACT.md)
 - [Shared entity identity, provider leases and lifecycle](crates/hass-entity/README.md)
@@ -94,6 +98,8 @@ cargo test --workspace --locked
 - [Native time/date and uptime sensors](crates/hass-system-sensors/README.md)
 - [Native tag collection, scan callbacks and automation triggers](crates/hass-tag/README.md)
 - [Native logger policy, filters and persisted controls](crates/hass-logger/README.md)
+- [Native System Log capture, raw streams and failure diagnostics](crates/hass-system-log/README.md)
+- [Native Sun calculations, entities and config-entry lifecycle](crates/hass-sun/README.md)
 - [Config entries, native drivers, and core settings](crates/hass-config/README.md)
 - [Supported configuration example](examples/configuration.yaml)
 - [YAML includes, secrets, packages, and loading limits](docs/CONFIGURATION.md)

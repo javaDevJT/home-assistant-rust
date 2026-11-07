@@ -1,0 +1,19 @@
+[package]
+name = "hass-sun"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Astral 2.2-compatible native solar position and event calculations"
+
+[dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
+futures-util.workspace = true
+hass-config.workspace = true
+hass-core.workspace = true
+hass-entity.workspace = true
+hass-registry.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

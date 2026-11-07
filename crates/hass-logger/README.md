@@ -44,9 +44,15 @@ propagation. A matching message pattern suppresses the event.
 The app assigns distinct native targets to each mapped integration so timer,
 schedule, helper, scene and clock settings do not overwrite one another.
 
-Tracing has only `ERROR`, not separate `ERROR` and `CRITICAL` severities, so
-`CRITICAL`/`FATAL` settings share the native error threshold. Logger info still
-reports Home Assistant's numeric values (`40` and `50` respectively).
+`event_record` resolves dynamic `log.target`/source fields from the installed
+LogTracer bridge before per-event filtering. Native `hass.target` and
+`hass.level` fields carry requested dynamic logger names and distinguish an
+explicit `CRITICAL`/`FATAL` record (`50`) from an ordinary Rust error (`40`).
+`NormalizedEventFormat` retains that target and severity, the original message
+and structured fields in console output. `EventRecord::format_line` shares the
+same representation with capture layers. Metadata admission defers dynamic
+records until their actual fields can be checked; a logger named `log` cannot
+override the original bridged target's level or message filters.
 
 Message patterns use Rust's `regex` syntax. Python-only constructs such as
 lookarounds and backreferences are rejected during startup validation.

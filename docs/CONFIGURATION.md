@@ -125,8 +125,10 @@ Supported names are `NOTSET`, `DEBUG`, `INFO`, `WARNING`/`WARN`, `ERROR` and
 logger name; they do not propagate to child logger records. Invalid names,
 levels and regexes fail configuration validation before opening the database.
 The native regex engine supports its documented Rust syntax; Python lookaround
-and backreference patterns are rejected. Tracing shares its error threshold
-between `ERROR` and `CRITICAL`/`FATAL`.
+and backreference patterns are rejected. Ordinary Rust error records remain
+`ERROR`; explicit native critical records preserve level `50` and the
+`CRITICAL` label in filtering, console output and capture. Dynamic records from
+the installed LogTracer bridge use their actual logger names and source fields.
 
 Administrator services `logger.set_level` and `logger.set_default_level` apply
 session settings. Authenticated users can read `logger/log_info`; administrator
@@ -135,6 +137,36 @@ or `permanent`. `once` survives one subsequent start, and `permanent` remains
 until replaced or cleared with `NOTSET`. The app maps known integration names
 to distinct native targets, including timer, schedule, scene and clock-provider
 output. Explicit Rust targets and their `::` hierarchy are also supported.
+
+`sun:` accepts null or an empty mapping and imports the singleton Sun entry;
+the empty native Sun configuration flow can add it through the API. The
+observer comes from the persisted `homeassistant` latitude, longitude,
+elevation and time zone. Core configuration updates recalculate the Sun
+without restarting the process. Six timestamp sensors are enabled by default;
+the elevation, azimuth and rising sensors start disabled in the entity registry.
+Enabling one immediately publishes its current value. The fixed `sun.sun`
+attributes remain available live while its nine changing attributes are
+excluded from state history. See the [Sun contract](../crates/hass-sun/README.md).
+
+System Log captures actual emitted records alongside console output:
+
+```yaml
+system_log:
+  max_entries: 50
+  fire_event: false
+```
+
+The retained warning/error list is process-local; zero entries disables that
+list while raw streaming continues. Writes and clear use the ordinary service
+authorization policy. The list and raw stream WebSocket commands require an
+administrator. Raw subscriptions receive an initial array and later batches,
+and are released by the generic unsubscribe command or connection close. With
+no configured file/registered reader, initial backlog is empty. An installed
+native integration can filter a stream even when it has no configured entry.
+`fire_event` optionally publishes each captured warning/error occurrence;
+bounded dispatch failures are surfaced rather than treated as persisted output.
+See the [source contracts](SYSTEM-LOG-PORT.md) for deduplication, queue bounds
+and the remaining LLM consumer scope.
 
 `tag:` accepts null or an empty mapping. Tags are editable persistent collection
 items managed by the authenticated `tag/*` WebSocket commands; names live in

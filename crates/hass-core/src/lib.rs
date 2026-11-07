@@ -684,6 +684,27 @@ impl Drop for StoreLease {
     }
 }
 
+/// Atomic location/timezone snapshot for native time and solar helpers.
+/// The configuration owner persists settings before applying this view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HomeContext {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub elevation: f64,
+    pub time_zone: String,
+}
+
+impl Default for HomeContext {
+    fn default() -> Self {
+        Self {
+            latitude: 0.0,
+            longitude: 0.0,
+            elevation: 0.0,
+            time_zone: "UTC".into(),
+        }
+    }
+}
+
 struct RuntimeInner {
     _store_lease: StoreLease,
     store: Arc<dyn Store>,
@@ -694,7 +715,7 @@ struct RuntimeInner {
     /// Integration dispatcher traffic is private and is never recorded as a
     /// public Home Assistant event (broker payloads may contain private data).
     signals: broadcast::Sender<Event>,
-    time_zone: RwLock<String>,
+    home_context: RwLock<HomeContext>,
     services: RwLock<BTreeMap<String, BTreeMap<String, RegisteredService>>>,
     entity_services: RwLock<BTreeMap<(String, String), BTreeMap<String, RegisteredEntityService>>>,
     service_target_resolver: Mutex<Option<InstalledServiceTargetResolver>>,
@@ -734,7 +755,7 @@ impl Runtime {
                 write_order: Mutex::new(()),
                 events,
                 signals,
-                time_zone: RwLock::new("UTC".into()),
+                home_context: RwLock::new(HomeContext::default()),
                 services: RwLock::new(BTreeMap::new()),
                 entity_services: RwLock::new(BTreeMap::new()),
                 service_target_resolver: Mutex::new(None),
@@ -828,11 +849,40 @@ impl Runtime {
 
     /// Configured Home Assistant timezone, independent of the host OS setting.
     pub fn time_zone(&self) -> String {
+        self.home_context().time_zone
+    }
+
+    /// Read location and timezone together, including live saved config edits.
+    pub fn home_context(&self) -> HomeContext {
         self.inner
-            .time_zone
+            .home_context
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Apply the configuration owner's already-persisted location and timezone.
+    pub fn set_home_context(&self, context: HomeContext) -> Result<()> {
+        if !context.latitude.is_finite()
+            || !(-90.0..=90.0).contains(&context.latitude)
+            || !context.longitude.is_finite()
+            || !(-180.0..=180.0).contains(&context.longitude)
+            || !context.elevation.is_finite()
+        {
+            return Err(Error::InvalidInput(
+                "invalid home coordinates or elevation".into(),
+            ));
+        }
+        context
+            .time_zone
+            .parse::<chrono_tz::Tz>()
+            .map_err(|_| Error::InvalidInput("unknown IANA time zone".into()))?;
+        *self
+            .inner
+            .home_context
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = context;
+        Ok(())
     }
 
     /// Apply a validated setting after the configuration owner has persisted it.
@@ -840,11 +890,11 @@ impl Runtime {
         time_zone
             .parse::<chrono_tz::Tz>()
             .map_err(|_| Error::InvalidInput("unknown IANA time zone".into()))?;
-        *self
-            .inner
-            .time_zone
+        self.inner
+            .home_context
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = time_zone.into();
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .time_zone = time_zone.into();
         Ok(())
     }
 
@@ -1827,6 +1877,50 @@ mod tests {
 
     fn runtime_with_store(store: Arc<dyn Store>) -> Runtime {
         Runtime::new(store).expect("runtime should load")
+    }
+
+    #[test]
+    fn home_context_is_shared_validated_and_updated_as_one_snapshot() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        assert_eq!(runtime.home_context(), HomeContext::default());
+        let clone = runtime.clone();
+        let context = HomeContext {
+            latitude: 42.0,
+            longitude: -83.0,
+            elevation: -20.0,
+            time_zone: "America/Detroit".into(),
+        };
+        runtime.set_home_context(context.clone()).unwrap();
+        assert_eq!(clone.home_context(), context);
+        for invalid in [
+            HomeContext {
+                latitude: 91.0,
+                ..context.clone()
+            },
+            HomeContext {
+                longitude: f64::NAN,
+                ..context.clone()
+            },
+            HomeContext {
+                elevation: f64::INFINITY,
+                ..context.clone()
+            },
+            HomeContext {
+                time_zone: "invalid/timezone".into(),
+                ..context.clone()
+            },
+        ] {
+            assert!(clone.set_home_context(invalid).is_err());
+            assert_eq!(runtime.home_context(), context);
+        }
+        runtime.set_time_zone("Asia/Tokyo").unwrap();
+        assert_eq!(
+            clone.home_context(),
+            HomeContext {
+                time_zone: "Asia/Tokyo".into(),
+                ..context
+            }
+        );
     }
 
     #[test]

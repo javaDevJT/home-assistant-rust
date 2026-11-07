@@ -150,12 +150,19 @@ async fn main() -> Result<()> {
     .await??;
     let logger_manager = logger.manager();
     let logger_catalog = logging::loaded_catalog(config_entries.clone(), api_config.clone());
+    let system_log = hass_system_log::SystemLogIntegration::start(
+        runtime.clone(),
+        config.system_log.clone().unwrap_or_default(),
+        Arc::new(logging::catalog),
+    )?;
+    let system_log_manager = system_log.manager();
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::fmt::layer()
-                .with_target(false)
+                .event_format(hass_logger::NormalizedEventFormat)
                 .with_filter(logger.filter()),
         )
+        .with(system_log.layer().with_filter(logger.filter()))
         .try_init()
         .context("cannot initialize native logging")?;
     let image_runtime = runtime.clone();
@@ -241,6 +248,14 @@ async fn main() -> Result<()> {
     let native = hass_native::NativeIntegrations::start(runtime.clone(), native_config).await?;
     let scripts = hass_script::ScriptEngine::start(runtime.clone(), config.script, config.scene)?;
     let entity_lifecycle = hass_entity::EntityLifecycle::new(runtime.clone(), registries.clone())?;
+    let sun = hass_sun::SunIntegration::start(
+        runtime.clone(),
+        registries.clone(),
+        entity_lifecycle.clone(),
+        config_entries.clone(),
+        config.sun,
+    )
+    .await?;
     let tags = hass_tag::TagIntegration::start(
         runtime.clone(),
         registries.clone(),
@@ -315,6 +330,7 @@ async fn main() -> Result<()> {
             tags: Some(tag_manager),
             logger: Some(logger_manager),
             logger_catalog: Some(logger_catalog),
+            system_log: Some(system_log_manager),
         },
         Some(shutdown_rx),
     );
@@ -326,6 +342,7 @@ async fn main() -> Result<()> {
     let recorder_result = recorder.shutdown().await;
     let automation_result = automations.shutdown().await;
     let system_sensor_result = system_sensors.shutdown().await;
+    let sun_result = sun.shutdown().await;
     let tag_result = tags.shutdown();
     let entity_lifecycle_result = entity_lifecycle.shutdown().await;
     let template_entity_result = template_entities.shutdown().await;
@@ -340,6 +357,7 @@ async fn main() -> Result<()> {
     let zone_result = zones.shutdown().await;
     let group_result = groups.shutdown().await;
     let notification_result = notifications.shutdown();
+    let system_log_result = system_log.shutdown().await;
     let logger_result = logger.shutdown();
     let stop_result = tokio::task::spawn_blocking(move || {
         runtime.fire_event("homeassistant_stop", Map::new(), Context::default())
@@ -349,6 +367,7 @@ async fn main() -> Result<()> {
     recorder_result?;
     automation_result?;
     system_sensor_result?;
+    sun_result?;
     tag_result?;
     entity_lifecycle_result?;
     template_entity_result?;
@@ -364,6 +383,7 @@ async fn main() -> Result<()> {
     group_result?;
     notification_result?;
     logger_result?;
+    system_log_result?;
     stop_result?;
     Ok(())
 }

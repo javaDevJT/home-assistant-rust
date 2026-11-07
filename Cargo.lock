@@ -822,6 +822,8 @@ dependencies = [
  "hass-rest",
  "hass-script",
  "hass-storage",
+ "hass-sun",
+ "hass-system-log",
  "hass-system-sensors",
  "hass-tag",
  "hass-template",
@@ -858,6 +860,7 @@ dependencies = [
  "hass-notifications",
  "hass-person",
  "hass-registry",
+ "hass-system-log",
  "hass-tag",
  "hass-template",
  "hass-webhook",
@@ -913,6 +916,7 @@ dependencies = [
  "hass-notifications",
  "hass-registry",
  "hass-script",
+ "hass-sun",
  "hass-tag",
  "hass-template",
  "hass-webhook",
@@ -1017,11 +1021,13 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hass-core",
+ "log",
  "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "tracing",
+ "tracing-log",
  "tracing-subscriber",
  "uuid",
 ]
@@ -1131,8 +1137,10 @@ name = "hass-script"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "chrono-tz",
  "hass-core",
  "hass-storage",
+ "hass-sun",
  "hass-template",
  "serde",
  "serde_json",
@@ -1152,6 +1160,35 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "hass-sun"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "futures-util",
+ "hass-config",
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "hass-system-log"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "hass-logger",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

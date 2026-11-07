@@ -221,6 +221,517 @@ automation:
 }
 
 #[tokio::test]
+async fn real_process_raw_log_stream_does_not_echo_its_own_frames() {
+    use futures_util::{SinkExt, StreamExt};
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        "recorder:\n  db_path: state.sqlite\nlogger:\n  default: notset\nsystem_log: {}\n",
+    )
+    .unwrap();
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    assert_eq!(
+        ws_command(
+            &mut socket,
+            json!({"id":1,"type":"system_log/subscribe_raw"})
+        )
+        .await["success"],
+        true
+    );
+    let initial = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let initial: Value = serde_json::from_str(initial.to_text().unwrap()).unwrap();
+    assert!(
+        initial["event"].is_array(),
+        "initial live collection is an array"
+    );
+    socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"id":2,"type":"call_service","domain":"system_log","service":"write","service_data":{"level":"warning","message":"no-echo process fixture"}}).to_string().into())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut acknowledged = false;
+        let mut captured = false;
+        while !acknowledged || !captured {
+            let frame = socket.next().await.unwrap().unwrap();
+            let message: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if message["type"] == "result" && message["id"] == 2 {
+                assert_eq!(message["success"], true, "{message}");
+                acknowledged = true;
+            } else {
+                assert_eq!(message["type"], "event", "{message}");
+                captured |= message["event"].as_array().unwrap().iter().any(|line| line.as_str().unwrap().contains("WARNING [homeassistant.components.system_log.external] no-echo process fixture"));
+            }
+        }
+    }).await.expect("the actual emitted warning and service acknowledgement must arrive");
+    // Allow a final real connection record, then require silence for more than
+    // two debounce windows while TRACE output remains enabled in the child.
+    tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            match tokio::time::timeout(Duration::from_millis(1_100), socket.next()).await {
+                Err(_) => break,
+                Ok(Some(Ok(frame))) => {
+                    let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+                    assert_eq!(event["type"], "event", "{event}");
+                }
+                other => panic!("raw stream closed unexpectedly: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("raw output must not continuously generate another raw output batch");
+    socket.close(None).await.unwrap();
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_process_system_log_emits_filters_streams_and_restarts() {
+    use futures_util::StreamExt;
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(&config, "recorder:\n  db_path: state.sqlite\nsystem_log:\n  max_entries: 2\nlogger:\n  default: info\n  logs:\n    fixture.real: debug\n  filters:\n    fixture.real: ['^suppress$']\n").unwrap();
+    let mut server = Server::start(&config).await;
+    assert!(
+        server
+            .post("/api/services/system_log/clear", json!({}))
+            .await
+            .status()
+            .is_success()
+    );
+    let mut socket = authenticated_socket(&server).await;
+    let subscribed = ws_command(
+        &mut socket,
+        json!({"id":1,"type":"system_log/subscribe_raw"}),
+    )
+    .await;
+    assert_eq!(subscribed["success"], true, "{subscribed}");
+    let initial = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let initial: Value = serde_json::from_str(initial.to_text().unwrap()).unwrap();
+    assert_eq!(initial["type"], "event");
+    assert_eq!(initial["event"], json!([]));
+    for (level, message) in [
+        ("debug", "process debug fixture"),
+        ("critical", "process critical fixture"),
+        ("warning", "process warning fixture"),
+        ("warning", "suppress"),
+    ] {
+        let response = server
+            .post(
+                "/api/services/system_log/write",
+                json!({"logger":"fixture.real","level":level,"message":message}),
+            )
+            .await;
+        assert!(response.status().is_success(), "{}", response.status());
+    }
+    let lines = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut lines = Vec::new();
+        while lines.len() < 3 {
+            let frame = socket.next().await.unwrap().unwrap();
+            let event: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            assert_eq!(event["type"], "event", "{event}");
+            assert_eq!(event["id"], 1);
+            lines.extend(
+                event["event"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|line| line.as_str().unwrap().to_owned()),
+            );
+        }
+        lines
+    })
+    .await
+    .expect("actual emitted debug/warning/critical records must reach the raw stream");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("DEBUG [fixture.real] process debug fixture")),
+        "{lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("CRITICAL [fixture.real] process critical fixture")),
+        "{lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("suppress")),
+        "{lines:?}"
+    );
+    let listed = ws_command(&mut socket, json!({"id":2,"type":"system_log/list"})).await;
+    assert_eq!(listed["success"], true, "{listed}");
+    let entries = listed["result"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "{listed}");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["name"] == "fixture.real" && entry["count"] == 2),
+        "{listed}"
+    );
+    assert!(
+        entries.iter().any(|entry| entry["level"] == "CRITICAL"
+            && entry["message"] == json!(["process critical fixture", "process warning fixture"])),
+        "{listed}"
+    );
+    let unsubscribed = ws_command(
+        &mut socket,
+        json!({"id":3,"type":"unsubscribe_events","subscription":1}),
+    )
+    .await;
+    assert_eq!(unsubscribed["success"], true, "{unsubscribed}");
+    // Installed native integrations are valid filters even without a configured
+    // entry. This performs no MQTT connection or provider activity.
+    let subscribed = ws_command(
+        &mut socket,
+        json!({"id":4,"type":"system_log/subscribe_raw","integration":"mqtt"}),
+    )
+    .await;
+    assert_eq!(subscribed["success"], true, "{subscribed}");
+    let initial = tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let initial: Value = serde_json::from_str(initial.to_text().unwrap()).unwrap();
+    assert_eq!(initial["id"], 4);
+    assert_eq!(initial["event"], json!([]));
+    assert_eq!(
+        ws_command(
+            &mut socket,
+            json!({"id":5,"type":"unsubscribe_events","subscription":4})
+        )
+        .await["success"],
+        true
+    );
+    socket.close(None).await.unwrap();
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+    let mut restarted = Server::start(&config).await;
+    let mut socket = authenticated_socket(&restarted).await;
+    let listed = ws_command(&mut socket, json!({"id":1,"type":"system_log/list"})).await;
+    assert_eq!(listed["success"], true, "{listed}");
+    assert!(
+        !listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "fixture.real"),
+        "retained errors are process-local: {listed}"
+    );
+    socket.close(None).await.unwrap();
+    restarted.child.kill().await.unwrap();
+    restarted.child.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_process_sunrise_offset_runs_on_actual_clock() {
+    // Move a calculated sunrise close to the actual UTC clock with the same
+    // supported offset the production scheduler consumes. No injected event or
+    // test clock can cause the action to run in the child process.
+    let now = chrono::Utc::now();
+    let sunrise = hass_sun::next_event(
+        hass_sun::Observer {
+            latitude: 42.0,
+            longitude: -83.0,
+            elevation_m: 0.0,
+        },
+        now,
+        chrono_tz::America::Detroit,
+        hass_sun::SolarEvent::Sunrise,
+        chrono::Duration::zero(),
+    )
+    .unwrap();
+    let offset = now.timestamp() + 12 - sunrise.timestamp();
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        format!(
+            r#"homeassistant:
+  latitude: 42
+  longitude: -83
+  elevation: 0
+  time_zone: America/Detroit
+sun:
+recorder:
+  db_path: state.sqlite
+counter:
+  sunrise_actions:
+    initial: 0
+input_text:
+  sunrise_trigger:
+    initial: waiting
+automation:
+  - id: real_sunrise_offset
+    triggers:
+      - platform: sun
+        event: sunrise
+        offset: {offset}
+        id: observed_sunrise
+        alias: actual UTC sunrise
+    actions:
+      - action: counter.increment
+        target:
+          entity_id: counter.sunrise_actions
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.sunrise_trigger
+        data:
+          value: "{{{{ trigger.platform }}}}|{{{{ trigger.event }}}}|{{{{ trigger.id }}}}|{{{{ trigger.idx }}}}|{{{{ trigger.alias }}}}"
+"#
+        ),
+    )
+    .unwrap();
+    let mut server = Server::start(&config).await;
+    server.wait_state("counter.sunrise_actions", "0").await;
+    tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            let state: Value = server
+                .get("/api/states/input_text.sunrise_trigger")
+                .await
+                .json()
+                .await
+                .unwrap();
+            if state["state"] == "sun|sunrise|observed_sunrise|0|actual UTC sunrise" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("actual Sun timer must execute the service sequence");
+    let count: Value = server
+        .get("/api/states/counter.sunrise_actions")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(count["state"], "1");
+    assert!(count["context"]["parent_id"].is_string(), "{count}");
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn real_process_sun_flow_enable_location_history_and_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(&config,"homeassistant:\n  latitude: 42\n  longitude: -83\n  elevation: 0\n  time_zone: America/Detroit\nrecorder:\n  db_path: state.sqlite\n").unwrap();
+    let mut server = Server::start(&config).await;
+    assert_eq!(
+        server.get("/api/states/sun.sun").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let flow_base = "/api/config/config_entries/flow";
+    let form: Value = server
+        .post(flow_base, json!({"handler":"sun"}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(form["type"], "form", "{form}");
+    let before_setup = chrono::Utc::now();
+    let created: Value = server
+        .post(
+            &format!("{flow_base}/{}", form["flow_id"].as_str().unwrap()),
+            json!({}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["type"], "create_entry", "{created}");
+    assert_eq!(created["result"]["state"], "loaded", "{created}");
+    assert_eq!(created["result"]["title"], "Sun");
+    let entry_id = created["result"]["entry_id"].as_str().unwrap().to_owned();
+    let main: Value = server
+        .get("/api/states/sun.sun")
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(matches!(
+        main["state"].as_str(),
+        Some("above_horizon" | "below_horizon")
+    ));
+    assert!((-90.0..=90.0).contains(&main["attributes"]["elevation"].as_f64().unwrap()));
+    assert!((0.0..=360.0).contains(&main["attributes"]["azimuth"].as_f64().unwrap()));
+    let old_noon =
+        chrono::DateTime::parse_from_rfc3339(main["attributes"]["next_noon"].as_str().unwrap())
+            .unwrap();
+    for field in [
+        "next_dawn",
+        "next_dusk",
+        "next_midnight",
+        "next_noon",
+        "next_rising",
+        "next_setting",
+    ] {
+        let event =
+            chrono::DateTime::parse_from_rfc3339(main["attributes"][field].as_str().unwrap())
+                .unwrap();
+        assert!(event > before_setup);
+        assert!(event < before_setup + chrono::Duration::days(367));
+    }
+    let history: Value = server
+        .get("/api/history/period?filter_entity_id=sun.sun")
+        .await
+        .json()
+        .await
+        .unwrap();
+    let rows = history[0].as_array().unwrap();
+    assert!(!rows.is_empty());
+    for row in rows {
+        for field in [
+            "elevation",
+            "azimuth",
+            "rising",
+            "next_dawn",
+            "next_dusk",
+            "next_midnight",
+            "next_noon",
+            "next_rising",
+            "next_setting",
+        ] {
+            assert!(row["attributes"].get(field).is_none(), "{row}");
+        }
+    }
+    let position_id = "sensor.sun_solar_elevation";
+    assert_eq!(
+        server
+            .get(&format!("/api/states/{position_id}"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let mut socket = authenticated_socket(&server).await;
+    let registry = ws_command(
+        &mut socket,
+        json!({"id":1,"type":"config/entity_registry/list"}),
+    )
+    .await;
+    let entry = registry["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["entity_id"] == position_id)
+        .unwrap()
+        .clone();
+    assert_eq!(entry["disabled_by"], "integration");
+    assert_eq!(ws_command(&mut socket,json!({"id":2,"type":"config/entity_registry/update","entity_id":position_id,"disabled_by":null})).await["success"],true);
+    let enabled = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let response = server.get(&format!("/api/states/{position_id}")).await;
+            if response.status() == StatusCode::OK {
+                break response.json::<Value>().await.unwrap();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("enabling must publish without waiting for the phase poll");
+    assert_eq!(enabled["attributes"]["state_class"], "measurement");
+    assert_eq!(enabled["attributes"]["unit_of_measurement"], "°");
+    assert_eq!(ws_command(&mut socket,json!({"id":3,"type":"config/core/update","latitude":-42,"longitude":97,"elevation":58,"time_zone":"Asia/Bangkok"})).await["success"],true);
+    let updated = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let state: Value = server
+                .get("/api/states/sun.sun")
+                .await
+                .json()
+                .await
+                .unwrap();
+            let noon = chrono::DateTime::parse_from_rfc3339(
+                state["attributes"]["next_noon"].as_str().unwrap(),
+            )
+            .unwrap();
+            if (noon - old_noon).num_hours().abs() >= 10 {
+                break state;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("saved location must recalculate solar events");
+    assert_ne!(
+        updated["attributes"]["next_noon"],
+        main["attributes"]["next_noon"]
+    );
+    socket.close(None).await.unwrap();
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+
+    let mut restarted = Server::start(&config).await;
+    let core: Value = restarted.get("/api/config").await.json().await.unwrap();
+    assert_eq!(core["latitude"], -42.0);
+    assert_eq!(core["longitude"], 97.0);
+    assert_eq!(core["time_zone"], "Asia/Bangkok");
+    assert_eq!(
+        restarted
+            .get(&format!("/api/states/{position_id}"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let mut socket = authenticated_socket(&restarted).await;
+    let registry = ws_command(
+        &mut socket,
+        json!({"id":1,"type":"config/entity_registry/list"}),
+    )
+    .await;
+    let restored = registry["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["entity_id"] == position_id)
+        .unwrap();
+    assert_eq!(restored["id"], entry["id"]);
+    assert!(restored["disabled_by"].is_null());
+    assert_eq!(
+        restarted
+            .client
+            .delete(format!(
+                "{}/api/config/config_entries/entry/{entry_id}",
+                restarted.url
+            ))
+            .bearer_auth(TOKEN)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        restarted.get("/api/states/sun.sun").await.status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        restarted
+            .get(&format!("/api/states/{position_id}"))
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        restarted
+            .get("/api/states/sensor.sun_next_noon")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    socket.close(None).await.unwrap();
+    restarted.child.kill().await.unwrap();
+    restarted.child.wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn real_process_logger_settings_obey_permanent_once_and_session_lifetimes() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("configuration.yaml");

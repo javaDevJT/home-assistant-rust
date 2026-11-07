@@ -27,11 +27,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::{Datelike, Timelike};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Timelike, Utc};
 use chrono_tz::Tz;
 use hass_core::{Context, Error, Event, Result, Runtime, ServiceCall, ServiceResult, State};
 use hass_registry::Registries;
 use hass_script::{run_sequence, validate_sequence};
+use hass_sun::{
+    LegacySunCondition, LegacySunEvent, Observer, PureSunCondition, SolarError, SolarEvent,
+    SunPeriod, TwilightBand, evaluate_condition as evaluate_sun_condition, event_on_date,
+    next_event, position_at,
+};
 use hass_template::TemplateEngine;
 use hass_webhook::{
     WebhookConfig, WebhookHandlerError, WebhookManager, WebhookRegistration, WebhookRequest,
@@ -189,6 +194,43 @@ pub enum Trigger {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         event_data: Option<Map<String, Value>>,
     },
+    /// A legacy `platform: sun` trigger or a pinned Sun registry trigger such
+    /// as `platform: sun.sunrise`.
+    Sun {
+        /// Original legacy or registry trigger type, preserved in trigger data.
+        #[serde(default, skip_serializing_if = "is_legacy_sun_platform")]
+        platform: String,
+        /// `sunrise` or `sunset` for the legacy form; registry forms infer it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event: Option<String>,
+        /// Signed duration from the solar event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<Value>,
+        /// Legacy `before`/`after` offset sign selector.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset_type: Option<String>,
+        /// Dawn/dusk selector: civil, nautical, or astronomical.
+        #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+        twilight_type: Option<String>,
+        /// Golden/blue-hour selector: any, morning, or evening.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        period: Option<String>,
+        /// Numeric elevation selector for the two elevation-change triggers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        threshold: Option<Value>,
+        /// Require a crossed elevation threshold to remain active for this duration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        r#for: Option<DelayValue>,
+        /// Pinned trigger registry options mapping.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<Value>,
+        /// Generic Home Assistant trigger identifier, defaulting to its index.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Generic Home Assistant trigger alias.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alias: Option<String>,
+    },
     /// Match a public `tag_scanned` event from a native tag provider.
     Tag {
         tag_id: EntityIds,
@@ -325,6 +367,20 @@ pub enum TimePatternValue {
     Text(String),
 }
 
+fn deserialize_optional_trigger_metadata<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::String(value) => Ok(Some(value)),
+        _ => Err(serde::de::Error::custom(
+            "trigger id and alias must be strings",
+        )),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(tag = "trigger", rename_all = "snake_case", deny_unknown_fields)]
 enum TriggerRepr {
@@ -393,6 +449,28 @@ enum TriggerRepr {
         event_type: String,
         #[serde(default)]
         event_data: Option<Map<String, Value>>,
+    },
+    Sun {
+        #[serde(default)]
+        event: Option<String>,
+        #[serde(default)]
+        offset: Option<Value>,
+        #[serde(default)]
+        offset_type: Option<String>,
+        #[serde(default, rename = "type")]
+        twilight_type: Option<String>,
+        #[serde(default)]
+        period: Option<String>,
+        #[serde(default)]
+        threshold: Option<Value>,
+        #[serde(default)]
+        r#for: Option<DelayValue>,
+        #[serde(default)]
+        options: Option<Value>,
+        #[serde(default, deserialize_with = "deserialize_optional_trigger_metadata")]
+        id: Option<String>,
+        #[serde(default, deserialize_with = "deserialize_optional_trigger_metadata")]
+        alias: Option<String>,
     },
     Tag {
         #[serde(deserialize_with = "deserialize_tag_ids")]
@@ -497,6 +575,30 @@ impl From<TriggerRepr> for Trigger {
                 event_type,
                 event_data,
             },
+            TriggerRepr::Sun {
+                event,
+                offset,
+                offset_type,
+                twilight_type,
+                period,
+                threshold,
+                r#for,
+                options,
+                id,
+                alias,
+            } => Self::Sun {
+                platform: "sun".into(),
+                event,
+                offset,
+                offset_type,
+                twilight_type,
+                period,
+                threshold,
+                r#for,
+                options,
+                id,
+                alias,
+            },
             TriggerRepr::Tag {
                 tag_id,
                 device_id,
@@ -538,18 +640,116 @@ impl<'de> Deserialize<'de> for Trigger {
         let Some(object) = value.as_object_mut() else {
             return Err(serde::de::Error::custom("trigger must be a mapping"));
         };
-        if let Some(platform) = object.remove("platform") {
-            if object.contains_key("trigger") {
-                return Err(serde::de::Error::custom(
-                    "trigger must use either `trigger` or legacy `platform`, not both",
-                ));
+        let trigger_value = object.remove("trigger");
+        let platform_value = object.remove("platform");
+        let trigger_type = match (trigger_value, platform_value) {
+            (Some(trigger), Some(platform)) => {
+                let trigger = trigger.as_str().unwrap_or_default();
+                let platform = platform.as_str().unwrap_or_default();
+                if trigger == "sun" && platform.starts_with("sun.") {
+                    Some(platform.to_owned())
+                } else {
+                    return Err(serde::de::Error::custom(
+                        "trigger must use either `trigger` or legacy `platform`, not both",
+                    ));
+                }
             }
-            object.insert("trigger".into(), platform);
+            (Some(trigger), None) | (None, Some(trigger)) => trigger.as_str().map(str::to_owned),
+            (None, None) => None,
+        };
+        if let Some(trigger_type) = trigger_type.as_deref() {
+            let registry_event = sun_registry_event(trigger_type);
+            if trigger_type == "sun" || registry_event.is_some() {
+                let sun_platform = Some(trigger_type.to_owned());
+                object.insert("trigger".into(), Value::String("sun".into()));
+                if let Some(event) = registry_event {
+                    if object.contains_key("event") {
+                        return Err(serde::de::Error::custom(
+                            "Sun registry event triggers do not accept an `event` field",
+                        ));
+                    }
+                    object.insert("event".into(), Value::String(event.into()));
+                }
+                let Some(options) = object.remove("options") else {
+                    return parse_trigger_repr(value, sun_platform)
+                        .map_err(serde::de::Error::custom);
+                };
+                let Some(options) = options.as_object() else {
+                    return Err(serde::de::Error::custom(
+                        "Sun trigger `options` must be a mapping",
+                    ));
+                };
+                for (key, value) in options {
+                    if object.contains_key(key) {
+                        return Err(serde::de::Error::custom(format!(
+                            "Sun trigger option `{key}` is specified more than once"
+                        )));
+                    }
+                    object.insert(key.clone(), value.clone());
+                }
+                return parse_trigger_repr(value, sun_platform).map_err(serde::de::Error::custom);
+            }
         }
-        serde_json::from_value::<TriggerRepr>(value)
-            .map(Into::into)
-            .map_err(serde::de::Error::custom)
+        if let Some(trigger_type) = trigger_type {
+            object.insert("trigger".into(), Value::String(trigger_type));
+        }
+        parse_trigger_repr(value, None).map_err(serde::de::Error::custom)
     }
+}
+
+fn parse_trigger_repr(
+    value: Value,
+    sun_platform: Option<String>,
+) -> std::result::Result<Trigger, String> {
+    let mut trigger = Trigger::from(
+        serde_json::from_value::<TriggerRepr>(value).map_err(|error| error.to_string())?,
+    );
+    if let (
+        Some(platform),
+        Trigger::Sun {
+            platform: stored,
+            event,
+            ..
+        },
+    ) = (sun_platform, &mut trigger)
+    {
+        *stored = platform.clone();
+        if platform.starts_with("sun.") {
+            *event = None;
+        }
+    }
+    Ok(trigger)
+}
+
+fn is_legacy_sun_platform(platform: &String) -> bool {
+    platform == "sun"
+}
+
+fn sun_registry_event(trigger_type: &str) -> Option<&'static str> {
+    match trigger_type {
+        "sun.sunrise" => Some("sunrise"),
+        "sun.sunset" => Some("sunset"),
+        "sun.solar_noon" => Some("solar_noon"),
+        "sun.solar_midnight" => Some("solar_midnight"),
+        "sun.dawn" => Some("dawn"),
+        "sun.dusk" => Some("dusk"),
+        "sun.golden_hour_started" => Some("golden_hour_started"),
+        "sun.golden_hour_ended" => Some("golden_hour_ended"),
+        "sun.blue_hour_started" => Some("blue_hour_started"),
+        "sun.blue_hour_ended" => Some("blue_hour_ended"),
+        "sun.midnight_sun_started" => Some("midnight_sun_started"),
+        "sun.midnight_sun_ended" => Some("midnight_sun_ended"),
+        "sun.polar_night_started" => Some("polar_night_started"),
+        "sun.polar_night_ended" => Some("polar_night_ended"),
+        "sun.elevation_changed" => Some("elevation_changed"),
+        "sun.elevation_crossed_threshold" => Some("elevation_crossed_threshold"),
+        _ => None,
+    }
+}
+
+fn is_sun_elevation_trigger(trigger: &Trigger) -> bool {
+    matches!(trigger, Trigger::Sun { platform, .. }
+        if matches!(platform.as_str(), "sun.elevation_changed" | "sun.elevation_crossed_threshold"))
 }
 
 /// One entity ID or a list of entity IDs accepted by a state trigger.
@@ -641,6 +841,103 @@ pub enum Condition {
     },
     /// Evaluate a template as a boolean condition.
     Template { value_template: String },
+    /// Legacy Home Assistant `sun` condition with before/after bounds.
+    Sun {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_offset: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_offset: Option<Value>,
+        /// Legacy condition options are nested in Home Assistant's config form.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_up`.
+    #[serde(rename = "sun.is_up")]
+    SunIsUp {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_set`.
+    #[serde(rename = "sun.is_set")]
+    SunIsSet {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_ascending`.
+    #[serde(rename = "sun.is_ascending")]
+    SunIsAscending {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_descending`.
+    #[serde(rename = "sun.is_descending")]
+    SunIsDescending {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_night`.
+    #[serde(rename = "sun.is_night")]
+    SunIsNight {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_morning_twilight`.
+    #[serde(rename = "sun.is_morning_twilight")]
+    SunMorningTwilight {
+        #[serde(default, rename = "type")]
+        twilight_type: Option<String>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_evening_twilight`.
+    #[serde(rename = "sun.is_evening_twilight")]
+    SunEveningTwilight {
+        #[serde(default, rename = "type")]
+        twilight_type: Option<String>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_golden_hour`.
+    #[serde(rename = "sun.is_golden_hour")]
+    SunGoldenHour {
+        #[serde(default)]
+        period: Option<String>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_blue_hour`.
+    #[serde(rename = "sun.is_blue_hour")]
+    SunBlueHour {
+        #[serde(default)]
+        period: Option<String>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_midnight_sun`.
+    #[serde(rename = "sun.is_midnight_sun")]
+    SunIsMidnightSun {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.is_polar_night`.
+    #[serde(rename = "sun.is_polar_night")]
+    SunIsPolarNight {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun condition registry entry `sun.elevation`, with a numeric
+    /// threshold supplied by a fixed number.
+    #[serde(rename = "sun.elevation")]
+    SunElevation {
+        #[serde(default)]
+        threshold: Option<Value>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
     /// Evaluate every nested condition.
     And { conditions: Vec<Condition> },
     /// Evaluate at least one nested condition.
@@ -696,6 +993,8 @@ pub enum DelayValue {
 #[serde(deny_unknown_fields)]
 pub struct DelayParts {
     #[serde(default)]
+    pub days: Option<f64>,
+    #[serde(default)]
     pub hours: Option<f64>,
     #[serde(default)]
     pub minutes: Option<f64>,
@@ -712,6 +1011,7 @@ impl DelayValue {
             Self::Text(text) => parse_clock_duration(text)?,
             Self::Parts(parts) => {
                 let values = [
+                    parts.days,
                     parts.hours,
                     parts.minutes,
                     parts.seconds,
@@ -721,7 +1021,8 @@ impl DelayValue {
                     return Err("delay duration object must contain a time component".into());
                 }
                 validate_components(&values)?;
-                parts.hours.unwrap_or_default() * 3600.0
+                parts.days.unwrap_or_default() * 86_400.0
+                    + parts.hours.unwrap_or_default() * 3600.0
                     + parts.minutes.unwrap_or_default() * 60.0
                     + parts.seconds.unwrap_or_default()
                     + parts.milliseconds.unwrap_or_default() / 1000.0
@@ -946,6 +1247,12 @@ pub fn validate(automations: &[Automation]) -> Result<()> {
                     )));
                 }
                 Trigger::Event { .. } => {}
+                Trigger::Sun { .. } => validate_sun_trigger(trigger).map_err(|message| {
+                    Error::InvalidInput(format!(
+                        "automation `{}` has an invalid Sun trigger: {message}",
+                        automation.id
+                    ))
+                })?,
                 Trigger::Tag { .. } => {}
                 Trigger::Webhook {
                     allowed_methods, ..
@@ -988,6 +1295,28 @@ pub fn validate(automations: &[Automation]) -> Result<()> {
 }
 
 fn validate_condition(automation_id: &str, condition: &Condition) -> Result<()> {
+    if matches!(
+        condition,
+        Condition::Sun { .. }
+            | Condition::SunIsUp { .. }
+            | Condition::SunIsSet { .. }
+            | Condition::SunIsAscending { .. }
+            | Condition::SunIsDescending { .. }
+            | Condition::SunIsNight { .. }
+            | Condition::SunMorningTwilight { .. }
+            | Condition::SunEveningTwilight { .. }
+            | Condition::SunGoldenHour { .. }
+            | Condition::SunBlueHour { .. }
+            | Condition::SunIsMidnightSun { .. }
+            | Condition::SunIsPolarNight { .. }
+            | Condition::SunElevation { .. }
+    ) {
+        return validate_sun_condition(condition).map_err(|error| {
+            Error::InvalidInput(format!(
+                "automation `{automation_id}` has invalid Sun condition: {error}"
+            ))
+        });
+    }
     match condition {
         Condition::State { entity_id, .. } if !valid_entity_id(entity_id) => {
             Err(Error::InvalidInput(format!(
@@ -2222,6 +2551,7 @@ async fn run_engine(input: EngineInput) -> Result<()> {
     let mut active = JoinSet::<(u64, String, Result<()>)>::new();
     let mut scheduled = JoinSet::<(ScheduleIdentity, u64, Result<Option<PendingRun>>)>::new();
     let mut schedule_cancels = HashMap::<ScheduleIdentity, (u64, watch::Sender<bool>)>::new();
+    let mut sun_schedules = HashMap::<ScheduleIdentity, Option<DateTime<Utc>>>::new();
     let mut active_by_automation = HashMap::<String, HashMap<u64, watch::Sender<bool>>>::new();
     let mut pending = VecDeque::<PendingRun>::new();
     let mut failure = None;
@@ -2332,7 +2662,8 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                 }
             }
             _ = ticker.tick() => {
-                let now = chrono::Utc::now().with_timezone(&timezone);
+                let utc_now = Utc::now();
+                let now = utc_now.with_timezone(&timezone);
                 let time_event = synthetic_event(
                     "automation_time",
                     serde_json::json!({
@@ -2389,6 +2720,45 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                     }
                     if failure.is_some() { break; }
                 }
+                if failure.is_none() {
+                    match due_sun_trigger_runs(&runtime, &automations, utc_now, &mut sun_schedules) {
+                        Ok(runs) => {
+                            for run in runs {
+                                if !automation_is_enabled(&controls, &run.automation.id) {
+                                    continue;
+                                }
+                                match conditions_match_at(
+                                    &runtime,
+                                    &run.automation.conditions,
+                                    &run.variables,
+                                    utc_now,
+                                ) {
+                                    Ok(true) => {
+                                        if run.automation.mode == AutomationMode::Restart {
+                                            cancel_automation_runs(
+                                                &run.automation.id,
+                                                &mut pending,
+                                                &mut active_by_automation,
+                                                &mut schedule_cancels,
+                                            );
+                                        }
+                                        if let Err(error) = enqueue_run(
+                                            &mut pending,
+                                            &active_by_automation,
+                                            run,
+                                        ) {
+                                            failure = Some(error);
+                                            break;
+                                        }
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => tracing::warn!(%error, "automation Sun condition evaluation failed"),
+                                }
+                            }
+                        }
+                        Err(error) => tracing::warn!(%error, "automation Sun schedule calculation failed"),
+                    }
+                }
                 if failure.is_some() { break; }
             }
             webhook = async {
@@ -2417,6 +2787,10 @@ async fn run_engine(input: EngineInput) -> Result<()> {
             received = receiver.recv() => {
                 match received {
                     Ok(event) => {
+                        if event.event_type == "core_config_updated" {
+                            sun_schedules.clear();
+                            continue;
+                        }
                         let inherited_lineage = lineage.lookup(&event.context.id);
                         if event.event_type == "automation_trigger" {
                             if let Some(id) = event.data.get("automation_id").and_then(Value::as_str)
@@ -2559,6 +2933,7 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                                         &runtime,
                                         automation,
                                         trigger,
+                                        trigger_index,
                                         &event,
                                         false,
                                     ) {
@@ -2662,7 +3037,9 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                             {
                                 continue;
                             }
-                            for trigger in &automation.triggers {
+                            for (trigger_index, trigger) in
+                                automation.triggers.iter().enumerate()
+                            {
                                 let matched = if matches!(trigger, Trigger::PersistentNotification { .. }) {
                                     match persistent_notification_trigger_matches(
                                         &runtime,
@@ -2677,7 +3054,14 @@ async fn run_engine(input: EngineInput) -> Result<()> {
                                         }
                                     }
                                 } else {
-                                    match match_event_trigger(&runtime, automation, trigger, &event, true) {
+                                    match match_event_trigger(
+                                        &runtime,
+                                        automation,
+                                        trigger,
+                                        trigger_index,
+                                        &event,
+                                        true,
+                                    ) {
                                         Ok(Some(matched)) => vec![matched],
                                         Ok(None) => Vec::new(),
                                         Err(error) => {
@@ -2964,9 +3348,20 @@ fn match_event_trigger(
     runtime: &Runtime,
     automation: &Automation,
     trigger: &Trigger,
+    trigger_index: usize,
     event: &Event,
     native_signal: bool,
 ) -> Result<Option<TriggerMatch>> {
+    if is_sun_elevation_trigger(trigger) {
+        return sun_elevation_trigger_match(
+            runtime,
+            automation,
+            trigger,
+            trigger_index,
+            event,
+            native_signal,
+        );
+    }
     let platform = trigger_platform_name(trigger);
     let variables = match trigger {
         Trigger::HomeAssistant { event: expected }
@@ -2980,7 +3375,7 @@ fn match_event_trigger(
                 "Home Assistant starting",
             )
         }
-        _ => variables_for_trigger(runtime, automation, Some(event), platform, None),
+        _ => variables_for_trigger(runtime, automation, Some(event), &platform, None),
     };
     let (matches, duration, entity_id) = match trigger {
         Trigger::State { r#for, .. } => {
@@ -3048,7 +3443,7 @@ fn match_event_trigger(
                 )
             }
         }
-        Trigger::PersistentNotification { .. } => (false, &None, None),
+        Trigger::PersistentNotification { .. } | Trigger::Sun { .. } => (false, &None, None),
         Trigger::Time { .. } | Trigger::TimePattern { .. } => (false, &None, None),
         Trigger::Tag { .. } => (false, &None, None),
         Trigger::Webhook { .. } => (false, &None, None),
@@ -3071,20 +3466,895 @@ fn match_event_trigger(
     }))
 }
 
-fn trigger_platform_name(trigger: &Trigger) -> &'static str {
-    match trigger {
-        Trigger::State { .. } => "state",
-        Trigger::NumericState { .. } => "numeric_state",
-        Trigger::Template { .. } => "template",
-        Trigger::Time { .. } => "time",
-        Trigger::TimePattern { .. } => "time_pattern",
-        Trigger::HomeAssistant { .. } => "homeassistant",
-        Trigger::Mqtt { .. } => "mqtt",
-        Trigger::PersistentNotification { .. } => "persistent_notification",
-        Trigger::Event { .. } => "event",
-        Trigger::Tag { .. } => "tag",
-        Trigger::Webhook { .. } => "webhook",
+fn sun_elevation_trigger_match(
+    runtime: &Runtime,
+    automation: &Automation,
+    trigger: &Trigger,
+    trigger_index: usize,
+    event: &Event,
+    native_signal: bool,
+) -> Result<Option<TriggerMatch>> {
+    let Trigger::Sun {
+        platform,
+        threshold,
+        r#for,
+        id,
+        alias,
+        ..
+    } = trigger
+    else {
+        return Ok(None);
+    };
+    if native_signal || event.event_type != "state_changed" {
+        return Ok(None);
     }
+    let (old_state, new_state, entity_id) = trigger_state_values(event)?;
+    if entity_id.as_deref() != Some("sun.sun") {
+        return Ok(None);
+    }
+    let (Some(old_state), Some(new_state)) = (old_state, new_state) else {
+        // EntityNumericalStateTriggerBase ignores first creation and removal
+        // events, since it requires both states and an eligible origin state.
+        return Ok(None);
+    };
+    if old_state.entity_id != "sun.sun"
+        || new_state.entity_id != "sun.sun"
+        || matches!(old_state.state.as_str(), "unknown" | "unavailable")
+        || matches!(new_state.state.as_str(), "unknown" | "unavailable")
+    {
+        return Ok(None);
+    }
+    let Some(new_elevation) = sun_elevation_from_state(&new_state) else {
+        return Ok(None);
+    };
+    let threshold = threshold
+        .as_ref()
+        .ok_or_else(|| Error::InvalidInput("Sun elevation trigger requires a threshold".into()))?;
+    let parsed_threshold =
+        parse_sun_elevation_threshold(threshold, platform == "sun.elevation_changed")
+            .map_err(Error::InvalidInput)?;
+    let old_elevation = sun_elevation_from_state(&old_state);
+    let new_matches = sun_elevation_in_threshold(runtime, &parsed_threshold, new_elevation);
+    let matched = if platform == "sun.elevation_changed" {
+        old_elevation != Some(new_elevation) && new_matches
+    } else {
+        !old_elevation
+            .is_some_and(|value| sun_elevation_in_threshold(runtime, &parsed_threshold, value))
+            && new_matches
+    };
+    if !matched {
+        return Ok(None);
+    }
+    let duration = r#for
+        .as_ref()
+        .map(|duration| {
+            duration
+                .duration_with_limit(MAX_TRIGGER_FOR)
+                .map_err(Error::InvalidInput)
+        })
+        .transpose()?;
+    let mut fields = Map::new();
+    fields.insert(
+        "id".into(),
+        Value::String(id.clone().unwrap_or_else(|| trigger_index.to_string())),
+    );
+    fields.insert("idx".into(), Value::String(trigger_index.to_string()));
+    fields.insert(
+        "alias".into(),
+        alias.clone().map_or(Value::Null, Value::String),
+    );
+    let variables = variables_for_trigger_with_fields(
+        runtime,
+        automation,
+        Some(event),
+        platform,
+        None,
+        Some(fields),
+    );
+    Ok(Some(TriggerMatch {
+        variables,
+        duration,
+        entity_id: Some("sun.sun".into()),
+    }))
+}
+
+fn trigger_platform_name(trigger: &Trigger) -> String {
+    match trigger {
+        Trigger::State { .. } => "state".into(),
+        Trigger::NumericState { .. } => "numeric_state".into(),
+        Trigger::Template { .. } => "template".into(),
+        Trigger::Time { .. } => "time".into(),
+        Trigger::TimePattern { .. } => "time_pattern".into(),
+        Trigger::HomeAssistant { .. } => "homeassistant".into(),
+        Trigger::Mqtt { .. } => "mqtt".into(),
+        Trigger::PersistentNotification { .. } => "persistent_notification".into(),
+        Trigger::Event { .. } => "event".into(),
+        Trigger::Sun { platform, .. } => platform.clone(),
+        Trigger::Tag { .. } => "tag".into(),
+        Trigger::Webhook { .. } => "webhook".into(),
+    }
+}
+
+fn validate_sun_trigger(trigger: &Trigger) -> std::result::Result<(), String> {
+    let Trigger::Sun {
+        platform,
+        event,
+        offset,
+        offset_type,
+        twilight_type,
+        period,
+        threshold,
+        r#for,
+        options,
+        ..
+    } = trigger
+    else {
+        return Ok(());
+    };
+    if options
+        .as_ref()
+        .is_some_and(|value| !value.as_object().is_some_and(Map::is_empty))
+    {
+        return Err("trigger options must be provided as supported top-level fields".into());
+    }
+    if platform == "sun" && offset_type.is_some() {
+        return Err("legacy Sun triggers do not accept offset_type".into());
+    }
+    if offset_type
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "before" | "after"))
+    {
+        return Err("offset_type must be `before` or `after`".into());
+    }
+    if let Some(offset) = offset {
+        parse_sun_offset(offset)?;
+    }
+    if platform == "sun" {
+        if !matches!(event.as_deref(), Some("sunrise" | "sunset")) {
+            return Err("legacy event must be `sunrise` or `sunset`".into());
+        }
+        if twilight_type.is_some() || period.is_some() || threshold.is_some() || r#for.is_some() {
+            return Err("legacy Sun triggers do not accept type, period, threshold, or for".into());
+        }
+    } else if matches!(
+        platform.as_str(),
+        "sun.elevation_changed" | "sun.elevation_crossed_threshold"
+    ) {
+        let changed = platform == "sun.elevation_changed";
+        if event.is_some()
+            || offset.is_some()
+            || offset_type.is_some()
+            || twilight_type.is_some()
+            || period.is_some()
+        {
+            return Err("Sun elevation triggers accept only threshold and optional for".into());
+        }
+        let threshold = threshold
+            .as_ref()
+            .ok_or_else(|| "Sun elevation trigger requires a threshold".to_owned())?;
+        parse_sun_elevation_threshold(threshold, changed)?;
+        if changed && r#for.is_some() {
+            return Err("sun.elevation_changed does not accept for".into());
+        }
+        if let Some(duration) = r#for {
+            duration
+                .duration_with_limit(MAX_TRIGGER_FOR)
+                .map_err(|error| format!("invalid Sun elevation trigger for duration: {error}"))?;
+        }
+    } else if !matches!(
+        platform.as_str(),
+        "sun.sunrise"
+            | "sun.sunset"
+            | "sun.solar_noon"
+            | "sun.solar_midnight"
+            | "sun.dawn"
+            | "sun.dusk"
+            | "sun.golden_hour_started"
+            | "sun.golden_hour_ended"
+            | "sun.blue_hour_started"
+            | "sun.blue_hour_ended"
+            | "sun.midnight_sun_started"
+            | "sun.midnight_sun_ended"
+            | "sun.polar_night_started"
+            | "sun.polar_night_ended"
+    ) {
+        return Err(format!("registry trigger `{platform}` is not supported"));
+    } else if event.is_some() || threshold.is_some() || r#for.is_some() {
+        return Err("Sun event triggers do not accept event, threshold, or for fields".into());
+    }
+    if matches!(platform.as_str(), "sun.dawn" | "sun.dusk")
+        && twilight_type
+            .as_deref()
+            .is_some_and(|value| !matches!(value, "civil" | "nautical" | "astronomical"))
+    {
+        return Err("type must be `civil`, `nautical`, or `astronomical`".into());
+    }
+    if twilight_type.is_some() && !matches!(platform.as_str(), "sun.dawn" | "sun.dusk") {
+        return Err("type is only supported by dawn and dusk triggers".into());
+    }
+    if matches!(
+        platform.as_str(),
+        "sun.golden_hour_started"
+            | "sun.golden_hour_ended"
+            | "sun.blue_hour_started"
+            | "sun.blue_hour_ended"
+    ) && period
+        .as_deref()
+        .is_some_and(|value| !matches!(value, "any" | "morning" | "evening"))
+    {
+        return Err("period must be `any`, `morning`, or `evening`".into());
+    }
+    if period.is_some()
+        && !matches!(
+            platform.as_str(),
+            "sun.golden_hour_started"
+                | "sun.golden_hour_ended"
+                | "sun.blue_hour_started"
+                | "sun.blue_hour_ended"
+        )
+    {
+        return Err("period is only supported by golden and blue hour triggers".into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SunElevationThresholdBound {
+    Number(f64),
+    Entity(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SunElevationThreshold {
+    Any,
+    Above(SunElevationThresholdBound),
+    Below(SunElevationThresholdBound),
+    Between {
+        lower: SunElevationThresholdBound,
+        upper: SunElevationThresholdBound,
+    },
+    Outside {
+        lower: SunElevationThresholdBound,
+        upper: SunElevationThresholdBound,
+    },
+}
+
+fn parse_sun_elevation_threshold(
+    value: &Value,
+    allow_any: bool,
+) -> std::result::Result<SunElevationThreshold, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Sun elevation threshold must be a mapping".to_owned())?;
+    if object
+        .keys()
+        .any(|key| !matches!(key.as_str(), "type" | "value" | "value_min" | "value_max"))
+    {
+        return Err("Sun elevation threshold contains an unsupported field".into());
+    }
+    let threshold_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Sun elevation threshold requires a string type".to_owned())?;
+    match threshold_type {
+        "any" if allow_any && object.len() == 1 => Ok(SunElevationThreshold::Any),
+        "any" => Err("threshold type `any` is only allowed for sun.elevation_changed".into()),
+        "above" | "below" => {
+            if object.contains_key("value_min") || object.contains_key("value_max") {
+                return Err("above/below thresholds do not accept value_min or value_max".into());
+            }
+            let bound = parse_sun_elevation_bound(
+                object
+                    .get("value")
+                    .ok_or_else(|| "above/below threshold requires value".to_owned())?,
+            )?;
+            if threshold_type == "above" {
+                Ok(SunElevationThreshold::Above(bound))
+            } else {
+                Ok(SunElevationThreshold::Below(bound))
+            }
+        }
+        "between" | "outside" => {
+            if object.contains_key("value") {
+                return Err("between/outside thresholds do not accept value".into());
+            }
+            let lower = parse_sun_elevation_bound(
+                object
+                    .get("value_min")
+                    .ok_or_else(|| "between/outside threshold requires value_min".to_owned())?,
+            )?;
+            let upper = parse_sun_elevation_bound(
+                object
+                    .get("value_max")
+                    .ok_or_else(|| "between/outside threshold requires value_max".to_owned())?,
+            )?;
+            if let (
+                SunElevationThresholdBound::Number(lower),
+                SunElevationThresholdBound::Number(upper),
+            ) = (&lower, &upper)
+                && lower > upper
+            {
+                return Err("value_min must not be greater than value_max".into());
+            }
+            if threshold_type == "between" {
+                Ok(SunElevationThreshold::Between { lower, upper })
+            } else {
+                Ok(SunElevationThreshold::Outside { lower, upper })
+            }
+        }
+        _ => Err("threshold type must be any, above, below, between, or outside".into()),
+    }
+}
+
+fn parse_sun_elevation_bound(
+    value: &Value,
+) -> std::result::Result<SunElevationThresholdBound, String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "Sun elevation threshold bound must be a mapping".to_owned())?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "active_choice" | "number" | "entity" | "unit_of_measurement"
+        )
+    }) {
+        return Err("Sun elevation threshold bound contains an unsupported field".into());
+    }
+    let active_choice = match object.get("active_choice") {
+        Some(Value::String(choice)) => Some(choice.as_str()),
+        Some(_) => return Err("active_choice must be `number` or `entity`".into()),
+        None => None,
+    };
+    if let Some(unit) = object.get("unit_of_measurement")
+        && !unit.is_null()
+        && !unit.is_string()
+    {
+        return Err("Sun elevation threshold unit_of_measurement must be a string or null".into());
+    }
+    let number = object
+        .get("number")
+        .map(parse_sun_elevation_number)
+        .transpose()?;
+    let entity = object
+        .get("entity")
+        .map(parse_sun_elevation_entity)
+        .transpose()?;
+    match active_choice {
+        Some("number") => {
+            number.ok_or_else(|| "numeric Sun elevation threshold requires number".to_owned())
+        }
+        Some("entity") => {
+            entity.ok_or_else(|| "entity Sun elevation threshold requires entity".to_owned())
+        }
+        Some(_) => Err("active_choice must be `number` or `entity`".into()),
+        None => match (number, entity) {
+            (Some(_), Some(_)) => Err(
+                "Sun elevation threshold bound with number and entity requires active_choice"
+                    .into(),
+            ),
+            (Some(number), None) => Ok(number),
+            (None, Some(entity)) => Ok(entity),
+            (None, None) => Err("Sun elevation threshold bound requires number or entity".into()),
+        },
+    }
+}
+
+fn parse_sun_elevation_number(
+    value: &Value,
+) -> std::result::Result<SunElevationThresholdBound, String> {
+    let number = match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(number) => number.parse::<f64>().ok(),
+        _ => None,
+    }
+    .filter(|number| number.is_finite())
+    .ok_or_else(|| "Sun elevation threshold number must be finite".to_owned())?;
+    Ok(SunElevationThresholdBound::Number(number))
+}
+
+fn parse_sun_elevation_entity(
+    value: &Value,
+) -> std::result::Result<SunElevationThresholdBound, String> {
+    let entity = value
+        .as_str()
+        .filter(|entity| {
+            !entity.is_empty() && entity.contains('.') && !entity.chars().any(char::is_whitespace)
+        })
+        .ok_or_else(|| "Sun elevation threshold entity must be an entity ID".to_owned())?;
+    Ok(SunElevationThresholdBound::Entity(entity.to_owned()))
+}
+
+fn sun_elevation_threshold_value(
+    runtime: &Runtime,
+    bound: &SunElevationThresholdBound,
+) -> Option<f64> {
+    match bound {
+        SunElevationThresholdBound::Number(number) => Some(*number),
+        SunElevationThresholdBound::Entity(entity_id) => runtime
+            .get_state(entity_id)
+            .filter(|state| {
+                state
+                    .attributes
+                    .get("unit_of_measurement")
+                    .and_then(Value::as_str)
+                    == Some("°")
+            })
+            .and_then(|state| state.state.parse::<f64>().ok())
+            .filter(|value| value.is_finite()),
+    }
+}
+
+fn sun_elevation_in_threshold(
+    runtime: &Runtime,
+    threshold: &SunElevationThreshold,
+    elevation: f64,
+) -> bool {
+    if !elevation.is_finite() {
+        return false;
+    }
+    match threshold {
+        SunElevationThreshold::Any => true,
+        SunElevationThreshold::Above(bound) => {
+            sun_elevation_threshold_value(runtime, bound).is_some_and(|bound| elevation > bound)
+        }
+        SunElevationThreshold::Below(bound) => {
+            sun_elevation_threshold_value(runtime, bound).is_some_and(|bound| elevation < bound)
+        }
+        SunElevationThreshold::Between { lower, upper } => {
+            sun_elevation_threshold_value(runtime, lower)
+                .zip(sun_elevation_threshold_value(runtime, upper))
+                .is_some_and(|(lower, upper)| lower <= elevation && elevation <= upper)
+        }
+        SunElevationThreshold::Outside { lower, upper } => {
+            sun_elevation_threshold_value(runtime, lower)
+                .zip(sun_elevation_threshold_value(runtime, upper))
+                .is_some_and(|(lower, upper)| elevation < lower || elevation > upper)
+        }
+    }
+}
+
+fn sun_elevation_from_state(state: &State) -> Option<f64> {
+    state
+        .attributes
+        .get("elevation")
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_f64(),
+            Value::String(number) => number.parse::<f64>().ok(),
+            _ => None,
+        })
+        .filter(|elevation| elevation.is_finite())
+}
+
+fn parse_sun_offset(value: &Value) -> std::result::Result<ChronoDuration, String> {
+    let seconds = match value {
+        Value::Number(number) => number
+            .as_f64()
+            .ok_or_else(|| "offset number must be finite".to_owned())?,
+        Value::String(text) => parse_sun_offset_text(text)?,
+        Value::Object(parts) => {
+            let mut total = 0.0;
+            for (key, multiplier) in [
+                ("days", 86_400.0),
+                ("hours", 3_600.0),
+                ("minutes", 60.0),
+                ("seconds", 1.0),
+                ("milliseconds", 0.001),
+            ] {
+                if let Some(value) = parts.get(key) {
+                    let amount = value
+                        .as_f64()
+                        .ok_or_else(|| format!("offset component `{key}` must be numeric"))?;
+                    if !amount.is_finite() {
+                        return Err(format!("offset component `{key}` must be finite"));
+                    }
+                    total += amount * multiplier;
+                }
+            }
+            if parts.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "days" | "hours" | "minutes" | "seconds" | "milliseconds"
+                )
+            }) {
+                return Err("offset has an unknown duration component".into());
+            }
+            total
+        }
+        _ => return Err("offset must be seconds, HH:MM:SS, or duration components".into()),
+    };
+    if !seconds.is_finite() || seconds.abs() > i64::MAX as f64 / 1_000_000.0 {
+        return Err("offset must be a finite duration within the supported range".into());
+    }
+    Ok(ChronoDuration::microseconds(
+        (seconds * 1_000_000.0).round() as i64,
+    ))
+}
+
+fn parse_sun_offset_text(text: &str) -> std::result::Result<f64, String> {
+    let text = text.trim();
+    let (sign, unsigned) = match text.strip_prefix('-') {
+        Some(unsigned) => (-1.0, unsigned),
+        None => (1.0, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let parts = unsigned.split(':').collect::<Vec<_>>();
+    if !matches!(parts.len(), 2 | 3) {
+        return Err("offset text must use HH:MM or HH:MM:SS".into());
+    }
+    let hours = parts[0]
+        .parse::<u64>()
+        .map_err(|_| "offset hours are invalid".to_owned())?;
+    let minutes = parts[1]
+        .parse::<u64>()
+        .map_err(|_| "offset minutes are invalid".to_owned())?;
+    let seconds = if parts.len() == 3 {
+        parts[2]
+            .parse::<f64>()
+            .map_err(|_| "offset seconds are invalid".to_owned())?
+    } else {
+        0.0
+    };
+    if minutes >= 60 || !seconds.is_finite() || !(0.0..60.0).contains(&seconds) {
+        return Err("offset text contains an invalid clock component".into());
+    }
+    Ok(sign * (hours as f64 * 3_600.0 + minutes as f64 * 60.0 + seconds))
+}
+
+fn sun_offset(trigger: &Trigger) -> std::result::Result<ChronoDuration, String> {
+    let Trigger::Sun {
+        platform,
+        offset,
+        offset_type,
+        ..
+    } = trigger
+    else {
+        return Ok(ChronoDuration::zero());
+    };
+    let offset = offset
+        .as_ref()
+        .map(parse_sun_offset)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(
+        if platform != "sun" && offset_type.as_deref() == Some("before") {
+            -offset
+        } else {
+            offset
+        },
+    )
+}
+
+fn sun_trigger_events(trigger: &Trigger) -> std::result::Result<Vec<SolarEvent>, String> {
+    let Trigger::Sun {
+        platform,
+        event,
+        twilight_type,
+        period,
+        ..
+    } = trigger
+    else {
+        return Ok(Vec::new());
+    };
+    let event = if platform == "sun" {
+        event.as_deref().unwrap_or_default()
+    } else {
+        platform.strip_prefix("sun.").unwrap_or_default()
+    };
+    let twilight = match twilight_type.as_deref().unwrap_or("civil") {
+        "civil" => 6.0,
+        "nautical" => 12.0,
+        "astronomical" => 18.0,
+        other => return Err(format!("unsupported twilight type `{other}`")),
+    };
+    let period = match period.as_deref().unwrap_or("any") {
+        "any" => (true, true),
+        "morning" => (true, false),
+        "evening" => (false, true),
+        other => return Err(format!("unsupported period `{other}`")),
+    };
+    let events = match event {
+        "sunrise" => vec![SolarEvent::Sunrise],
+        "sunset" => vec![SolarEvent::Sunset],
+        "solar_noon" => vec![SolarEvent::Noon],
+        "solar_midnight" => vec![SolarEvent::Midnight],
+        "dawn" => vec![SolarEvent::Dawn {
+            depression: twilight,
+        }],
+        "dusk" => vec![SolarEvent::Dusk {
+            depression: twilight,
+        }],
+        "golden_hour_started" => boundary_events(-4.0, 6.0, period),
+        "golden_hour_ended" => boundary_events(6.0, -4.0, period),
+        "blue_hour_started" => boundary_events(-6.0, -4.0, period),
+        "blue_hour_ended" => boundary_events(-4.0, -6.0, period),
+        _ => return Err(format!("unsupported Sun event `{event}`")),
+    };
+    Ok(events)
+}
+
+fn boundary_events(
+    rising_elevation: f64,
+    setting_elevation: f64,
+    period: (bool, bool),
+) -> Vec<SolarEvent> {
+    let mut events = Vec::with_capacity(2);
+    if period.0 {
+        events.push(SolarEvent::Elevation {
+            elevation: rising_elevation,
+            rising: true,
+        });
+    }
+    if period.1 {
+        events.push(SolarEvent::Elevation {
+            elevation: setting_elevation,
+            rising: false,
+        });
+    }
+    events
+}
+
+fn sun_environment(runtime: &Runtime) -> std::result::Result<(Observer, Tz), String> {
+    let home = runtime.home_context();
+    let timezone = home
+        .time_zone
+        .parse::<Tz>()
+        .map_err(|_| format!("invalid configured timezone `{}`", home.time_zone))?;
+    Ok((
+        Observer {
+            latitude: home.latitude,
+            longitude: home.longitude,
+            elevation_m: home.elevation,
+        },
+        timezone,
+    ))
+}
+
+fn next_sun_trigger_time(
+    runtime: &Runtime,
+    trigger: &Trigger,
+    now: DateTime<Utc>,
+) -> std::result::Result<Option<DateTime<Utc>>, String> {
+    let (observer, timezone) = sun_environment(runtime)?;
+    let offset = sun_offset(trigger)?;
+    if let Trigger::Sun { platform, .. } = trigger {
+        let polar = match platform.as_str() {
+            "sun.midnight_sun_started" => Some((SolarEvent::Midnight, true)),
+            "sun.midnight_sun_ended" => Some((SolarEvent::Midnight, false)),
+            "sun.polar_night_started" => Some((SolarEvent::Noon, false)),
+            "sun.polar_night_ended" => Some((SolarEvent::Noon, true)),
+            _ => None,
+        };
+        if let Some((event, target_above)) = polar {
+            return next_polar_transition(observer, timezone, event, now, target_above, offset);
+        }
+    }
+    let mut next = None;
+    for event in sun_trigger_events(trigger)? {
+        match next_event(observer, now, timezone, event, offset) {
+            Ok(candidate) if next.is_none_or(|current| candidate < current) => {
+                next = Some(candidate);
+            }
+            Ok(_) => {}
+            Err(SolarError::SearchExhausted { .. }) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(next)
+}
+
+fn next_polar_transition(
+    observer: Observer,
+    timezone: Tz,
+    event: SolarEvent,
+    now: DateTime<Utc>,
+    target_above: bool,
+    offset: ChronoDuration,
+) -> std::result::Result<Option<DateTime<Utc>>, String> {
+    if observer.latitude.abs() < 65.0 {
+        return Ok(None);
+    }
+    let anchor = now
+        .checked_sub_signed(offset)
+        .ok_or_else(|| "Sun polar transition anchor overflowed".to_owned())?;
+    let mut date = anchor
+        .with_timezone(&timezone)
+        .date_naive()
+        .checked_sub_signed(ChronoDuration::days(2))
+        .ok_or_else(|| "Sun polar transition date overflowed".to_owned())?;
+    let mut previous_above = None;
+    for _ in 0..400 {
+        let event_time = event_on_date(observer, date, event)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "solar noon or midnight was missing".to_owned())?;
+        let above = position_at(observer, event_time)
+            .map_err(|error| error.to_string())?
+            .elevation
+            > -0.833;
+        if previous_above.is_some_and(|previous| above == target_above && above != previous) {
+            let fire_time = event_time
+                .checked_add_signed(offset)
+                .ok_or_else(|| "Sun polar transition offset overflowed".to_owned())?;
+            if fire_time > now {
+                return Ok(Some(fire_time));
+            }
+        }
+        previous_above = Some(above);
+        date = date
+            .succ_opt()
+            .ok_or_else(|| "Sun polar transition date overflowed".to_owned())?;
+    }
+    Ok(None)
+}
+
+fn sun_trigger_run(
+    runtime: &Runtime,
+    automation: &Automation,
+    trigger: &Trigger,
+    trigger_index: usize,
+    fired_at: DateTime<Utc>,
+) -> std::result::Result<PendingRun, String> {
+    let Trigger::Sun {
+        platform,
+        event,
+        twilight_type,
+        period,
+        id,
+        alias,
+        ..
+    } = trigger
+    else {
+        unreachable!("sun trigger runner requires a Sun trigger")
+    };
+    let event = if platform == "sun" {
+        event.as_deref().unwrap_or_default()
+    } else {
+        platform.strip_prefix("sun.").unwrap_or_default()
+    };
+    let context_name = if event.starts_with("golden_hour_") || event.starts_with("blue_hour_") {
+        event
+    } else {
+        match event {
+            "solar_noon" => "noon",
+            "solar_midnight" => "midnight",
+            other => other,
+        }
+    };
+    let mut fields = Map::new();
+    fields.insert(
+        "description".into(),
+        Value::String(format!("sun event {context_name}")),
+    );
+    fields.insert(
+        "id".into(),
+        Value::String(id.clone().unwrap_or_else(|| trigger_index.to_string())),
+    );
+    fields.insert("idx".into(), Value::String(trigger_index.to_string()));
+    fields.insert(
+        "alias".into(),
+        alias.clone().map_or(Value::Null, Value::String),
+    );
+    if platform == "sun" {
+        fields.insert("event".into(), Value::String(event.into()));
+        fields.insert(
+            "offset".into(),
+            Value::String(format_sun_duration(sun_offset(trigger)?)),
+        );
+    }
+    if matches!(event, "dawn" | "dusk") {
+        fields.insert(
+            "type".into(),
+            Value::String(twilight_type.clone().unwrap_or_else(|| "civil".into())),
+        );
+    }
+    if event.starts_with("golden_hour_") || event.starts_with("blue_hour_") {
+        fields.insert(
+            "period".into(),
+            Value::String(period.clone().unwrap_or_else(|| "any".into())),
+        );
+    }
+    let event = synthetic_event(
+        "sun_event",
+        serde_json::json!({"time": fired_at}),
+        Context::default(),
+    );
+    let variables = variables_for_trigger_with_fields(
+        runtime,
+        automation,
+        Some(&event),
+        platform,
+        None,
+        Some(fields),
+    );
+    Ok(PendingRun {
+        automation: automation.clone(),
+        trigger_context: event.context,
+        lineage: Vec::new(),
+        variables,
+    })
+}
+
+fn format_sun_duration(duration: ChronoDuration) -> String {
+    let total_micros = duration
+        .num_microseconds()
+        .unwrap_or_else(|| duration.num_milliseconds().saturating_mul(1_000));
+    let negative = total_micros < 0;
+    let absolute_micros = total_micros.unsigned_abs();
+    let day_micros = 86_400_000_000;
+    let days = if negative {
+        absolute_micros.div_ceil(day_micros)
+    } else {
+        absolute_micros / day_micros
+    };
+    let time_of_day_micros = if negative {
+        let remainder = absolute_micros % day_micros;
+        if remainder == 0 {
+            0
+        } else {
+            day_micros - remainder
+        }
+    } else {
+        absolute_micros % day_micros
+    };
+    let hours = time_of_day_micros / 3_600_000_000;
+    let minutes = (time_of_day_micros / 60_000_000) % 60;
+    let seconds = (time_of_day_micros / 1_000_000) % 60;
+    let fraction = time_of_day_micros % 1_000_000;
+    let time = if fraction == 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{hours}:{minutes:02}:{seconds:02}.{fraction:06}")
+    };
+    if days == 0 {
+        time
+    } else {
+        let day_suffix = if days == 1 { "day" } else { "days" };
+        format!(
+            "{}{days} {day_suffix}, {time}",
+            if negative { "-" } else { "" }
+        )
+    }
+}
+
+fn due_sun_trigger_runs(
+    runtime: &Runtime,
+    automations: &[Automation],
+    now: DateTime<Utc>,
+    schedules: &mut HashMap<ScheduleIdentity, Option<DateTime<Utc>>>,
+) -> std::result::Result<Vec<PendingRun>, String> {
+    let mut active_schedules = HashSet::new();
+    let mut runs = Vec::new();
+    for automation in automations {
+        for (trigger_index, trigger) in automation.triggers.iter().enumerate() {
+            if !matches!(trigger, Trigger::Sun { .. }) || is_sun_elevation_trigger(trigger) {
+                continue;
+            }
+            let identity = ScheduleIdentity {
+                automation_id: automation.id.clone(),
+                trigger_index,
+                entity_id: None,
+            };
+            active_schedules.insert(identity.clone());
+            if !schedules.contains_key(&identity) {
+                schedules.insert(
+                    identity.clone(),
+                    next_sun_trigger_time(runtime, trigger, now)?,
+                );
+            }
+            if let Some(Some(scheduled_at)) = schedules.get(&identity).copied()
+                && scheduled_at <= now
+            {
+                runs.push(sun_trigger_run(
+                    runtime,
+                    automation,
+                    trigger,
+                    trigger_index,
+                    scheduled_at,
+                )?);
+                schedules.insert(identity, next_sun_trigger_time(runtime, trigger, now)?);
+            }
+        }
+    }
+    schedules.retain(|identity, _| active_schedules.contains(identity));
+    Ok(runs)
 }
 
 fn persistent_notification_trigger_matches(
@@ -3540,6 +4810,25 @@ fn trigger_for_still_matches(
         Trigger::Template { value_template, .. } => {
             template_truthy(runtime, value_template, variables)
         }
+        Trigger::Sun {
+            platform,
+            threshold,
+            ..
+        } if platform == "sun.elevation_crossed_threshold" => {
+            let Some(threshold) = threshold else {
+                return Ok(false);
+            };
+            let parsed_threshold =
+                parse_sun_elevation_threshold(threshold, false).map_err(Error::InvalidInput)?;
+            let Some(current) = runtime.get_state("sun.sun") else {
+                return Ok(false);
+            };
+            if matches!(current.state.as_str(), "unknown" | "unavailable") {
+                return Ok(false);
+            }
+            Ok(sun_elevation_from_state(&current)
+                .is_some_and(|value| sun_elevation_in_threshold(runtime, &parsed_threshold, value)))
+        }
         _ => Ok(false),
     }
 }
@@ -3549,18 +4838,28 @@ fn conditions_match(
     conditions: &[Condition],
     variables: &Map<String, Value>,
 ) -> Result<bool> {
+    conditions_match_at(runtime, conditions, variables, Utc::now())
+}
+
+fn conditions_match_at(
+    runtime: &Runtime,
+    conditions: &[Condition],
+    variables: &Map<String, Value>,
+    now: DateTime<Utc>,
+) -> Result<bool> {
     for condition in conditions {
-        if !condition_matches(runtime, condition, variables)? {
+        if !condition_matches_at(runtime, condition, variables, now)? {
             return Ok(false);
         }
     }
     Ok(true)
 }
 
-fn condition_matches(
+fn condition_matches_at(
     runtime: &Runtime,
     condition: &Condition,
     variables: &Map<String, Value>,
+    now: DateTime<Utc>,
 ) -> Result<bool> {
     match condition {
         Condition::State {
@@ -3601,25 +4900,340 @@ fn condition_matches(
         Condition::Template { value_template } => {
             template_truthy(runtime, value_template, variables)
         }
-        Condition::And { conditions } => conditions_match(runtime, conditions, variables),
+        sun_condition @ (Condition::Sun { .. }
+        | Condition::SunIsUp { .. }
+        | Condition::SunIsSet { .. }
+        | Condition::SunIsAscending { .. }
+        | Condition::SunIsDescending { .. }
+        | Condition::SunIsNight { .. }
+        | Condition::SunMorningTwilight { .. }
+        | Condition::SunEveningTwilight { .. }
+        | Condition::SunGoldenHour { .. }
+        | Condition::SunBlueHour { .. }
+        | Condition::SunIsMidnightSun { .. }
+        | Condition::SunIsPolarNight { .. }
+        | Condition::SunElevation { .. }) => {
+            evaluate_sun_condition_config(runtime, sun_condition, now)
+        }
+        Condition::And { conditions } => conditions_match_at(runtime, conditions, variables, now),
         Condition::Or { conditions } => {
             for condition in conditions {
-                if condition_matches(runtime, condition, variables)? {
+                if condition_matches_at(runtime, condition, variables, now)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        Condition::Not { conditions } => {
-            Ok(!condition_matches(runtime, &conditions[0], variables)?)
-        }
+        Condition::Not { conditions } => Ok(!condition_matches_at(
+            runtime,
+            &conditions[0],
+            variables,
+            now,
+        )?),
     }
+}
+
+fn evaluate_sun_condition_config(
+    runtime: &Runtime,
+    condition: &Condition,
+    now: DateTime<Utc>,
+) -> Result<bool> {
+    let (observer, timezone) = sun_environment(runtime).map_err(Error::InvalidInput)?;
+    let sun_condition = match condition {
+        Condition::Sun {
+            before,
+            after,
+            before_offset,
+            after_offset,
+            options,
+        } => {
+            let options = sun_options(options.as_ref())?;
+            ensure_sun_option_keys(
+                &options,
+                &["before", "after", "before_offset", "after_offset"],
+            )?;
+            let before = legacy_bound(before.as_deref(), options.get("before"))?;
+            let after = legacy_bound(after.as_deref(), options.get("after"))?;
+            if before.is_none() && after.is_none() {
+                return Err(Error::InvalidInput(
+                    "Sun condition requires before or after".into(),
+                ));
+            }
+            let before_offset =
+                legacy_offset(before_offset.as_ref(), options.get("before_offset"))?;
+            let after_offset = legacy_offset(after_offset.as_ref(), options.get("after_offset"))?;
+            PureSunCondition::Legacy(LegacySunCondition {
+                before,
+                after,
+                before_offset,
+                after_offset,
+            })
+        }
+        Condition::SunIsUp { options } => {
+            ensure_sun_option_keys(&sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsUp
+        }
+        Condition::SunIsSet { options } => {
+            ensure_sun_option_keys(&sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsSet
+        }
+        Condition::SunIsAscending { options } => {
+            ensure_sun_option_keys(&sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsAscending
+        }
+        Condition::SunIsDescending { options } => {
+            ensure_sun_option_keys(&sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsDescending
+        }
+        Condition::SunIsNight { options } => {
+            ensure_sun_option_keys(&sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsNight
+        }
+        Condition::SunMorningTwilight {
+            twilight_type,
+            options,
+        } => PureSunCondition::MorningTwilight(parse_twilight_band(
+            twilight_type.as_deref(),
+            &sun_options(options.as_ref())?,
+        )?),
+        Condition::SunEveningTwilight {
+            twilight_type,
+            options,
+        } => PureSunCondition::EveningTwilight(parse_twilight_band(
+            twilight_type.as_deref(),
+            &sun_options(options.as_ref())?,
+        )?),
+        Condition::SunGoldenHour { period, options } => PureSunCondition::GoldenHour(
+            parse_sun_period(period.as_deref(), &sun_options(options.as_ref())?)?,
+        ),
+        Condition::SunBlueHour { period, options } => PureSunCondition::BlueHour(parse_sun_period(
+            period.as_deref(),
+            &sun_options(options.as_ref())?,
+        )?),
+        Condition::SunIsMidnightSun { options } => {
+            ensure_sun_option_keys(&sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsMidnightSun
+        }
+        Condition::SunIsPolarNight { options } => {
+            ensure_sun_option_keys(&sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsPolarNight
+        }
+        Condition::SunElevation { threshold, options } => {
+            let options = sun_options(options.as_ref())?;
+            ensure_sun_option_keys(&options, &["threshold"])?;
+            if threshold.is_some() && options.contains_key("threshold") {
+                return Err(Error::InvalidInput(
+                    "Sun elevation threshold is specified more than once".into(),
+                ));
+            }
+            let threshold = threshold
+                .as_ref()
+                .or_else(|| options.get("threshold"))
+                .ok_or_else(|| Error::InvalidInput("Sun elevation needs a threshold".into()))?;
+            let elevation = hass_sun::position_at(observer, now)
+                .map_err(|error| Error::InvalidInput(error.to_string()))?
+                .elevation;
+            return resolve_sun_threshold(runtime, threshold, elevation);
+        }
+        _ => return Err(Error::InvalidInput("expected a Sun condition".into())),
+    };
+    evaluate_sun_condition(observer, now, timezone, sun_condition)
+        .map_err(|error| Error::InvalidInput(error.to_string()))
+}
+
+fn sun_options(options: Option<&Value>) -> Result<Map<String, Value>> {
+    match options {
+        None => Ok(Map::new()),
+        Some(Value::Object(options)) => Ok(options.clone()),
+        Some(_) => Err(Error::InvalidInput(
+            "Sun condition options must be a mapping".into(),
+        )),
+    }
+}
+
+fn ensure_sun_option_keys(options: &Map<String, Value>, allowed: &[&str]) -> Result<()> {
+    if let Some(unknown) = options.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(Error::InvalidInput(format!(
+            "unsupported Sun condition option `{unknown}`"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_sun_condition(condition: &Condition) -> Result<()> {
+    match condition {
+        Condition::Sun {
+            before,
+            after,
+            before_offset,
+            after_offset,
+            options,
+        } => {
+            let options = sun_options(options.as_ref())?;
+            ensure_sun_option_keys(
+                &options,
+                &["before", "after", "before_offset", "after_offset"],
+            )?;
+            let before = legacy_bound(before.as_deref(), options.get("before"))?;
+            let after = legacy_bound(after.as_deref(), options.get("after"))?;
+            if before.is_none() && after.is_none() {
+                return Err(Error::InvalidInput(
+                    "condition requires before or after".into(),
+                ));
+            }
+            legacy_offset(before_offset.as_ref(), options.get("before_offset"))?;
+            legacy_offset(after_offset.as_ref(), options.get("after_offset"))?;
+            Ok(())
+        }
+        Condition::SunIsUp { options }
+        | Condition::SunIsSet { options }
+        | Condition::SunIsAscending { options }
+        | Condition::SunIsDescending { options }
+        | Condition::SunIsNight { options }
+        | Condition::SunIsMidnightSun { options }
+        | Condition::SunIsPolarNight { options } => {
+            ensure_sun_option_keys(&sun_options(options.as_ref())?, &[])
+        }
+        Condition::SunMorningTwilight {
+            twilight_type,
+            options,
+        }
+        | Condition::SunEveningTwilight {
+            twilight_type,
+            options,
+        } => parse_twilight_band(twilight_type.as_deref(), &sun_options(options.as_ref())?)
+            .map(|_| ()),
+        Condition::SunGoldenHour { period, options }
+        | Condition::SunBlueHour { period, options } => {
+            parse_sun_period(period.as_deref(), &sun_options(options.as_ref())?).map(|_| ())
+        }
+        Condition::SunElevation { threshold, options } => {
+            let options = sun_options(options.as_ref())?;
+            ensure_sun_option_keys(&options, &["threshold"])?;
+            if threshold.is_some() && options.contains_key("threshold") {
+                return Err(Error::InvalidInput(
+                    "threshold is specified more than once".into(),
+                ));
+            }
+            validate_sun_threshold(
+                threshold
+                    .as_ref()
+                    .or_else(|| options.get("threshold"))
+                    .ok_or_else(|| Error::InvalidInput("Sun elevation needs a threshold".into()))?,
+            )
+        }
+        _ => Err(Error::InvalidInput("expected a Sun condition".into())),
+    }
+}
+
+fn validate_sun_threshold(value: &Value) -> Result<()> {
+    parse_sun_elevation_threshold(value, false)
+        .map(|_| ())
+        .map_err(Error::InvalidInput)
+}
+
+fn legacy_bound(direct: Option<&str>, nested: Option<&Value>) -> Result<Option<LegacySunEvent>> {
+    if direct.is_some() && nested.is_some() {
+        return Err(Error::InvalidInput(
+            "Sun condition bound is specified more than once".into(),
+        ));
+    }
+    let value = direct
+        .map(str::to_owned)
+        .or_else(|| nested.and_then(Value::as_str).map(str::to_owned));
+    if nested.is_some() && value.is_none() {
+        return Err(Error::InvalidInput(
+            "Sun condition event must be a string".into(),
+        ));
+    }
+    match value.as_deref() {
+        None => Ok(None),
+        Some("sunrise") => Ok(Some(LegacySunEvent::Sunrise)),
+        Some("sunset") => Ok(Some(LegacySunEvent::Sunset)),
+        Some(other) => Err(Error::InvalidInput(format!(
+            "unsupported Sun condition event `{other}`"
+        ))),
+    }
+}
+
+fn legacy_offset(direct: Option<&Value>, nested: Option<&Value>) -> Result<ChronoDuration> {
+    if direct.is_some() && nested.is_some() {
+        return Err(Error::InvalidInput(
+            "Sun condition offset is specified more than once".into(),
+        ));
+    }
+    direct
+        .or(nested)
+        .map(parse_sun_offset)
+        .transpose()
+        .map_err(Error::InvalidInput)
+        .map(|value| value.unwrap_or_else(ChronoDuration::zero))
+}
+
+fn parse_twilight_band(direct: Option<&str>, options: &Map<String, Value>) -> Result<TwilightBand> {
+    ensure_sun_option_keys(options, &["type"])?;
+    if direct.is_some() && options.contains_key("type") {
+        return Err(Error::InvalidInput(
+            "Sun twilight type is specified more than once".into(),
+        ));
+    }
+    let value = direct.map(str::to_owned).or_else(|| {
+        options
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    if options.contains_key("type") && value.is_none() {
+        return Err(Error::InvalidInput(
+            "Sun twilight type must be a string".into(),
+        ));
+    }
+    match value.as_deref().unwrap_or("any") {
+        "any" => Ok(TwilightBand::Any),
+        "civil" => Ok(TwilightBand::Civil),
+        "nautical" => Ok(TwilightBand::Nautical),
+        "astronomical" => Ok(TwilightBand::Astronomical),
+        other => Err(Error::InvalidInput(format!(
+            "unsupported Sun twilight type `{other}`"
+        ))),
+    }
+}
+
+fn parse_sun_period(direct: Option<&str>, options: &Map<String, Value>) -> Result<SunPeriod> {
+    ensure_sun_option_keys(options, &["period"])?;
+    if direct.is_some() && options.contains_key("period") {
+        return Err(Error::InvalidInput(
+            "Sun period is specified more than once".into(),
+        ));
+    }
+    let value = direct.map(str::to_owned).or_else(|| {
+        options
+            .get("period")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    if options.contains_key("period") && value.is_none() {
+        return Err(Error::InvalidInput("Sun period must be a string".into()));
+    }
+    match value.as_deref().unwrap_or("any") {
+        "any" => Ok(SunPeriod::Any),
+        "morning" => Ok(SunPeriod::Morning),
+        "evening" => Ok(SunPeriod::Evening),
+        other => Err(Error::InvalidInput(format!(
+            "unsupported Sun period `{other}`"
+        ))),
+    }
+}
+
+fn resolve_sun_threshold(runtime: &Runtime, value: &Value, elevation: f64) -> Result<bool> {
+    let threshold = parse_sun_elevation_threshold(value, false).map_err(Error::InvalidInput)?;
+    Ok(sun_elevation_in_threshold(runtime, &threshold, elevation))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hass_core::{MemoryStore, ServiceResult};
+    use hass_core::{HomeContext, MemoryStore, ServiceResult};
     use hass_entity::EntityLifecycle;
     use hass_notifications::NotificationIntegration;
     use hass_registry::Registries;
@@ -5886,5 +7500,750 @@ mod tests {
         engine.shutdown().await.unwrap();
         tag_integration.shutdown().unwrap();
         lifecycle.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn sun_trigger_and_condition_offsets_accept_clocks_and_preserve_microseconds() {
+        let trigger: Trigger =
+            serde_yaml::from_str("platform: sun\nevent: sunrise\noffset: \"00:01\"\n").unwrap();
+        assert_eq!(sun_offset(&trigger).unwrap(), ChronoDuration::minutes(1));
+
+        let condition: Condition = serde_yaml::from_str(
+            "condition: sun\noptions:\n  before: sunrise\n  before_offset: \"00:00:01.123456\"\n",
+        )
+        .unwrap();
+        validate_sun_condition(&condition).unwrap();
+        let Condition::Sun {
+            before_offset,
+            options,
+            ..
+        } = &condition
+        else {
+            unreachable!("Sun YAML condition should deserialize to Condition::Sun")
+        };
+        let options = sun_options(options.as_ref()).unwrap();
+        assert_eq!(
+            legacy_offset(before_offset.as_ref(), options.get("before_offset")).unwrap(),
+            ChronoDuration::microseconds(1_123_456)
+        );
+        assert_eq!(
+            parse_sun_offset(&Value::String("-00:00:01.123456".into())).unwrap(),
+            ChronoDuration::microseconds(-1_123_456)
+        );
+    }
+
+    #[test]
+    fn sun_offset_string_matches_python_timedelta_format_and_precision() {
+        assert_eq!(
+            format_sun_duration(ChronoDuration::minutes(-30)),
+            "-1 day, 23:30:00"
+        );
+        assert_eq!(
+            format_sun_duration(ChronoDuration::microseconds(1)),
+            "0:00:00.000001"
+        );
+        assert_eq!(
+            format_sun_duration(ChronoDuration::hours(25)),
+            "1 day, 1:00:00"
+        );
+        assert_eq!(
+            format_sun_duration(ChronoDuration::microseconds(-1)),
+            "-1 day, 23:59:59.999999"
+        );
+    }
+
+    #[test]
+    fn sun_trigger_metadata_uses_the_pinned_string_schema() {
+        assert!(serde_yaml::from_str::<Trigger>("platform: sun\nevent: sunrise\nid: 1\n").is_err());
+        assert!(
+            serde_yaml::from_str::<Trigger>("platform: sun\nevent: sunrise\nalias: null\n")
+                .is_err()
+        );
+        assert!(
+            serde_yaml::from_str::<Trigger>("platform: sun\nevent: sunrise\nalias: [one, two]\n")
+                .is_err()
+        );
+        assert!(
+            serde_yaml::from_str::<Trigger>(
+                "platform: sun\nevent: sunrise\nalias: {name: sunrise}\n"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_and_registry_sun_trigger_yaml_use_pinned_names() {
+        let legacy = config(
+            r#"
+- id: legacy_sun
+  triggers:
+    - platform: sun
+      event: sunset
+      offset: "-00:30:00"
+  actions:
+    - action: test.notify
+"#,
+        );
+        validate(&legacy).unwrap();
+        assert!(matches!(
+            &legacy[0].triggers[0],
+            Trigger::Sun { platform, event: Some(event), .. }
+                if platform == "sun" && event == "sunset"
+        ));
+        assert_eq!(
+            sun_offset(&legacy[0].triggers[0]).unwrap(),
+            ChronoDuration::minutes(-30)
+        );
+
+        let invalid_legacy = config(
+            r#"
+- id: invalid_legacy_sun
+  triggers:
+    - platform: sun
+      event: sunrise
+      offset: "00:30:00"
+      offset_type: before
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(validate(&invalid_legacy).is_err());
+
+        let native = config(
+            r#"
+- id: registry_sun
+  triggers:
+    - platform: sun.dawn
+      options:
+        type: nautical
+        offset: "00:15:00"
+        offset_type: before
+  actions:
+    - action: test.notify
+"#,
+        );
+        validate(&native).unwrap();
+        assert!(matches!(
+            &native[0].triggers[0],
+            Trigger::Sun { platform, twilight_type: Some(twilight), .. }
+                if platform == "sun.dawn" && twilight == "nautical"
+        ));
+        assert_eq!(
+            sun_offset(&native[0].triggers[0]).unwrap(),
+            ChronoDuration::minutes(-15)
+        );
+        let encoded = serde_yaml::to_string(&native[0].triggers[0]).unwrap();
+        let decoded: Trigger = serde_yaml::from_str(&encoded).unwrap();
+        assert!(matches!(
+            decoded,
+            Trigger::Sun { platform, twilight_type: Some(twilight), .. }
+                if platform == "sun.dawn" && twilight == "nautical"
+        ));
+
+        let elevation_changed = config(
+            r#"
+- id: elevation_changed
+  triggers:
+    - platform: sun.elevation_changed
+      options:
+        threshold:
+          type: any
+  actions:
+    - action: test.notify
+"#,
+        );
+        validate(&elevation_changed).unwrap();
+        assert!(matches!(
+            &elevation_changed[0].triggers[0],
+            Trigger::Sun {
+                platform,
+                threshold: Some(Value::Object(threshold)),
+                r#for: None,
+                ..
+            } if platform == "sun.elevation_changed"
+                && threshold["type"] == "any"
+        ));
+
+        let elevation_crossed = config(
+            r#"
+- id: elevation_crossed
+  triggers:
+    - platform: sun.elevation_crossed_threshold
+      options:
+        threshold:
+          type: between
+          value_min:
+            number: -10
+          value_max:
+            number: 10
+        for:
+          seconds: 2
+  actions:
+    - action: test.notify
+"#,
+        );
+        validate(&elevation_crossed).unwrap();
+        assert!(matches!(
+            &elevation_crossed[0].triggers[0],
+            Trigger::Sun {
+                platform,
+                threshold: Some(Value::Object(threshold)),
+                r#for: Some(DelayValue::Parts(DelayParts { seconds: Some(2.0), .. })),
+                ..
+            } if platform == "sun.elevation_crossed_threshold"
+                && threshold["type"] == "between"
+        ));
+
+        let invalid_crossed = config(
+            r#"
+- id: invalid_elevation_crossed
+  triggers:
+    - platform: sun.elevation_crossed_threshold
+      options:
+        threshold:
+          type: any
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(validate(&invalid_crossed).is_err());
+    }
+
+    #[test]
+    fn sun_elevation_thresholds_use_selector_inclusive_and_exclusive_edges() {
+        let runtime = runtime();
+        let between = parse_sun_elevation_threshold(
+            &serde_json::json!({
+                "type": "between",
+                "value_min": {"number": -10},
+                "value_max": {"number": 10}
+            }),
+            false,
+        )
+        .unwrap();
+        assert!(sun_elevation_in_threshold(&runtime, &between, -10.0));
+        assert!(sun_elevation_in_threshold(&runtime, &between, 10.0));
+        assert!(!sun_elevation_in_threshold(&runtime, &between, 10.001));
+
+        let outside = parse_sun_elevation_threshold(
+            &serde_json::json!({
+                "type": "outside",
+                "value_min": {"number": -10},
+                "value_max": {"number": 10}
+            }),
+            false,
+        )
+        .unwrap();
+        assert!(!sun_elevation_in_threshold(&runtime, &outside, -10.0));
+        assert!(!sun_elevation_in_threshold(&runtime, &outside, 10.0));
+        assert!(sun_elevation_in_threshold(&runtime, &outside, 10.001));
+
+        runtime
+            .set_state(
+                "input_number.sun_limit",
+                "5.5",
+                Map::from_iter([("unit_of_measurement".into(), Value::String("°".into()))]),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let entity_bound = parse_sun_elevation_threshold(
+            &serde_json::json!({
+                "type": "above",
+                "value": {"entity": "input_number.sun_limit"}
+            }),
+            false,
+        )
+        .unwrap();
+        assert!(!sun_elevation_in_threshold(&runtime, &entity_bound, 5.5));
+        assert!(sun_elevation_in_threshold(&runtime, &entity_bound, 5.6));
+    }
+
+    #[test]
+    fn sun_elevation_condition_matches_numeric_threshold_selector_contract() {
+        use chrono::TimeZone;
+
+        let runtime = runtime();
+        runtime
+            .set_home_context(HomeContext {
+                latitude: 32.7157,
+                longitude: -117.1611,
+                elevation: 0.0,
+                time_zone: "America/Los_Angeles".into(),
+            })
+            .unwrap();
+        runtime
+            .set_state(
+                "input_number.sun_limit",
+                "90",
+                Map::from_iter([("unit_of_measurement".into(), Value::String("°".into()))]),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+
+        let condition: Condition = serde_yaml::from_str(
+            r#"
+condition: sun.elevation
+options:
+  threshold:
+    type: between
+    value_min:
+      number: -90
+    value_max:
+      entity: input_number.sun_limit
+"#,
+        )
+        .unwrap();
+        validate_sun_condition(&condition).unwrap();
+        let noon = Utc
+            .with_ymd_and_hms(2015, 9, 15, 20, 0, 0)
+            .single()
+            .unwrap();
+        assert!(evaluate_sun_condition_config(&runtime, &condition, noon).unwrap());
+
+        let outside = serde_json::json!({
+            "type": "outside",
+            "value_min": {"number": -1},
+            "value_max": {"number": 1}
+        });
+        validate_sun_threshold(&outside).unwrap();
+        let outside = resolve_sun_threshold(&runtime, &outside, 1.0).unwrap();
+        assert!(!outside);
+        let outside_threshold = parse_sun_elevation_threshold(
+            &serde_json::json!({
+                "type": "outside",
+                "value_min": {"number": -1},
+                "value_max": {"number": 1}
+            }),
+            false,
+        )
+        .unwrap();
+        assert!(sun_elevation_in_threshold(
+            &runtime,
+            &outside_threshold,
+            1.001
+        ));
+        assert!(
+            validate_sun_threshold(&serde_json::json!({
+                "type": "is",
+                "value": {"number": 1}
+            }))
+            .is_err()
+        );
+
+        runtime
+            .set_state(
+                "input_number.sun_limit",
+                "90",
+                Map::from_iter([("unit_of_measurement".into(), Value::String("rad".into()))]),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        assert!(!evaluate_sun_condition_config(&runtime, &condition, noon).unwrap());
+    }
+
+    #[tokio::test]
+    async fn sun_elevation_changed_uses_sun_state_attribute_transitions() {
+        let runtime = runtime();
+        let mut initial_attributes = Map::new();
+        initial_attributes.insert("elevation".into(), Value::from(5.0));
+        initial_attributes.insert("azimuth".into(), Value::from(90.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                initial_attributes,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let automations = config(
+            r#"
+- id: sun_elevation_changed
+  triggers:
+    - platform: event
+      event_type: unused_sun_event
+    - platform: sun.elevation_changed
+      id: observed_elevation
+      alias: Elevation changed
+      options:
+        threshold:
+          type: any
+  actions:
+    - action: test.notify
+      data:
+        message: changed
+        platform: "{{ trigger.platform }}"
+        trigger_id: "{{ trigger.id }}"
+        trigger_idx: "{{ trigger.idx }}"
+        trigger_alias: "{{ trigger.alias }}"
+        entity_id: "{{ trigger.entity_id }}"
+        from_elevation: "{{ trigger.from_state.attributes.elevation }}"
+        to_elevation: "{{ trigger.to_state.attributes.elevation }}"
+"#,
+        );
+        let engine = start(runtime.clone(), automations).unwrap();
+
+        let mut same_elevation = Map::new();
+        same_elevation.insert("elevation".into(), Value::from(5.0));
+        same_elevation.insert("azimuth".into(), Value::from(100.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                same_elevation,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(25)).await;
+        assert!(receiver.try_recv().is_err());
+
+        let mut changed_elevation = Map::new();
+        changed_elevation.insert("elevation".into(), Value::from(6.0));
+        changed_elevation.insert("azimuth".into(), Value::from(110.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                changed_elevation,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["message"], "changed");
+        assert_eq!(call.data["platform"], "sun.elevation_changed");
+        assert_eq!(call.data["trigger_id"], "observed_elevation");
+        assert_eq!(call.data["trigger_idx"], "1");
+        assert_eq!(call.data["trigger_alias"], "Elevation changed");
+        assert_eq!(call.data["entity_id"], "sun.sun");
+        assert_ne!(call.data["from_elevation"], call.data["to_elevation"]);
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sun_elevation_crossing_ignores_creation_and_cancels_for_on_exit() {
+        let runtime = runtime();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let automations = config(
+            r#"
+- id: sun_elevation_crossed
+  triggers:
+    - platform: sun.elevation_crossed_threshold
+      options:
+        threshold:
+          type: above
+          value:
+            number: 10
+        for: 0.08
+  actions:
+    - action: test.notify
+      data:
+        message: crossed
+        platform: "{{ trigger.platform }}"
+        entity_id: "{{ trigger.entity_id }}"
+"#,
+        );
+        let engine = start(runtime.clone(), automations).unwrap();
+
+        let mut elevation = Map::new();
+        elevation.insert("elevation".into(), Value::from(15.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                elevation,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "first entity state is not a transition"
+        );
+
+        let mut elevation = Map::new();
+        elevation.insert("elevation".into(), Value::from(5.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                elevation,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let mut elevation = Map::new();
+        elevation.insert("elevation".into(), Value::from(15.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                elevation,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        let mut elevation = Map::new();
+        elevation.insert("elevation".into(), Value::from(5.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                elevation,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        assert!(
+            receiver.try_recv().is_err(),
+            "leaving the threshold cancels for"
+        );
+
+        let mut elevation = Map::new();
+        elevation.insert("elevation".into(), Value::from(15.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                elevation,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        let mut elevation = Map::new();
+        elevation.insert("elevation".into(), Value::from(20.0));
+        runtime
+            .set_state(
+                "sun.sun",
+                "above_horizon",
+                elevation,
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["message"], "crossed");
+        assert_eq!(call.data["platform"], "sun.elevation_crossed_threshold");
+        assert_eq!(call.data["entity_id"], "sun.sun");
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sun_scheduler_delivers_legacy_trigger_data_through_shared_action_runner() {
+        use chrono::TimeZone;
+
+        let runtime = runtime();
+        runtime
+            .set_home_context(HomeContext {
+                latitude: 32.7157,
+                longitude: -117.1611,
+                elevation: 0.0,
+                time_zone: "America/Los_Angeles".into(),
+            })
+            .unwrap();
+        let automations = config(
+            r#"
+- id: sun_at_dawn
+  mode: queued
+  triggers:
+    - platform: event
+      event_type: never_sun_event
+    - platform: sun
+      event: sunrise
+      offset: "-00:30:00.123456"
+      alias: actual UTC sunrise
+  actions:
+    - action: test.notify
+      data:
+        platform: "{{ trigger.platform }}"
+        event: "{{ trigger.event }}"
+        offset: "{{ trigger.offset }}"
+        trigger_id: "{{ trigger.id }}"
+        trigger_idx: "{{ trigger.idx }}"
+        trigger_alias: "{{ trigger.alias }}"
+        description: "{{ trigger.description }}"
+"#,
+        );
+        validate(&automations).unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+
+        let start = Utc.with_ymd_and_hms(2015, 9, 15, 0, 0, 0).single().unwrap();
+        let mut schedules = HashMap::new();
+        assert!(
+            due_sun_trigger_runs(&runtime, &automations, start, &mut schedules)
+                .unwrap()
+                .is_empty()
+        );
+        let identity = ScheduleIdentity {
+            automation_id: "sun_at_dawn".into(),
+            trigger_index: 1,
+            entity_id: None,
+        };
+        let scheduled = schedules[&identity].expect("sunrise should be scheduled");
+        let expected_sunrise = next_event(
+            Observer {
+                latitude: 32.7157,
+                longitude: -117.1611,
+                elevation_m: 0.0,
+            },
+            start,
+            "America/Los_Angeles".parse().unwrap(),
+            SolarEvent::Sunrise,
+            ChronoDuration::zero(),
+        )
+        .unwrap();
+        assert_eq!(
+            scheduled,
+            expected_sunrise - ChronoDuration::minutes(30) - ChronoDuration::microseconds(123_456)
+        );
+
+        let runs = due_sun_trigger_runs(
+            &runtime,
+            &automations,
+            scheduled + ChronoDuration::seconds(1),
+            &mut schedules,
+        )
+        .unwrap();
+        assert_eq!(runs.len(), 1);
+        let run = runs.into_iter().next().unwrap();
+        let trigger_context = run.trigger_context.id.clone();
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        execute_automation(
+            runtime,
+            run,
+            Arc::new(LineageRegistry::default()),
+            cancel_rx,
+        )
+        .await
+        .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["platform"], "sun");
+        assert_eq!(call.data["event"], "sunrise");
+        assert_eq!(call.data["offset"], "-1 day, 23:29:59.876544");
+        assert_eq!(call.data["trigger_id"], "1");
+        assert_eq!(call.data["trigger_idx"], "1");
+        assert_eq!(call.data["trigger_alias"], "actual UTC sunrise");
+        assert_eq!(call.data["description"], "sun event sunrise");
+        assert_eq!(
+            call.context.parent_id.as_deref(),
+            Some(trigger_context.as_str())
+        );
+    }
+
+    #[test]
+    fn sun_registry_polar_and_hour_triggers_schedule_native_crossings() {
+        use chrono::TimeZone;
+
+        let polar_runtime = runtime();
+        polar_runtime
+            .set_home_context(HomeContext {
+                latitude: 78.22,
+                longitude: 15.65,
+                elevation: 0.0,
+                time_zone: "Europe/Oslo".into(),
+            })
+            .unwrap();
+        let polar: Trigger = serde_yaml::from_str("platform: sun.midnight_sun_started").unwrap();
+        validate_sun_trigger(&polar).unwrap();
+        let anchor = Utc.with_ymd_and_hms(2015, 3, 1, 0, 0, 0).single().unwrap();
+        let transition = next_sun_trigger_time(&polar_runtime, &polar, anchor)
+            .unwrap()
+            .expect("Svalbard has a midnight-sun transition");
+        let expected = Utc
+            .with_ymd_and_hms(2015, 4, 18, 22, 56, 36)
+            .single()
+            .unwrap();
+        assert!((transition - expected).num_seconds().abs() <= 2);
+
+        let hour: Trigger = serde_yaml::from_str(
+            "platform: sun.golden_hour_started\noptions:\n  period: morning\n",
+        )
+        .unwrap();
+        validate_sun_trigger(&hour).unwrap();
+        let san_diego = runtime();
+        san_diego
+            .set_home_context(HomeContext {
+                latitude: 32.7157,
+                longitude: -117.1611,
+                elevation: 0.0,
+                time_zone: "America/Los_Angeles".into(),
+            })
+            .unwrap();
+        let hour_anchor = Utc.with_ymd_and_hms(2015, 9, 15, 1, 0, 0).single().unwrap();
+        let scheduled = next_sun_trigger_time(&san_diego, &hour, hour_anchor)
+            .unwrap()
+            .expect("golden hour reaches the configured morning boundary");
+        let expected = next_event(
+            Observer {
+                latitude: 32.7157,
+                longitude: -117.1611,
+                elevation_m: 0.0,
+            },
+            hour_anchor,
+            "America/Los_Angeles".parse().unwrap(),
+            SolarEvent::Elevation {
+                elevation: -4.0,
+                rising: true,
+            },
+            ChronoDuration::zero(),
+        )
+        .unwrap();
+        assert_eq!(scheduled, expected);
+    }
+
+    #[test]
+    fn sun_registry_conditions_use_live_location_and_unrounded_solar_helpers() {
+        use chrono::TimeZone;
+
+        let runtime = runtime();
+        runtime
+            .set_home_context(HomeContext {
+                latitude: 32.7157,
+                longitude: -117.1611,
+                elevation: 0.0,
+                time_zone: "America/Los_Angeles".into(),
+            })
+            .unwrap();
+        runtime
+            .set_state(
+                "sun.sun",
+                "below_horizon",
+                Map::from_iter([("elevation".into(), Value::from(-80.0))]),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let condition: Condition = serde_yaml::from_str("condition: sun.is_up").unwrap();
+        let conditions = vec![condition];
+        let variables = Map::new();
+        let solar_noon = Utc
+            .with_ymd_and_hms(2015, 9, 15, 20, 0, 0)
+            .single()
+            .unwrap();
+        assert!(conditions_match_at(&runtime, &conditions, &variables, solar_noon).unwrap());
+        let night = Utc
+            .with_ymd_and_hms(2015, 9, 15, 8, 30, 0)
+            .single()
+            .unwrap();
+        assert!(!conditions_match_at(&runtime, &conditions, &variables, night).unwrap());
+
+        let legacy: Condition = serde_yaml::from_str(
+            "condition: sun\noptions:\n  before: sunrise\n  before_offset: '00:30:00'\n",
+        )
+        .unwrap();
+        validate_condition("sun", &legacy).unwrap();
     }
 }

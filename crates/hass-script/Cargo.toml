@@ -7,11 +7,13 @@ rust-version.workspace = true
 
 [dependencies]
 hass-core.workspace = true
+hass-sun.workspace = true
 hass-template.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 

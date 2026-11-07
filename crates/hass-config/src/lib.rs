@@ -8,7 +8,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
-use hass_core::{Context, Error, Result, Runtime};
+use hass_core::{Context, Error, HomeContext, Result, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -601,9 +601,7 @@ impl ConfigEntries {
             let state = manager.lock_state();
             manager.persist(&state)?;
         }
-        manager
-            .runtime
-            .set_time_zone(&manager.core_config().time_zone)?;
+        manager.apply_runtime_core_config(&manager.core_config())?;
         Ok(manager)
     }
 
@@ -1138,6 +1136,15 @@ impl ConfigEntries {
         self.replace_core_config(config, event_data)
     }
 
+    fn apply_runtime_core_config(&self, config: &CoreConfig) -> Result<()> {
+        self.runtime.set_home_context(HomeContext {
+            latitude: config.latitude,
+            longitude: config.longitude,
+            elevation: config.elevation,
+            time_zone: config.time_zone.clone(),
+        })
+    }
+
     fn replace_core_config(
         &self,
         config: CoreConfig,
@@ -1149,7 +1156,7 @@ impl ConfigEntries {
             state.core_config_initialized = true;
             Ok(())
         })?;
-        self.runtime.set_time_zone(&config.time_zone)?;
+        self.apply_runtime_core_config(&config)?;
         self.runtime
             .fire_event("core_config_updated", event_data, Context::default())?;
         Ok(config)
@@ -1235,7 +1242,7 @@ impl ConfigEntries {
             Ok(())
         })?;
         let initialized = self.core_config();
-        self.runtime.set_time_zone(&initialized.time_zone)?;
+        self.apply_runtime_core_config(&initialized)?;
         Ok(initialized)
     }
 
@@ -2434,13 +2441,34 @@ mod tests {
             manager.disable_entry(&entry_id, Some("user")).unwrap();
             let mut changed = manager.core_config();
             changed.location_name = "Renamed in UI".into();
+            changed.latitude = 43.0;
+            changed.longitude = -72.0;
+            changed.elevation = -20.0;
             manager.update_core_config(changed).unwrap();
+            assert_eq!(
+                manager.runtime.home_context(),
+                HomeContext {
+                    latitude: 43.0,
+                    longitude: -72.0,
+                    elevation: -20.0,
+                    time_zone: "America/New_York".into()
+                }
+            );
         }
         {
             let runtime = runtime(store);
             let manager = ConfigEntries::new(runtime).unwrap();
             assert_eq!(manager.runtime.time_zone(), "America/New_York");
             let restored = manager.get_entry(&entry_id).unwrap();
+            assert_eq!(
+                manager.runtime.home_context(),
+                HomeContext {
+                    latitude: 43.0,
+                    longitude: -72.0,
+                    elevation: -20.0,
+                    time_zone: "America/New_York".into()
+                }
+            );
             assert_eq!(restored.state, ConfigEntryState::NotLoaded);
             assert_eq!(restored.disabled_by.as_deref(), Some("user"));
             assert_eq!(restored.options["polling"], 42);

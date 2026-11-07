@@ -935,13 +935,16 @@
     {
       "area": "Entity model, platforms and add/remove lifecycle",
       "coverage_status": "partial_or_unported",
-      "gap": "Shared native provider identity, metadata refresh, weak leases, registry rename/disable/remove, restore and unload are exercised by actual template and clock providers. EntitySpec recording policy also omits Tag tag_id from state history while preserving full live state and state_changed payloads. Generic platform setup, polling/coordinator ownership, complete attribute/capability/domain semantics, translation and exhaustive failure/parity coverage remain open.",
+      "gap": "Shared native provider identity, metadata refresh, weak leases, registry rename/disable/remove, restore and unload are exercised by actual template, clock, and Sun providers. Bounded Sun host review corrections have native and process checks; exhaustive Sun fixtures remain open. Sun Drop cleanup is best-effort unless joined shutdown is used. EntitySpec recording policy also omits Tag tag_id from state history while preserving full live state and state_changed payloads. Generic platform setup, polling/coordinator ownership, complete attribute/capability/domain semantics, translation and exhaustive failure/parity coverage remain open.",
       "id": "entities_platforms_and_lifecycle",
       "local_evidence_paths": [
         "crates/hass-entity/src/lib.rs",
         "crates/hass-entity/README.md",
         "crates/hass-registry/src/provider.rs",
         "crates/hass-template-entities/src/lib.rs",
+        "crates/hass-sun/src/integration.rs",
+        "crates/hass-sun/src/lib.rs",
+        "crates/hass-sun/README.md",
         "crates/hass-system-sensors/src/lib.rs",
         "crates/hass-tag/src/lib.rs",
         "crates/hass-tag/tests/sqlite.rs",
@@ -949,7 +952,7 @@
         "crates/hass-native/src/lib.rs",
         "crates/hass/src/helpers.rs"
       ],
-      "next_acceptance": "Complete provider replacement and failed-cleanup recovery checks, prove custom Store implementations honor the history projection, then extend the shared lifecycle to generic platform setup, coordinator refresh, source-complete attributes/capabilities and remaining providers against pinned entity tests.",
+      "next_acceptance": "Extend pinned Sun fixtures, provider replacement and failed-cleanup recovery checks; prove custom Store implementations honor the history projection; then extend the shared lifecycle to generic platform setup, coordinator refresh, source-complete attributes/capabilities and remaining providers against pinned entity tests.",
       "pinned_upstream_sources": [
         "homeassistant/helpers/entity.py",
         "homeassistant/helpers/entity_platform.py",
@@ -1037,11 +1040,14 @@
     {
       "area": "WebSocket auth, command channels, subscriptions and payload contracts",
       "coverage_status": "partial_or_unported",
-      "gap": "Only a command subset is available; all remaining command families, per-feature authorization, flow lifecycle, message validation, subscription fan-out and exact event/result envelopes remain open.",
+      "gap": "System Log list/raw commands now have native adapters and a focused transport fixture, but only a command subset is available; remaining command families, per-feature authorization, flow lifecycle, message validation, subscription fan-out and exact event/result envelopes remain open.",
       "id": "websocket_api",
       "local_evidence_paths": [
         "crates/hass-api/src/websocket.rs",
-        "crates/hass-api/src/login.rs"
+        "crates/hass-api/src/login.rs",
+        "crates/hass-system-log/src/lib.rs",
+        "crates/hass-api/tests/system_log_protocol.rs",
+        "crates/hass/tests/end_to_end.rs"
       ],
       "next_acceptance": "Enumerate every pinned command decorator/channel, implement authorization and envelopes, then test malformed/duplicate IDs, auth expiry, flow commands, subscriptions, shutdown and cleanup.",
       "pinned_upstream_sources": [
@@ -1084,16 +1090,18 @@
     {
       "area": "Automation, script, scene and template engines",
       "coverage_status": "partial_or_unported",
-      "gap": "Native scripts/scenes and shared action execution, state/event/numeric/template/time/MQTT/notification/lifecycle triggers, modes and reactive template entities have fixtures. Native tag_scanned callback triggers carry event context and metadata, with focused legacy composite-ID expansion coverage. Remaining trigger/condition/action/template surfaces, blueprints, traces and exhaustive acceptance remain open.",
+      "gap": "Native scripts/scenes and shared action execution, state/event/numeric/template/time/MQTT/notification/lifecycle triggers, modes and reactive template entities have fixtures. Native Sun conditions, calculated-event scheduling, and rounded-state elevation changed/crossed cancellation have focused tests; source selector/unit, offset and trigger metadata corrections have passing checks. Exhaustive Sun fixtures and typed timedelta template methods remain open. Native tag_scanned callback triggers carry event context and metadata, with focused legacy composite-ID expansion coverage. Remaining trigger/condition/action/template surfaces, blueprints, traces and exhaustive acceptance remain open.",
       "id": "automation_scripts_scenes_templates",
       "local_evidence_paths": [
         "crates/hass-automation/src/lib.rs",
         "crates/hass-tag/src/lib.rs",
+        "crates/hass-sun/src/conditions.rs",
+        "crates/hass-sun/src/lib.rs",
         "crates/hass/tests/end_to_end.rs",
         "crates/hass-script/src/lib.rs",
         "crates/hass-template/src/lib.rs"
       ],
-      "next_acceptance": "Drive each engine from pinned tests: trigger/condition/action shapes and modes, script cancellation/queueing, scene snapshot/apply, template helper/filter semantics, resource limits and error behavior.",
+      "next_acceptance": "Extend pinned Sun and drive each engine from pinned tests: trigger/condition/action shapes and modes, script cancellation/queueing, scene snapshot/apply, template helper/filter semantics, resource limits and error behavior.",
       "pinned_upstream_sources": [
         "homeassistant/components/automation/__init__.py",
         "homeassistant/components/script/__init__.py",
@@ -1846,13 +1854,16 @@
     {
       "area": "Backup, repairs, diagnostics, onboarding and system-level services",
       "coverage_status": "partial_or_unported",
-      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. Backup/restore, repairs, diagnostics and remaining system/frontend operating workflows are unported.",
+      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. System Log list/write/raw-stream support is partial; its LLM consumers, coercion parity, observable overflow, reader-backed backlog and complete pinned acceptance remain open. Backup/restore, repairs, diagnostics and remaining system/frontend operating workflows are unported.",
       "id": "backup_repairs_diagnostics_and_system_services",
       "local_evidence_paths": [
         "crates/hass/src/main.rs",
-        "crates/hass-storage/src/lib.rs"
+        "crates/hass-storage/src/lib.rs",
+        "crates/hass-system-log/src/lib.rs",
+        "crates/hass-api/tests/system_log_protocol.rs",
+        "crates/hass/tests/end_to_end.rs"
       ],
-      "next_acceptance": "Port one system service family at a time with failure-safe persistence, authorization, restore/rollback and pinned API/test shape.",
+      "next_acceptance": "Finish System Log LLM/coercion/dedup/overflow/backlog parity and pinned acceptance; then port remaining system-service families with failure-safe persistence, authorization, restore/rollback and pinned API/test shape.",
       "pinned_upstream_sources": [
         {
           "path_count": 23,
@@ -79692,6 +79703,7 @@
       "domain": "logger",
       "local_evidence_paths": [
         "crates/hass-logger/src/lib.rs",
+        "crates/hass-logger/src/records.rs",
         "crates/hass-logger/README.md",
         "crates/hass-api/src/logger.rs",
         "crates/hass-api/tests/logger_protocol.rs",
@@ -79715,7 +79727,7 @@
       },
       "manifest_blob_oid": "eed80c3f4608bb16b878266db0063af22942a773",
       "manifest_path": "homeassistant/components/logger/manifest.json",
-      "outstanding_acceptance": "Tracing combines ERROR and CRITICAL/FATAL thresholds; Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
+      "outstanding_acceptance": "Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -132903,7 +132915,16 @@
         "SunConfigFlow"
       ],
       "domain": "sun",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-sun/src/lib.rs",
+        "crates/hass-sun/src/conditions.rs",
+        "crates/hass-sun/src/integration.rs",
+        "crates/hass-sun/README.md",
+        "crates/hass-automation/src/lib.rs",
+        "crates/hass-script/src/lib.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "categories": [
           "weather_alerts.forecasts"
@@ -132922,7 +132943,7 @@
       },
       "manifest_blob_oid": "ccdd741ce676bbfc75bd8ec6b6226150b7ad6bfd",
       "manifest_path": "homeassistant/components/sun/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Exhaustive pinned Sun fixtures and typed timedelta template methods remain open. Bounded host and time-event/condition reviews are complete with passing enable/restart, selector/unit, short/fractional offset and trigger metadata corrections. SunIntegration::Drop is best-effort; joined cleanup uses shutdown().await.",
       "platform_expressions": [
         {
           "path": "__init__.py",
@@ -132936,7 +132957,7 @@
         "binary_sensor",
         "sensor"
       ],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "14_calendar_weather",
       "protocol_families": [
         "calendar_weather"
@@ -135696,7 +135717,16 @@
       "component_directory": "homeassistant/components/system_log/",
       "config_flow_classes": [],
       "domain": "system_log",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-system-log/src/lib.rs",
+        "crates/hass-api/src/websocket.rs",
+        "crates/hass-api/tests/system_log_protocol.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/logging.rs",
+        "crates/hass/src/main.rs",
+        "crates/hass-logger/src/lib.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [],
         "documentation": "https://www.home-assistant.io/integrations/system_log",
@@ -135707,10 +135737,10 @@
       },
       "manifest_blob_oid": "e9a24cfe1e1d04b774b3c8cc4ca334c9913c60ce",
       "manifest_path": "homeassistant/components/system_log/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "LLM get_entries/get_logs consumers remain absent. Native exceptions expose actual callsite and explicit exception data without fabricating Python traceback frames. The app has no file backlog unless a reader is registered. Optional public event dispatch is bounded: overflow and persistence failures are observable and surfaced at shutdown, rather than lossless source scheduling. Exhaustive pinned fixtures and remaining loader/frontend/LLM privacy surfaces remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -167835,13 +167865,20 @@
               "state_trigger_requires_the_configured_state_transition",
               "rejects_unknown_options_and_bad_bounds",
               "shutdown_cancels_active_delay_and_joins_run",
-              "automation_chains_do_not_reenter_the_first_automation"
+              "automation_chains_do_not_reenter_the_first_automation",
+              "legacy_and_registry_sun_trigger_yaml_use_pinned_names",
+              "sun_elevation_thresholds_use_selector_inclusive_and_exclusive_edges",
+              "sun_elevation_changed_uses_sun_state_attribute_transitions",
+              "sun_elevation_crossing_ignores_creation_and_cancels_for_on_exit",
+              "sun_scheduler_delivers_legacy_trigger_data_through_shared_action_runner",
+              "sun_registry_polar_and_hour_triggers_schedule_native_crossings",
+              "sun_registry_conditions_use_live_location_and_unrounded_solar_helpers"
             ]
           }
         ],
-        "remaining": "Native tag_scanned automation triggers use the Tag callback with context and metadata; focused tests cover legacy composite-ID expansion. Remaining upstream trigger/condition/action constructs, modes, tracing, automation config lifecycle, and exhaustive acceptance remain open. Composite-builder review corrections are not accepted.",
+        "remaining": "Native Sun conditions, calculated-event scheduling, and rounded-state elevation changed/crossed cancellation have focused tests, alongside tag_scanned callback/context coverage. Remaining upstream trigger/condition/action constructs, modes, tracing, automation config lifecycle, full Sun feature review, and exhaustive acceptance remain open. Composite-builder review corrections are not accepted.",
         "status": "partial",
-        "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+        "verification": "Root reports 35 current-worktree automation cases passing; this inventory writer did not run tests. The actual-UTC compiled-process Sun checks are root-reported separately."
       },
       {
         "domain": "config",
@@ -168195,6 +168232,9 @@
             "test_functions_present": [
               "failed_startup_notification_does_not_consume_once_settings",
               "strict_config_accepts_aliases_and_rejects_unknown_fields_or_bad_regex",
+              "formatter_preserves_original_span_and_event_fields",
+              "bridged_dynamic_target_uses_its_level_and_message_filter",
+              "marked_critical_retains_severity_and_dynamic_target_in_real_output",
               "actual_fmt_layer_applies_levels_regexes_aliases_and_live_updates",
               "empty_root_logger_name_controls_real_events_and_inherits",
               "set_level_service_validates_whole_batch_and_requires_admin",
@@ -168204,8 +168244,12 @@
               "yaml_and_saved_levels_merge_to_chattiest_then_live_override_wins",
               "dropping_integration_unregisters_services_and_invalidates_weak_handles",
               "integration_log_info_only_reports_supplied_native_catalog",
-              "log_info_unions_unloaded_integration_settings_and_removes_replaced_entries"
+              "log_info_unions_unloaded_integration_settings_and_removes_replaced_entries",
+              "raw_transport_scope_survives_independent_protocol_logger_levels"
             ]
+          },
+          {
+            "path": "crates/hass-logger/src/records.rs"
           },
           {
             "path": "crates/hass-logger/README.md"
@@ -168251,9 +168295,9 @@
             "path": "crates/hass/src/system_sensors.rs"
           }
         ],
-        "remaining": "Tracing combines ERROR and CRITICAL/FATAL thresholds; Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
+        "remaining": "Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
         "status": "partial",
-        "verification": "Frozen corrected 25-crate workspace passes 517 tests across 66 targets with zero failed/ignored, formatting, strict locked all-target Clippy, optimized build and CLI validation. Logger contributes 12 native tests, actual authenticated IO with captured output, app preflight/authority/independent-target checks and five compiled-process hard-start lifetimes. Primary resolved both independent review findings: target alias coupling and failed-start Once consumption."
+        "verification": "Published revision 216bb1f1271e8f2cf7dd6ae4c4161cda4df34bff records 517 tests/66 targets for 25 crates. The current 27-crate tree passes formatting, strict Clippy and 578 tests/71 targets, including all 16 logger cases: dynamic LogTracer targets/regex, critical severity, original span/event/TRACE fields and transport-only context under independent logger thresholds. Release/CLI and exact CI receipts remain separate. This inventory writer did not run tests."
       },
       {
         "domain": "mqtt",
@@ -168487,12 +168531,145 @@
               "validate_sequence",
               "run_sequence"
             ],
-            "test_functions_present": []
+            "test_functions_present": [
+              "script_choose_conditions_evaluate_legacy_and_registry_sun_conditions"
+            ]
           }
         ],
-        "remaining": "Only the implemented script subset is present; upstream sequencing, modes, cancellation, tracing, UI/config flow, and all pinned fixtures remain to be accepted.",
+        "remaining": "Native legacy and registry-backed Sun conditions have focused script tests, but only a subset of the script integration is implemented. Upstream sequencing, modes, cancellation, tracing, UI/config flow, full Sun feature review, and exhaustive pinned fixtures remain open.",
         "status": "partial",
-        "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+        "verification": "Root reports 8 current-worktree script cases passing; this inventory writer did not run tests. Full script and Sun feature acceptance remain open."
+      },
+      {
+        "domain": "sun",
+        "local_evidence": [
+          {
+            "path": "crates/hass-sun/src/lib.rs",
+            "test_functions_present": [
+              "astral_22_san_diego_dawn_dusk_reference_microseconds",
+              "position_matches_astral_22_reference",
+              "noon_and_midnight_match_astral_22_utc_truncation",
+              "explicit_elevation_crossings_match_dawn_dusk_and_wrap_over_90",
+              "norway_polar_summer_returns_absent_date_and_next_events",
+              "repeated_local_day_events_are_not_skipped",
+              "next_event_keeps_utc_instants_across_oslo_dst_and_local_date_rolls",
+              "elevation_changes_event_horizon_but_not_position",
+              "polar_dates_keep_solar_noon_and_midnight_available",
+              "invalid_observer_is_an_error"
+            ]
+          },
+          {
+            "path": "crates/hass-sun/src/conditions.rs",
+            "test_functions_present": [
+              "up_set_and_direction_conditions_use_real_solar_position",
+              "legacy_condition_preserves_offsets_overnight_or_and_polar_false",
+              "twilight_hour_and_polar_conditions_use_inclusive_bands_and_extrema",
+              "pure_condition_api_keeps_strict_elevation_thresholds",
+              "legacy_boundaries_are_inclusive_after_offset_and_dst_keeps_utc_instants"
+            ]
+          },
+          {
+            "path": "crates/hass-sun/src/integration.rs",
+            "test_functions_present": [
+              "imports_singleton_entities_and_excludes_all_main_attributes_from_history",
+              "snapshot_matches_pinned_event_times_phase_and_horizon_threshold",
+              "position_polling_intervals_and_event_suppression_follow_phase",
+              "no_import_keeps_the_host_live_without_creating_an_entry",
+              "setup_removes_the_deprecated_solar_rising_sensor_identity",
+              "core_location_and_timezone_changes_refresh_active_sun_entities",
+              "enabling_fresh_default_disabled_entities_publishes_without_waiting_for_a_solar_tick",
+              "dropped_loaded_host_can_restart_with_the_same_shared_managers",
+              "restart_preserves_user_enabled_position_entities",
+              "removing_entry_releases_sun_entities_and_service_device",
+              "failed_singleton_restore_unregisters_its_driver"
+            ]
+          },
+          {
+            "path": "crates/hass-automation/src/lib.rs",
+            "test_functions_present": [
+              "legacy_and_registry_sun_trigger_yaml_use_pinned_names",
+              "sun_elevation_thresholds_use_selector_inclusive_and_exclusive_edges",
+              "sun_elevation_changed_uses_sun_state_attribute_transitions",
+              "sun_elevation_crossing_ignores_creation_and_cancels_for_on_exit",
+              "sun_scheduler_delivers_legacy_trigger_data_through_shared_action_runner",
+              "sun_registry_polar_and_hour_triggers_schedule_native_crossings",
+              "sun_registry_conditions_use_live_location_and_unrounded_solar_helpers",
+              "sun_trigger_and_condition_offsets_accept_clocks_and_preserve_microseconds",
+              "sun_offset_string_matches_python_timedelta_format_and_precision",
+              "sun_trigger_metadata_uses_the_pinned_string_schema",
+              "sun_elevation_condition_matches_numeric_threshold_selector_contract"
+            ]
+          },
+          {
+            "path": "crates/hass-script/src/lib.rs",
+            "test_functions_present": [
+              "script_choose_conditions_evaluate_legacy_and_registry_sun_conditions",
+              "script_sun_condition_offsets_accept_clocks_and_preserve_microseconds",
+              "script_sun_elevation_condition_matches_selector_and_degree_units"
+            ]
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "sun_yaml_import_requires_an_explicit_empty_section"
+            ]
+          },
+          {
+            "path": "crates/hass-sun/README.md"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_sun_flow_enable_location_history_and_restart",
+              "real_process_sunrise_offset_runs_on_actual_clock"
+            ]
+          }
+        ],
+        "remaining": "Exhaustive pinned Sun fixtures and typed timedelta template methods remain open. Bounded host and time-event/condition reviews are complete with passing enable/restart, selector/unit, short/fractional offset and trigger metadata corrections. SunIntegration::Drop is best-effort; joined cleanup uses shutdown().await.",
+        "status": "partial",
+        "verification": "The owner reports 39 automation and 10 script cases with strict checks. Root reports 26 Sun cases and both compiled-process checks passing, including trigger id/idx/alias through actual UTC actions. Local workspace formatting, strict Clippy and 578 tests/71 targets pass; release/CLI/publication receipts remain separate. This inventory writer did not run tests."
+      },
+      {
+        "domain": "system_log",
+        "local_evidence": [
+          {
+            "path": "crates/hass-system-log/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-api/src/websocket.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/system_log_protocol.rs",
+            "test_functions_present": [
+              "admin_raw_stream_and_list_share_real_filtered_console_records"
+            ]
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "system_log_configuration_is_validated_before_runtime_setup"
+            ]
+          },
+          {
+            "path": "crates/hass/src/logging.rs"
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass-logger/src/lib.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_system_log_emits_filters_streams_and_restarts",
+              "real_process_raw_log_stream_does_not_echo_its_own_frames"
+            ]
+          }
+        ],
+        "remaining": "LLM get_entries/get_logs consumers remain absent. Native exceptions expose actual callsite and explicit exception data without fabricating Python traceback frames. The app has no file backlog unless a reader is registered. Optional public event dispatch is bounded: overflow and persistence failures are observable and surfaced at shutdown, rather than lossless source scheduling. Exhaustive pinned fixtures and remaining loader/frontend/LLM privacy surfaces remain open.",
+        "status": "partial",
+        "verification": "Nine native crate cases pass. Root process checks pass console/raw/list writes, common-caller cross-level dedup into one count-two row preserving first CRITICAL severity and ordered messages, regex suppression, unsubscribe, installed-but-unconfigured MQTT filtering, memory-only restart and quiet raw output with child TRACE enabled. API checks prove genuine DEBUG writes survive transport-only anti-echo scope. Local workspace formatting, strict Clippy and 578 tests/71 targets pass; release/CLI/publication receipts remain separate. This inventory writer did not run tests."
       },
       {
         "domain": "tag",
@@ -168759,10 +168936,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 34,
+    "partial": 36,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1531
+    "unported": 1529
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

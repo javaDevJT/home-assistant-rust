@@ -2,8 +2,12 @@
 //!
 //! The supported YAML subset and its limits are documented in `README.md`.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hass_core::{Context, Error, Result, Runtime, ServiceCall, ServiceResult, State};
+use hass_sun::{
+    LegacySunCondition, LegacySunEvent, Observer, PureSunCondition, SunPeriod, TwilightBand,
+    evaluate_condition as evaluate_sun_condition,
+};
 use hass_template::TemplateEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -119,6 +123,23 @@ pub struct Action {
     /// Condition action discriminator (`state`, `numeric_state`, `template`,
     /// `and`, `or`, or `not`).
     pub condition: Option<String>,
+    /// Legacy Sun condition before and after event fields.
+    pub before: Option<String>,
+    /// Legacy Sun condition after event field.
+    pub after: Option<String>,
+    /// Legacy Sun condition offsets.
+    pub before_offset: Option<Value>,
+    /// Legacy Sun condition offsets.
+    pub after_offset: Option<Value>,
+    /// Option mapping used by the legacy and Sun registry condition schemas.
+    pub options: Option<Value>,
+    /// Sun hour selector.
+    pub period: Option<String>,
+    /// Twilight selector.
+    #[serde(rename = "type")]
+    pub twilight_type: Option<String>,
+    /// Sun elevation selector threshold.
+    pub threshold: Option<Value>,
     /// Entity IDs for state and numeric-state conditions.
     pub entity_id: Option<EntityIds>,
     /// Expected state for a state condition.
@@ -163,6 +184,90 @@ pub enum Condition {
     },
     /// Evaluate a Jinja expression using the template worker.
     Template { value_template: String },
+    /// Legacy `condition: sun` before/after condition.
+    Sun {
+        #[serde(default)]
+        before: Option<String>,
+        #[serde(default)]
+        after: Option<String>,
+        #[serde(default)]
+        before_offset: Option<Value>,
+        #[serde(default)]
+        after_offset: Option<Value>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    /// Pinned Sun registry conditions (`sun.is_up` and related names).
+    #[serde(rename = "sun.is_up")]
+    SunIsUp {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_set")]
+    SunIsSet {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_ascending")]
+    SunIsAscending {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_descending")]
+    SunIsDescending {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_night")]
+    SunIsNight {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_morning_twilight")]
+    SunMorningTwilight {
+        #[serde(default, rename = "type")]
+        twilight_type: Option<String>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_evening_twilight")]
+    SunEveningTwilight {
+        #[serde(default, rename = "type")]
+        twilight_type: Option<String>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_golden_hour")]
+    SunGoldenHour {
+        #[serde(default)]
+        period: Option<String>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_blue_hour")]
+    SunBlueHour {
+        #[serde(default)]
+        period: Option<String>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_midnight_sun")]
+    SunIsMidnightSun {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.is_polar_night")]
+    SunIsPolarNight {
+        #[serde(default)]
+        options: Option<Value>,
+    },
+    #[serde(rename = "sun.elevation")]
+    SunElevation {
+        #[serde(default)]
+        threshold: Option<Value>,
+        #[serde(default)]
+        options: Option<Value>,
+    },
     /// Require every nested condition.
     And { conditions: Vec<Condition> },
     /// Require at least one nested condition.
@@ -1451,6 +1556,54 @@ fn condition_from_action(action: &Action) -> Result<Condition> {
                 .clone()
                 .ok_or_else(|| invalid("not condition requires conditions"))?,
         }),
+        "sun" => Ok(Condition::Sun {
+            before: action.before.clone(),
+            after: action.after.clone(),
+            before_offset: action.before_offset.clone(),
+            after_offset: action.after_offset.clone(),
+            options: action.options.clone(),
+        }),
+        "sun.is_up" => Ok(Condition::SunIsUp {
+            options: action.options.clone(),
+        }),
+        "sun.is_set" => Ok(Condition::SunIsSet {
+            options: action.options.clone(),
+        }),
+        "sun.is_ascending" => Ok(Condition::SunIsAscending {
+            options: action.options.clone(),
+        }),
+        "sun.is_descending" => Ok(Condition::SunIsDescending {
+            options: action.options.clone(),
+        }),
+        "sun.is_night" => Ok(Condition::SunIsNight {
+            options: action.options.clone(),
+        }),
+        "sun.is_morning_twilight" => Ok(Condition::SunMorningTwilight {
+            twilight_type: action.twilight_type.clone(),
+            options: action.options.clone(),
+        }),
+        "sun.is_evening_twilight" => Ok(Condition::SunEveningTwilight {
+            twilight_type: action.twilight_type.clone(),
+            options: action.options.clone(),
+        }),
+        "sun.is_golden_hour" => Ok(Condition::SunGoldenHour {
+            period: action.period.clone(),
+            options: action.options.clone(),
+        }),
+        "sun.is_blue_hour" => Ok(Condition::SunBlueHour {
+            period: action.period.clone(),
+            options: action.options.clone(),
+        }),
+        "sun.is_midnight_sun" => Ok(Condition::SunIsMidnightSun {
+            options: action.options.clone(),
+        }),
+        "sun.is_polar_night" => Ok(Condition::SunIsPolarNight {
+            options: action.options.clone(),
+        }),
+        "sun.elevation" => Ok(Condition::SunElevation {
+            threshold: action.threshold.clone(),
+            options: action.options.clone(),
+        }),
         other => Err(invalid(format!("unsupported script condition `{other}`"))),
     }
 }
@@ -1510,6 +1663,19 @@ fn condition_matches(
             let value = template.render_value(value_template, variables)?;
             Ok(truthy(&value))
         }
+        sun_condition @ (Condition::Sun { .. }
+        | Condition::SunIsUp { .. }
+        | Condition::SunIsSet { .. }
+        | Condition::SunIsAscending { .. }
+        | Condition::SunIsDescending { .. }
+        | Condition::SunIsNight { .. }
+        | Condition::SunMorningTwilight { .. }
+        | Condition::SunEveningTwilight { .. }
+        | Condition::SunGoldenHour { .. }
+        | Condition::SunBlueHour { .. }
+        | Condition::SunIsMidnightSun { .. }
+        | Condition::SunIsPolarNight { .. }
+        | Condition::SunElevation { .. }) => evaluate_sun_script_condition(runtime, sun_condition),
         Condition::And { conditions } => conditions_match(runtime, template, conditions, variables),
         Condition::Or { conditions } => {
             for child in conditions {
@@ -1525,6 +1691,451 @@ fn condition_matches(
                 .ok_or_else(|| invalid("not condition needs one child"))?;
             Ok(!condition_matches(runtime, template, child, variables)?)
         }
+    }
+}
+
+fn evaluate_sun_script_condition(runtime: &Runtime, condition: &Condition) -> Result<bool> {
+    let home = runtime.home_context();
+    let timezone = home
+        .time_zone
+        .parse::<chrono_tz::Tz>()
+        .map_err(|_| invalid(format!("invalid configured timezone `{}`", home.time_zone)))?;
+    let observer = Observer {
+        latitude: home.latitude,
+        longitude: home.longitude,
+        elevation_m: home.elevation,
+    };
+    let now = Utc::now();
+    let value = match condition {
+        Condition::Sun {
+            before,
+            after,
+            before_offset,
+            after_offset,
+            options,
+        } => {
+            let options = script_sun_options(options.as_ref())?;
+            script_sun_option_keys(
+                &options,
+                &["before", "after", "before_offset", "after_offset"],
+            )?;
+            let before = script_sun_bound(before.as_deref(), options.get("before"))?;
+            let after = script_sun_bound(after.as_deref(), options.get("after"))?;
+            if before.is_none() && after.is_none() {
+                return Err(invalid("Sun condition requires before or after"));
+            }
+            let before_offset = script_sun_duration(
+                before_offset
+                    .as_ref()
+                    .or_else(|| options.get("before_offset")),
+            )?;
+            let after_offset = script_sun_duration(
+                after_offset
+                    .as_ref()
+                    .or_else(|| options.get("after_offset")),
+            )?;
+            PureSunCondition::Legacy(LegacySunCondition {
+                before,
+                after,
+                before_offset,
+                after_offset,
+            })
+        }
+        Condition::SunIsUp { options } => {
+            script_sun_option_keys(&script_sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsUp
+        }
+        Condition::SunIsSet { options } => {
+            script_sun_option_keys(&script_sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsSet
+        }
+        Condition::SunIsAscending { options } => {
+            script_sun_option_keys(&script_sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsAscending
+        }
+        Condition::SunIsDescending { options } => {
+            script_sun_option_keys(&script_sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsDescending
+        }
+        Condition::SunIsNight { options } => {
+            script_sun_option_keys(&script_sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsNight
+        }
+        Condition::SunMorningTwilight {
+            twilight_type,
+            options,
+        } => PureSunCondition::MorningTwilight(script_sun_twilight(
+            twilight_type.as_deref(),
+            &script_sun_options(options.as_ref())?,
+        )?),
+        Condition::SunEveningTwilight {
+            twilight_type,
+            options,
+        } => PureSunCondition::EveningTwilight(script_sun_twilight(
+            twilight_type.as_deref(),
+            &script_sun_options(options.as_ref())?,
+        )?),
+        Condition::SunGoldenHour { period, options } => PureSunCondition::GoldenHour(
+            script_sun_period(period.as_deref(), &script_sun_options(options.as_ref())?)?,
+        ),
+        Condition::SunBlueHour { period, options } => PureSunCondition::BlueHour(
+            script_sun_period(period.as_deref(), &script_sun_options(options.as_ref())?)?,
+        ),
+        Condition::SunIsMidnightSun { options } => {
+            script_sun_option_keys(&script_sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsMidnightSun
+        }
+        Condition::SunIsPolarNight { options } => {
+            script_sun_option_keys(&script_sun_options(options.as_ref())?, &[])?;
+            PureSunCondition::IsPolarNight
+        }
+        Condition::SunElevation { threshold, options } => {
+            let options = script_sun_options(options.as_ref())?;
+            script_sun_option_keys(&options, &["threshold"])?;
+            if threshold.is_some() && options.contains_key("threshold") {
+                return Err(invalid("Sun threshold is specified more than once"));
+            }
+            let threshold = threshold
+                .as_ref()
+                .or_else(|| options.get("threshold"))
+                .ok_or_else(|| invalid("Sun elevation needs a threshold"))?;
+            let threshold = script_sun_threshold(threshold)?;
+            let elevation = hass_sun::position_at(observer, now)
+                .map_err(|error| invalid(error.to_string()))?
+                .elevation;
+            return Ok(script_sun_elevation_matches(runtime, &threshold, elevation));
+        }
+        _ => return Err(invalid("expected a Sun condition")),
+    };
+    evaluate_sun_condition(observer, now, timezone, value)
+        .map_err(|error| invalid(error.to_string()))
+}
+
+fn script_sun_options(value: Option<&Value>) -> Result<Map<String, Value>> {
+    match value {
+        None => Ok(Map::new()),
+        Some(Value::Object(value)) => Ok(value.clone()),
+        Some(_) => Err(invalid("Sun condition options must be a mapping")),
+    }
+}
+fn script_sun_option_keys(options: &Map<String, Value>, allowed: &[&str]) -> Result<()> {
+    if let Some(key) = options.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(invalid(format!("unsupported Sun condition option `{key}`")));
+    }
+    Ok(())
+}
+fn script_sun_bound(
+    direct: Option<&str>,
+    nested: Option<&Value>,
+) -> Result<Option<LegacySunEvent>> {
+    if direct.is_some() && nested.is_some() {
+        return Err(invalid("Sun bound is specified more than once"));
+    }
+    let event = direct
+        .map(str::to_owned)
+        .or_else(|| nested.and_then(Value::as_str).map(str::to_owned));
+    if nested.is_some() && event.is_none() {
+        return Err(invalid("Sun event must be a string"));
+    }
+    match event.as_deref() {
+        None => Ok(None),
+        Some("sunrise") => Ok(Some(LegacySunEvent::Sunrise)),
+        Some("sunset") => Ok(Some(LegacySunEvent::Sunset)),
+        Some(other) => Err(invalid(format!("unsupported Sun event `{other}`"))),
+    }
+}
+fn script_sun_duration(value: Option<&Value>) -> Result<ChronoDuration> {
+    let Some(value) = value else {
+        return Ok(ChronoDuration::zero());
+    };
+    let seconds = match value {
+        Value::Number(number) => number
+            .as_f64()
+            .ok_or_else(|| invalid("Sun offset must be finite"))?,
+        Value::String(text) => {
+            let text = text.trim();
+            let (sign, text) = match text.strip_prefix('-') {
+                Some(text) => (-1.0, text),
+                None => (1.0, text.strip_prefix('+').unwrap_or(text)),
+            };
+            let p = text.split(':').collect::<Vec<_>>();
+            if !matches!(p.len(), 2 | 3) {
+                return Err(invalid("Sun offset must use HH:MM or HH:MM:SS"));
+            }
+            let h = p[0]
+                .parse::<u64>()
+                .map_err(|_| invalid("Sun offset hours are invalid"))?;
+            let m = p[1]
+                .parse::<u64>()
+                .map_err(|_| invalid("Sun offset minutes are invalid"))?;
+            let s = if p.len() == 3 {
+                p[2].parse::<f64>()
+                    .map_err(|_| invalid("Sun offset seconds are invalid"))?
+            } else {
+                0.0
+            };
+            if m >= 60 || !s.is_finite() || !(0.0..60.0).contains(&s) {
+                return Err(invalid("Sun offset has an invalid clock component"));
+            }
+            sign * (h as f64 * 3600.0 + m as f64 * 60.0 + s)
+        }
+        Value::Object(parts) => {
+            let mut total = 0.0;
+            for (key, scale) in [
+                ("days", 86400.0),
+                ("hours", 3600.0),
+                ("minutes", 60.0),
+                ("seconds", 1.0),
+                ("milliseconds", 0.001),
+            ] {
+                if let Some(value) = parts.get(key) {
+                    total += value.as_f64().filter(|v| v.is_finite()).ok_or_else(|| {
+                        invalid(format!("Sun offset `{key}` must be finite numeric"))
+                    })? * scale;
+                }
+            }
+            if parts.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "days" | "hours" | "minutes" | "seconds" | "milliseconds"
+                )
+            }) {
+                return Err(invalid("Sun offset has an unknown duration component"));
+            }
+            total
+        }
+        _ => {
+            return Err(invalid(
+                "Sun offset must be seconds, HH:MM[:SS], or duration components",
+            ));
+        }
+    };
+    if !seconds.is_finite() || seconds.abs() > i64::MAX as f64 / 1_000_000.0 {
+        return Err(invalid("Sun offset is outside the supported range"));
+    }
+    Ok(ChronoDuration::microseconds(
+        (seconds * 1_000_000.0).round() as i64,
+    ))
+}
+fn script_sun_twilight(direct: Option<&str>, options: &Map<String, Value>) -> Result<TwilightBand> {
+    script_sun_option_keys(options, &["type"])?;
+    if direct.is_some() && options.contains_key("type") {
+        return Err(invalid("Sun type is specified more than once"));
+    }
+    let value = direct
+        .or_else(|| options.get("type").and_then(Value::as_str))
+        .unwrap_or("any");
+    match value {
+        "any" => Ok(TwilightBand::Any),
+        "civil" => Ok(TwilightBand::Civil),
+        "nautical" => Ok(TwilightBand::Nautical),
+        "astronomical" => Ok(TwilightBand::Astronomical),
+        other => Err(invalid(format!("unsupported Sun twilight type `{other}`"))),
+    }
+}
+fn script_sun_period(direct: Option<&str>, options: &Map<String, Value>) -> Result<SunPeriod> {
+    script_sun_option_keys(options, &["period"])?;
+    if direct.is_some() && options.contains_key("period") {
+        return Err(invalid("Sun period is specified more than once"));
+    }
+    let value = direct
+        .or_else(|| options.get("period").and_then(Value::as_str))
+        .unwrap_or("any");
+    match value {
+        "any" => Ok(SunPeriod::Any),
+        "morning" => Ok(SunPeriod::Morning),
+        "evening" => Ok(SunPeriod::Evening),
+        other => Err(invalid(format!("unsupported Sun period `{other}`"))),
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
+enum ScriptSunThresholdBound {
+    Number(f64),
+    Entity(String),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ScriptSunThreshold {
+    Above(ScriptSunThresholdBound),
+    Below(ScriptSunThresholdBound),
+    Between {
+        lower: ScriptSunThresholdBound,
+        upper: ScriptSunThresholdBound,
+    },
+    Outside {
+        lower: ScriptSunThresholdBound,
+        upper: ScriptSunThresholdBound,
+    },
+}
+
+fn script_sun_threshold(value: &Value) -> Result<ScriptSunThreshold> {
+    let config = value
+        .as_object()
+        .ok_or_else(|| invalid("Sun threshold must be a mapping"))?;
+    if config
+        .keys()
+        .any(|key| !matches!(key.as_str(), "type" | "value" | "value_min" | "value_max"))
+    {
+        return Err(invalid("Sun threshold has unknown fields"));
+    }
+    let threshold_type = config
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| invalid("Sun threshold needs a type"))?;
+    match threshold_type {
+        "above" | "below" => {
+            if config.contains_key("value_min") || config.contains_key("value_max") {
+                return Err(invalid(
+                    "above/below thresholds do not accept value_min or value_max",
+                ));
+            }
+            let bound = script_sun_threshold_bound(
+                config
+                    .get("value")
+                    .ok_or_else(|| invalid("above/below threshold requires value"))?,
+            )?;
+            Ok(if threshold_type == "above" {
+                ScriptSunThreshold::Above(bound)
+            } else {
+                ScriptSunThreshold::Below(bound)
+            })
+        }
+        "between" | "outside" => {
+            if config.contains_key("value") {
+                return Err(invalid("between/outside thresholds do not accept value"));
+            }
+            let lower = script_sun_threshold_bound(
+                config
+                    .get("value_min")
+                    .ok_or_else(|| invalid("between/outside threshold requires value_min"))?,
+            )?;
+            let upper = script_sun_threshold_bound(
+                config
+                    .get("value_max")
+                    .ok_or_else(|| invalid("between/outside threshold requires value_max"))?,
+            )?;
+            if let (ScriptSunThresholdBound::Number(lower), ScriptSunThresholdBound::Number(upper)) =
+                (&lower, &upper)
+                && lower > upper
+            {
+                return Err(invalid("value_min must not be greater than value_max"));
+            }
+            Ok(if threshold_type == "between" {
+                ScriptSunThreshold::Between { lower, upper }
+            } else {
+                ScriptSunThreshold::Outside { lower, upper }
+            })
+        }
+        other => Err(invalid(format!("unsupported Sun threshold type `{other}`"))),
+    }
+}
+
+fn script_sun_threshold_bound(value: &Value) -> Result<ScriptSunThresholdBound> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid("Sun threshold bound must be a mapping"))?;
+    if object.keys().any(|key| {
+        !matches!(
+            key.as_str(),
+            "active_choice" | "number" | "entity" | "unit_of_measurement"
+        )
+    }) {
+        return Err(invalid("Sun threshold bound has unknown fields"));
+    }
+    if let Some(unit) = object.get("unit_of_measurement")
+        && !unit.is_null()
+        && !unit.is_string()
+    {
+        return Err(invalid(
+            "Sun threshold unit_of_measurement must be a string or null",
+        ));
+    }
+    let number = object
+        .get("number")
+        .map(|value| {
+            match value {
+                Value::Number(number) => number.as_f64(),
+                Value::String(number) => number.parse::<f64>().ok(),
+                _ => None,
+            }
+            .filter(|value| value.is_finite())
+            .ok_or_else(|| invalid("Sun threshold number must be finite"))
+        })
+        .transpose()?;
+    let entity = object
+        .get("entity")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|entity| valid_entity_id(entity))
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("Sun threshold entity is invalid"))
+        })
+        .transpose()?;
+    let active_choice = match object.get("active_choice") {
+        Some(Value::String(choice)) if matches!(choice.as_str(), "number" | "entity") => {
+            Some(choice.as_str())
+        }
+        Some(_) => return Err(invalid("active_choice must be `number` or `entity`")),
+        None => None,
+    };
+    match active_choice {
+        Some("number") => number
+            .map(ScriptSunThresholdBound::Number)
+            .ok_or_else(|| invalid("numeric Sun threshold requires number")),
+        Some("entity") => entity
+            .map(ScriptSunThresholdBound::Entity)
+            .ok_or_else(|| invalid("entity Sun threshold requires entity")),
+        Some(_) => unreachable!("active_choice was checked above"),
+        None => match (number, entity) {
+            (Some(_), Some(_)) => Err(invalid(
+                "Sun threshold bound with number and entity requires active_choice",
+            )),
+            (Some(number), None) => Ok(ScriptSunThresholdBound::Number(number)),
+            (None, Some(entity)) => Ok(ScriptSunThresholdBound::Entity(entity)),
+            (None, None) => Err(invalid("Sun threshold bound requires number or entity")),
+        },
+    }
+}
+
+fn script_sun_threshold_value(runtime: &Runtime, bound: &ScriptSunThresholdBound) -> Option<f64> {
+    match bound {
+        ScriptSunThresholdBound::Number(number) => Some(*number),
+        ScriptSunThresholdBound::Entity(entity_id) => runtime
+            .get_state(entity_id)
+            .filter(|state| {
+                state
+                    .attributes
+                    .get("unit_of_measurement")
+                    .and_then(Value::as_str)
+                    == Some("°")
+            })
+            .and_then(|state| state.state.parse::<f64>().ok())
+            .filter(|value| value.is_finite()),
+    }
+}
+
+fn script_sun_elevation_matches(
+    runtime: &Runtime,
+    threshold: &ScriptSunThreshold,
+    elevation: f64,
+) -> bool {
+    if !elevation.is_finite() {
+        return false;
+    }
+    match threshold {
+        ScriptSunThreshold::Above(bound) => {
+            script_sun_threshold_value(runtime, bound).is_some_and(|bound| elevation > bound)
+        }
+        ScriptSunThreshold::Below(bound) => {
+            script_sun_threshold_value(runtime, bound).is_some_and(|bound| elevation < bound)
+        }
+        ScriptSunThreshold::Between { lower, upper } => script_sun_threshold_value(runtime, lower)
+            .zip(script_sun_threshold_value(runtime, upper))
+            .is_some_and(|(lower, upper)| lower <= elevation && elevation <= upper),
+        ScriptSunThreshold::Outside { lower, upper } => script_sun_threshold_value(runtime, lower)
+            .zip(script_sun_threshold_value(runtime, upper))
+            .is_some_and(|(lower, upper)| elevation < lower || elevation > upper),
     }
 }
 
@@ -2361,6 +2972,25 @@ fn validate_actions(actions: &[Action], depth: usize, total: &mut usize) -> Resu
                 "numeric_state" => allowed.extend(["entity_id", "above", "below"]),
                 "template" => allowed.extend(["value_template", "template"]),
                 "and" | "or" | "not" => allowed.push("conditions"),
+                "sun" => allowed.extend([
+                    "before",
+                    "after",
+                    "before_offset",
+                    "after_offset",
+                    "options",
+                ]),
+                "sun.is_morning_twilight" | "sun.is_evening_twilight" => {
+                    allowed.extend(["type", "options"])
+                }
+                "sun.is_golden_hour" | "sun.is_blue_hour" => allowed.extend(["period", "options"]),
+                "sun.elevation" => allowed.extend(["threshold", "options"]),
+                "sun.is_up"
+                | "sun.is_set"
+                | "sun.is_ascending"
+                | "sun.is_descending"
+                | "sun.is_night"
+                | "sun.is_midnight_sun"
+                | "sun.is_polar_night" => allowed.push("options"),
                 _ => {}
             }
             reject_unused_action_fields(action, &allowed)?;
@@ -2452,6 +3082,14 @@ fn reject_unused_action_fields(action: &Action, allowed: &[&str]) -> Result<()> 
         ("target", action.target.is_some()),
         ("delay", action.delay.is_some()),
         ("condition", action.condition.is_some()),
+        ("before", action.before.is_some()),
+        ("after", action.after.is_some()),
+        ("before_offset", action.before_offset.is_some()),
+        ("after_offset", action.after_offset.is_some()),
+        ("options", action.options.is_some()),
+        ("period", action.period.is_some()),
+        ("type", action.twilight_type.is_some()),
+        ("threshold", action.threshold.is_some()),
         ("entity_id", action.entity_id.is_some()),
         ("state", action.state.is_some()),
         ("above", action.above.is_some()),
@@ -2491,6 +3129,24 @@ fn validate_condition(condition: &Condition, depth: usize, total: &mut usize) ->
         return Err(invalid(format!(
             "condition count exceeds {MAX_CONDITION_NODES}"
         )));
+    }
+    if matches!(
+        condition,
+        Condition::Sun { .. }
+            | Condition::SunIsUp { .. }
+            | Condition::SunIsSet { .. }
+            | Condition::SunIsAscending { .. }
+            | Condition::SunIsDescending { .. }
+            | Condition::SunIsNight { .. }
+            | Condition::SunMorningTwilight { .. }
+            | Condition::SunEveningTwilight { .. }
+            | Condition::SunGoldenHour { .. }
+            | Condition::SunBlueHour { .. }
+            | Condition::SunIsMidnightSun { .. }
+            | Condition::SunIsPolarNight { .. }
+            | Condition::SunElevation { .. }
+    ) {
+        return validate_script_sun_condition(condition);
     }
     match condition {
         Condition::State { entity_id, state } => {
@@ -2534,6 +3190,89 @@ fn validate_condition(condition: &Condition, depth: usize, total: &mut usize) ->
         _ => {}
     }
     Ok(())
+}
+
+fn validate_script_sun_condition(condition: &Condition) -> Result<()> {
+    match condition {
+        Condition::Sun {
+            before,
+            after,
+            before_offset,
+            after_offset,
+            options,
+        } => {
+            let options = script_sun_options(options.as_ref())?;
+            script_sun_option_keys(
+                &options,
+                &["before", "after", "before_offset", "after_offset"],
+            )?;
+            let before = script_sun_bound(before.as_deref(), options.get("before"))?;
+            let after = script_sun_bound(after.as_deref(), options.get("after"))?;
+            if before.is_none() && after.is_none() {
+                return Err(invalid("Sun condition requires before or after"));
+            }
+            if before_offset.is_some() && options.contains_key("before_offset") {
+                return Err(invalid("Sun before_offset is specified more than once"));
+            }
+            if after_offset.is_some() && options.contains_key("after_offset") {
+                return Err(invalid("Sun after_offset is specified more than once"));
+            }
+            script_sun_duration(
+                before_offset
+                    .as_ref()
+                    .or_else(|| options.get("before_offset")),
+            )?;
+            script_sun_duration(
+                after_offset
+                    .as_ref()
+                    .or_else(|| options.get("after_offset")),
+            )?;
+            Ok(())
+        }
+        Condition::SunIsUp { options }
+        | Condition::SunIsSet { options }
+        | Condition::SunIsAscending { options }
+        | Condition::SunIsDescending { options }
+        | Condition::SunIsNight { options }
+        | Condition::SunIsMidnightSun { options }
+        | Condition::SunIsPolarNight { options } => {
+            script_sun_option_keys(&script_sun_options(options.as_ref())?, &[])
+        }
+        Condition::SunMorningTwilight {
+            twilight_type,
+            options,
+        }
+        | Condition::SunEveningTwilight {
+            twilight_type,
+            options,
+        } => script_sun_twilight(
+            twilight_type.as_deref(),
+            &script_sun_options(options.as_ref())?,
+        )
+        .map(|_| ()),
+        Condition::SunGoldenHour { period, options }
+        | Condition::SunBlueHour { period, options } => {
+            script_sun_period(period.as_deref(), &script_sun_options(options.as_ref())?).map(|_| ())
+        }
+        Condition::SunElevation { threshold, options } => {
+            let options = script_sun_options(options.as_ref())?;
+            script_sun_option_keys(&options, &["threshold"])?;
+            if threshold.is_some() && options.contains_key("threshold") {
+                return Err(invalid("Sun threshold is specified more than once"));
+            }
+            validate_script_sun_threshold(
+                threshold
+                    .as_ref()
+                    .or_else(|| options.get("threshold"))
+                    .ok_or_else(|| invalid("Sun elevation needs a threshold"))?,
+            )
+        }
+        _ => Err(invalid("expected a Sun condition")),
+    }
+}
+
+fn validate_script_sun_threshold(value: &Value) -> Result<()> {
+    script_sun_threshold(value).map(|_| ())
 }
 
 fn validate_entity_ids(ids: &EntityIds) -> Result<()> {
@@ -3173,5 +3912,175 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner),
             Some(context)
         );
+    }
+
+    #[tokio::test]
+    async fn script_choose_conditions_evaluate_legacy_and_registry_sun_conditions() {
+        let runtime = runtime();
+        runtime
+            .set_home_context(hass_core::HomeContext {
+                latitude: 32.7157,
+                longitude: -117.1611,
+                elevation: 0.0,
+                time_zone: "America/Los_Angeles".into(),
+            })
+            .unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<String>();
+        runtime
+            .register_service(
+                "test",
+                "sun_condition",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    let _ = sender.send(
+                        call.data
+                            .get("kind")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+
+        let home = runtime.home_context();
+        let observer = Observer {
+            latitude: home.latitude,
+            longitude: home.longitude,
+            elevation_m: home.elevation,
+        };
+        let timezone = home.time_zone.parse::<chrono_tz::Tz>().unwrap();
+        let now = Utc::now();
+        let expected_registry =
+            evaluate_sun_condition(observer, now, timezone, PureSunCondition::IsUp).unwrap();
+        let expected_legacy = evaluate_sun_condition(
+            observer,
+            now,
+            timezone,
+            PureSunCondition::Legacy(LegacySunCondition {
+                before: None,
+                after: Some(LegacySunEvent::Sunrise),
+                before_offset: ChronoDuration::zero(),
+                after_offset: ChronoDuration::minutes(10),
+            }),
+        )
+        .unwrap();
+
+        let registry_sequence = json!([{
+            "choose": [{
+                "conditions": [{"condition": "sun.is_up"}],
+                "sequence": [{"action": "test.sun_condition", "data": {"kind": "registry"}}]
+            }]
+        }]);
+        let legacy_sequence = json!([{
+            "choose": [{
+                "conditions": [{
+                    "condition": "sun",
+                    "options": {"after": "sunrise", "after_offset": "00:10:00"}
+                }],
+                "sequence": [{"action": "test.sun_condition", "data": {"kind": "legacy"}}]
+            }]
+        }]);
+        validate_sequence(&registry_sequence).unwrap();
+        validate_sequence(&legacy_sequence).unwrap();
+        for sequence in [registry_sequence, legacy_sequence] {
+            let (_cancel_tx, cancel_rx) = watch::channel(false);
+            run_sequence(
+                runtime.clone(),
+                sequence,
+                Map::new(),
+                Context::default(),
+                cancel_rx,
+            )
+            .await
+            .unwrap();
+        }
+
+        let mut calls = Vec::new();
+        while let Ok(call) = receiver.try_recv() {
+            calls.push(call);
+        }
+        let expected = [
+            expected_registry.then_some("registry"),
+            expected_legacy.then_some("legacy"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+        assert_eq!(calls, expected);
+    }
+
+    #[test]
+    fn script_sun_condition_offsets_accept_clocks_and_preserve_microseconds() {
+        assert_eq!(
+            script_sun_duration(Some(&json!("01:02"))).unwrap(),
+            ChronoDuration::minutes(62)
+        );
+        assert_eq!(
+            script_sun_duration(Some(&json!("-00:00:01.123456"))).unwrap(),
+            ChronoDuration::microseconds(-1_123_456)
+        );
+
+        let condition: Condition = serde_yaml::from_str(
+            "condition: sun\noptions:\n  after: sunrise\n  after_offset: \"00:00:01.123456\"\n",
+        )
+        .unwrap();
+        validate_script_sun_condition(&condition).unwrap();
+    }
+
+    #[test]
+    fn script_sun_elevation_condition_matches_selector_and_degree_units() {
+        let runtime = runtime();
+        runtime
+            .set_state(
+                "input_number.sun_limit",
+                "5.5",
+                Map::from_iter([("unit_of_measurement".into(), Value::String("°".into()))]),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+
+        let between = json!({
+            "type": "between",
+            "value_min": {"number": -1},
+            "value_max": {"entity": "input_number.sun_limit"}
+        });
+        validate_script_sun_threshold(&between).unwrap();
+        let between = script_sun_threshold(&between).unwrap();
+        assert!(script_sun_elevation_matches(&runtime, &between, 5.5));
+        assert!(!script_sun_elevation_matches(&runtime, &between, 5.6));
+
+        let outside = json!({
+            "type": "outside",
+            "value_min": {"number": -1},
+            "value_max": {"number": 1}
+        });
+        let outside = script_sun_threshold(&outside).unwrap();
+        assert!(!script_sun_elevation_matches(&runtime, &outside, 1.0));
+        assert!(script_sun_elevation_matches(&runtime, &outside, 1.001));
+        assert!(
+            validate_script_sun_threshold(&json!({
+                "type": "is",
+                "value": {"number": 1}
+            }))
+            .is_err()
+        );
+
+        runtime
+            .set_state(
+                "input_number.sun_limit",
+                "5.5",
+                Map::from_iter([("unit_of_measurement".into(), Value::String("rad".into()))]),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        assert!(!script_sun_elevation_matches(&runtime, &between, 5.5));
     }
 }

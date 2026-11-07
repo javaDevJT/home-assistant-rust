@@ -6,6 +6,9 @@
 //! every event and runs configured message regexes before the layer records an
 //! event.
 
+mod records;
+pub use records::{EventRecord, NormalizedEventFormat, event_record};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -49,8 +52,8 @@ pub type IntegrationCatalogProvider = Arc<dyn Fn() -> IntegrationCatalog + Send 
 /// Supported Home Assistant logger severities.
 ///
 /// The string parser matches Home Assistant's service/config vocabulary. Rust
-/// tracing has only one `ERROR` level, so `CRITICAL` and `FATAL` both use the
-/// same native threshold as `ERROR` when filtering output.
+/// Events carrying an explicit `hass.level="CRITICAL"` marker preserve Python's
+/// critical severity; ordinary tracing error events retain the error level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LoggerLevel {
     NotSet,
@@ -95,8 +98,7 @@ impl LoggerLevel {
         }
     }
 
-    /// Threshold used for Rust events. Critical cannot be distinguished from
-    /// error because tracing has no level above `ERROR`.
+    /// Early metadata-only admission cannot inspect explicit critical markers.
     const fn native_threshold(self) -> i64 {
         match self {
             Self::Critical => 40,
@@ -104,7 +106,7 @@ impl LoggerLevel {
         }
     }
 
-    const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::NotSet => "NOTSET",
             Self::Debug => "DEBUG",
@@ -529,6 +531,12 @@ impl<S> Filter<S> for LoggerFilter
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
+    fn callsite_enabled(&self, _metadata: &Metadata<'_>) -> tracing::subscriber::Interest {
+        // Settings change live; neither a disabled span nor an admitted event
+        // can be cached permanently from its first use.
+        tracing::subscriber::Interest::sometimes()
+    }
+
     fn enabled(&self, metadata: &Metadata<'_>, _context: &LayerContext<'_, S>) -> bool {
         self.inner
             .upgrade()
@@ -548,6 +556,16 @@ impl ManagerInner {
         if !self.active.load(Ordering::Acquire) {
             return false;
         }
+        // This is context for suppressing recursive raw delivery, not an
+        // emitted record. Keep it even when only a protocol dependency has
+        // verbose logging enabled and the API logger itself is at INFO.
+        if metadata.is_span() && metadata.name() == "hass_raw_stream_delivery" {
+            return true;
+        }
+        // Dynamic target and severity fields are only available on the event.
+        if metadata.target() == "log" || metadata.fields().field("hass.target").is_some() {
+            return true;
+        }
         let catalog = (self.catalog)();
         let Ok(state) = self.state.read() else {
             return false;
@@ -559,45 +577,26 @@ impl ManagerInner {
     }
 
     fn event_enabled(&self, event: &Event<'_>) -> bool {
-        let metadata = event.metadata();
-        if !self.event_level_enabled(metadata) {
+        if !self.active.load(Ordering::Acquire) {
             return false;
         }
+        let record = event_record(event);
         let catalog = (self.catalog)();
         let Ok(state) = self.state.read() else {
             return false;
         };
-        let Some(patterns) = state.filters_for(metadata.target(), &catalog) else {
+        if record.severity_number < state.level_for(&record.target, &catalog).number() {
+            return false;
+        }
+        let Some(patterns) = state.filters_for(&record.target, &catalog) else {
             return true;
         };
         if patterns.is_empty() {
             return true;
         }
-        let mut visitor = MessageVisitor::default();
-        event.record(&mut visitor);
         !patterns
             .iter()
-            .any(|pattern| pattern.is_match(&visitor.message))
-    }
-}
-
-#[derive(Default)]
-struct MessageVisitor {
-    message: String,
-}
-
-impl tracing::field::Visit for MessageVisitor {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
-        if field.name() == "message" {
-            self.message = format!("{value:?}");
-        }
-    }
-
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" {
-            self.message.clear();
-            self.message.push_str(value);
-        }
+            .any(|pattern| pattern.is_match(&record.message))
     }
 }
 
@@ -1388,6 +1387,172 @@ mod tests {
         );
         assert!(matches!(result, Err(Error::InvalidInput(_))));
         assert_eq!(store.get_data(STORAGE_KEY).unwrap(), None);
+    }
+
+    #[test]
+    fn raw_transport_scope_survives_independent_protocol_logger_levels() {
+        let integration = LoggerIntegration::start(
+            runtime(Arc::new(MemoryStore::default())),
+            LoggerConfig {
+                logs: BTreeMap::from([("wire.fixture".into(), LoggerLevel::Debug)]),
+                ..LoggerConfig::default()
+            },
+            provider(IntegrationCatalog::new()),
+            allowed(),
+        )
+        .unwrap();
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_fmt::layer()
+                .event_format(NormalizedEventFormat)
+                .with_ansi(false)
+                .with_writer(writer.clone())
+                .with_filter(integration.filter()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let ordinary = tracing::debug_span!("ordinary_debug_scope");
+            {
+                let _entered = ordinary.enter();
+                tracing::debug!(target: "wire.fixture", "ordinary scope fixture");
+            }
+            let delivery = tracing::debug_span!("hass_raw_stream_delivery");
+            let _entered = delivery.enter();
+            tracing::debug!(target: "wire.fixture", "visible protocol fixture");
+            tracing::debug!(target: "ordinary.fixture", "hidden ordinary fixture");
+        });
+        let output = captured(&writer);
+        assert!(output.contains("ordinary scope fixture"), "{output}");
+        assert!(!output.contains("ordinary_debug_scope"), "{output}");
+        assert!(
+            output.contains("hass_raw_stream_delivery: visible protocol fixture"),
+            "{output}"
+        );
+        assert!(!output.contains("hidden ordinary fixture"), "{output}");
+    }
+
+    #[test]
+    fn formatter_preserves_original_span_and_event_fields() {
+        let integration = LoggerIntegration::start(
+            runtime(Arc::new(MemoryStore::default())),
+            LoggerConfig {
+                default: Some(LoggerLevel::NotSet),
+                ..LoggerConfig::default()
+            },
+            provider(IntegrationCatalog::new()),
+            allowed(),
+        )
+        .unwrap();
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_fmt::layer()
+                .event_format(NormalizedEventFormat)
+                .with_ansi(false)
+                .with_writer(writer.clone())
+                .with_filter(integration.filter()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!("request", correlation = 7);
+            let _entered = span.enter();
+            tracing::info!(answer = 42, "original message");
+            tracing::trace!("native trace message");
+        });
+        let output = captured(&writer);
+        assert!(
+            output.contains("request{correlation=7}: original message answer=42"),
+            "{output}"
+        );
+        assert!(
+            output.contains("TRACE [") && output.contains("native trace message"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn bridged_dynamic_target_uses_its_level_and_message_filter() {
+        use log::Log;
+        let integration = LoggerIntegration::start(
+            runtime(Arc::new(MemoryStore::default())),
+            LoggerConfig {
+                logs: BTreeMap::from([
+                    ("log".into(), LoggerLevel::Critical),
+                    ("bridge.dynamic".into(), LoggerLevel::Debug),
+                ]),
+                filters: BTreeMap::from([(
+                    "bridge.dynamic".into(),
+                    vec!["^private fixture$".into()],
+                )]),
+                ..LoggerConfig::default()
+            },
+            provider(IntegrationCatalog::new()),
+            allowed(),
+        )
+        .unwrap();
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_fmt::layer()
+                .event_format(NormalizedEventFormat)
+                .with_ansi(false)
+                .with_writer(writer.clone())
+                .with_filter(integration.filter()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let tracer = tracing_log::LogTracer::new();
+            let target = ["bridge", "dynamic"].join(".");
+            for message in ["visible bridged fixture", "private fixture"] {
+                tracer.log(
+                    &log::Record::builder()
+                        .args(format_args!("{message}"))
+                        .target(&target)
+                        .level(log::Level::Debug)
+                        .file(Some("bridge-source.rs"))
+                        .line(Some(42))
+                        .build(),
+                );
+            }
+        });
+        let output = captured(&writer);
+        assert!(
+            output.contains("DEBUG [bridge.dynamic] visible bridged fixture"),
+            "{output}"
+        );
+        assert!(!output.contains("private fixture"), "{output}");
+        assert!(!output.contains("log.target"), "{output}");
+    }
+
+    #[test]
+    fn marked_critical_retains_severity_and_dynamic_target_in_real_output() {
+        let integration = LoggerIntegration::start(
+            runtime(Arc::new(MemoryStore::default())),
+            LoggerConfig {
+                default: Some(LoggerLevel::Critical),
+                ..LoggerConfig::default()
+            },
+            provider(IntegrationCatalog::new()),
+            allowed(),
+        )
+        .unwrap();
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_fmt::layer()
+                .event_format(NormalizedEventFormat)
+                .with_ansi(false)
+                .with_writer(writer.clone())
+                .with_filter(integration.filter()),
+        );
+        tracing::subscriber::with_default(subscriber, || {
+            let target = ["dynamic", "critical"].join(".");
+            tracing::error!(target: "hass_system_log::external", { hass.target = target.as_str(), hass.level = "CRITICAL", answer = 42 }, "critical fixture");
+            tracing::error!(target: "hass_system_log::external", { hass.target = target.as_str() }, "ordinary error fixture");
+            tracing::info!(target: "hass_system_log::external", { hass.target = target.as_str(), hass.level = "CRITICAL" }, "unpromoted info fixture");
+        });
+        let output = captured(&writer);
+        assert!(
+            output.contains("CRITICAL [dynamic.critical] critical fixture answer=42"),
+            "{output}"
+        );
+        assert!(!output.contains("ordinary error fixture"), "{output}");
+        assert!(!output.contains("unpromoted info fixture"), "{output}");
+        assert!(!output.contains("hass.target"), "{output}");
     }
 
     #[test]

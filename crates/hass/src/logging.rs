@@ -38,6 +38,8 @@ pub fn catalog() -> IntegrationCatalog {
         ("schedule", &["hass_native::schedule"]),
         ("script", &["hass_script"]),
         ("tag", &["hass_tag"]),
+        ("sun", &["hass_sun"]),
+        ("system_log", &["hass_system_log", "hass_api::system_log"]),
         ("template", &["hass_template_entities", "hass_template"]),
         (
             "time_date",

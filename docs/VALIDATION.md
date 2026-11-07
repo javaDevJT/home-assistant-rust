@@ -1,6 +1,20 @@
 # Validation evidence
 
-The corrected 25-crate logger source passes **517 workspace tests** across 66 targets, formatting, strict locked all-target Clippy, optimized build and CLI validation on 2026-11-06. Optimized executable SHA-256: `35a81889ca1a243637136ef2bf1a7f20d4b313b6325730d9a4fe1372cc702d60`. Publication follows this gate; the Sun crate remains outside this receipt.
+The frozen 27-crate Sun/System Log tree passes **578 tests across 71 targets**, zero failed/ignored, formatting, strict locked all-target Clippy, optimized build and optimized example CLI validation on 2026-11-06. Optimized macOS executable SHA-256: `16acb74232a8dd6f01cb30b97ea1b1e187923ba92640011faf63aeb0527cd485`. Source publication and its exact Linux CI receipt follow this local gate. The new Repairs implementation remains outside this checkpoint and workspace.
+
+## Accepted 27-crate Sun and System Log source
+
+All 16 compiled-process cases pass, including real UTC sunrise-offset actions with explicit id/idx/alias, empty Sun flow setup, immediate disabled-sensor enablement, live saved observer updates, nine-attribute history projection, hard restart and removal. The native Sun package has 26 cases; automation has 39 and scripts 10. Bounded independent review corrections cover source range/entity-unit selectors, HH:MM and microsecond offsets, normalized timedelta strings and generic trigger metadata. Typed timedelta template methods and exhaustive source fixtures remain open.
+
+System Log has nine native cases and real API/process coverage for scalar configuration/service coercions, zero retained entries, same-caller cross-level dedup preserving the first level and ordered messages, optional event loss/persistence diagnostics, anchored multiline backlog filtering and RAII subscription cleanup. The process verifies actual console/raw/list output, CRITICAL identity, exact regex suppression, generic unsubscribe, an installed but unconfigured native MQTT filter and memory-only restart. Actual TRACE-enabled child output becomes quiet after a burst; the API fixture proves a genuine DEBUG service write remains visible while socket I/O polling alone carries the raw anti-echo scope.
+
+All 16 logger cases pass actual LogTracer target/source normalization, the literal `log` logger trap, distinct critical/error filtering, original span/event/TRACE preservation and retained transport context under independently configured logger levels. Atomic runtime home context tracks persisted observer/time-zone settings. Inventory checks retain 36 partial domains, 1,529 unported and zero complete. Full upstream parity, System Log LLM consumers and Python traceback reconstruction remain open; no production deployment or physical provider activity occurred.
+
+The context-mode transport timed out after successful formatting, Clippy and the complete 71-target test output were retained. An ownership audit found no surviving compiler process. Primary resumed only the optimized build through a persistent command session; it exited zero, followed by a successful optimized `--check` and the hash above. This tooling interruption did not become a test failure or a second build writer.
+
+## Published 25-crate logger source
+
+Published 25-crate logger source `216bb1f1271e8f2cf7dd6ae4c4161cda4df34bff` passes **517 workspace tests** across 66 targets, formatting, strict locked all-target Clippy, optimized build and CLI validation on 2026-11-06, followed by [green Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42310430899). Optimized executable SHA-256: `35a81889ca1a243637136ef2bf1a7f20d4b313b6325730d9a4fe1372cc702d60`. Later Sun/System Log changes remain outside that historical receipt.
 
 ## Accepted 25-crate logger source
 

@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tracing.workspace = true
 ipnet.workspace = true
 qrcode.workspace = true
 regex.workspace = true
@@ -23,6 +24,7 @@ hass-image-upload.workspace = true
 hass-webhook.workspace = true
 hass-tag.workspace = true
 hass-logger.workspace = true
+hass-system-log.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
@@ -35,7 +37,6 @@ tower.workspace = true
 tower-http.workspace = true
 
 [dev-dependencies]
-tracing.workspace = true
 tracing-subscriber.workspace = true
 hass-entity.workspace = true
 image.workspace = true

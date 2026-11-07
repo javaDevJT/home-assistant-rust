@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 hass-core.workspace = true
+hass-sun.workspace = true
 hass-registry.workspace = true
 hass-webhook.workspace = true
 chrono.workspace = true

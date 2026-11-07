@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker", "crates/hass-image-upload", "crates/hass-webhook", "crates/hass-entity", "crates/hass-system-sensors", "crates/hass-tag", "crates/hass-logger"]
+members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker", "crates/hass-image-upload", "crates/hass-webhook", "crates/hass-entity", "crates/hass-system-sensors", "crates/hass-tag", "crates/hass-logger", "crates/hass-sun", "crates/hass-system-log"]
 
 [workspace.package]
 version = "0.1.0"
@@ -41,10 +41,13 @@ hass-entity = { path = "crates/hass-entity" }
 hass-system-sensors = { path = "crates/hass-system-sensors" }
 hass-tag = { path = "crates/hass-tag" }
 hass-logger = { path = "crates/hass-logger" }
+hass-sun = { path = "crates/hass-sun" }
+hass-system-log = { path = "crates/hass-system-log" }
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png"] }
 http-body-util = "0.1"
 ipnet = "2"
 jsonwebtoken = "9"
+log = "0.4"
 minijinja = { version = "2", features = ["fuel", "json", "builtins"] }
 md-5 = "=0.10.6"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
@@ -65,6 +68,7 @@ tokio-tungstenite = "0.28"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "=0.6.11", features = ["fs"] }
 tracing = "0.1"
+tracing-log = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"

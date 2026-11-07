@@ -18,9 +18,10 @@ use axum::{
 use hass_core::{Error as CoreError, Event, ServiceCall, ServiceResult, State as HassState};
 use serde_json::{Map, Value, json};
 use tokio::{
-    sync::{OwnedSemaphorePermit, broadcast},
+    sync::{OwnedSemaphorePermit, broadcast, mpsc},
     time::timeout,
 };
+use tracing::{Instrument, debug_span};
 
 use crate::AppState;
 
@@ -143,6 +144,7 @@ async fn handle_socket(
     }
 
     let mut subscriptions = HashMap::<u64, Option<String>>::new();
+    let mut raw_log_streams = RawLogStreams::new();
     let mut last_command_id: Option<u64> = None;
     let mut native = crate::subscriptions::NativeSubscriptions::new(
         state.api.runtime.clone(),
@@ -182,7 +184,7 @@ async fn handle_socket(
                 close_socket(&mut socket).await;
                 break;
             }
-            message = socket.recv() => {
+            message = socket.recv().instrument(debug_span!("hass_raw_stream_delivery")) => {
                 let Some(Ok(message)) = message else {
                     break;
                 };
@@ -246,7 +248,26 @@ async fn handle_socket(
                             if send_error(&mut socket,id,WsError::new("unauthorized","Unauthorized")).await.is_err() {break;}
                             continue;
                         }
-                        if crate::subscriptions::is_subscription_command(command_type) {
+                        if crate::subscriptions::is_subscription_command(command_type)
+                            && !matches!(command_type, "unsubscribe_events" | "config_entries/flow/progress")
+                            && active_subscription_count(&native, &subscriptions, &raw_log_streams)
+                                >= MAX_SUBSCRIPTIONS_PER_SOCKET
+                        {
+                            if send_error(
+                                &mut socket,
+                                id,
+                                WsError::new("subscription_limit", "Subscription limit reached"),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                        if crate::subscriptions::is_subscription_command(command_type)
+                            && command_type != "unsubscribe_events"
+                        {
                             let manager=native.clone();let command=value.clone();
                             match run_blocking(move || manager.lock().map_err(|_|CoreError::Service("Subscription lock failed".into()))?.handle_command(&command)).await {
                                 Ok(Some(response)) => {
@@ -268,6 +289,8 @@ async fn handle_socket(
                             &state,
                             &mut event_receiver,
                             &mut subscriptions,
+                            &mut raw_log_streams,
+                            &native,
                             (id, command_type),
                             object,
                             (&identity, origin.clone()),
@@ -290,6 +313,56 @@ async fn handle_socket(
                     }
                 }
             }
+            raw_log_frame = raw_log_streams.recv(), if !raw_log_streams.is_empty() => {
+                match raw_log_frame {
+                    Some(RawLogFrame::Event { id, lines }) => {
+                        if !raw_log_streams.contains(id) {
+                            continue;
+                        }
+                        if identity.user_id.is_some() {
+                            match crate::extensions::authenticate_token(&state, &token).await {
+                                Ok(current)
+                                    if current.is_admin
+                                        && crate::extensions::same_authority(&identity, &current)
+                                        && (!current.local_only || origin.is_local) =>
+                                {
+                                    identity = current;
+                                }
+                                _ => {
+                                    close_socket(&mut socket).await;
+                                    break 'connection;
+                                }
+                            }
+                        }
+                        if send_json(&mut socket, &json!({"id": id, "type": "event", "event": lines})).await.is_err() {
+                            break 'connection;
+                        }
+                    }
+                    Some(RawLogFrame::Error { id, error }) => {
+                        if !raw_log_streams.contains(id) {
+                            continue;
+                        }
+                        raw_log_streams.remove(id).await;
+                        if send_error(&mut socket, id, map_core_error(error)).await.is_err() {
+                            break 'connection;
+                        }
+                    }
+                    Some(RawLogFrame::Closed { id }) => {
+                        if !raw_log_streams.contains(id) {
+                            continue;
+                        }
+                        raw_log_streams.remove(id).await;
+                        if send_error(
+                            &mut socket,
+                            id,
+                            WsError::new("event_stream_closed", "Raw log stream is closed"),
+                        ).await.is_err() {
+                            break 'connection;
+                        }
+                    }
+                    None => {}
+                }
+            }
             event = event_receiver.recv(), if !subscriptions.is_empty() => {
                 match event {
                     Ok(event) => {
@@ -304,7 +377,7 @@ async fn handle_socket(
                             .collect::<Vec<_>>();
                         for id in recipients {
                             if send_event(&mut socket, id, &event).await.is_err() {
-                                return;
+                                break 'connection;
                             }
                         }
                     }
@@ -316,7 +389,7 @@ async fn handle_socket(
                                 "Event subscription lagged; subscribe again to resume",
                             );
                             if send_error(&mut socket, id, error).await.is_err() {
-                                return;
+                                break 'connection;
                             }
                         }
                         subscriptions.clear();
@@ -329,7 +402,7 @@ async fn handle_socket(
                                 "Event stream is closed",
                             );
                             if send_error(&mut socket, id, error).await.is_err() {
-                                return;
+                                break 'connection;
                             }
                         }
                         subscriptions.clear();
@@ -338,10 +411,15 @@ async fn handle_socket(
             }
         }
     }
+    raw_log_streams.shutdown().await;
 }
 
 async fn receive_auth(socket: &mut WebSocket) -> Option<String> {
-    match socket.recv().await? {
+    match socket
+        .recv()
+        .instrument(debug_span!("hass_raw_stream_delivery"))
+        .await?
+    {
         Ok(Message::Text(text)) => {
             let value = serde_json::from_str::<Value>(&text).ok()?;
             let object = value.as_object()?;
@@ -358,11 +436,28 @@ async fn receive_auth(socket: &mut WebSocket) -> Option<String> {
     }
 }
 
+fn active_subscription_count(
+    native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
+    event_subscriptions: &HashMap<u64, Option<String>>,
+    raw_log_streams: &RawLogStreams,
+) -> usize {
+    let native_count = native
+        .lock()
+        .map(|subscriptions| subscriptions.len())
+        .unwrap_or(MAX_SUBSCRIPTIONS_PER_SOCKET);
+    native_count
+        .saturating_add(event_subscriptions.len())
+        .saturating_add(raw_log_streams.len())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     socket: &mut WebSocket,
     state: &AppState,
     event_receiver: &mut broadcast::Receiver<Event>,
     subscriptions: &mut HashMap<u64, Option<String>>,
+    raw_log_streams: &mut RawLogStreams,
+    native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
     command: (u64, &str),
     message: &serde_json::Map<String, Value>,
     client: (&crate::extensions::Identity, crate::network::ClientOrigin),
@@ -410,7 +505,9 @@ async fn handle_command(
             send_core_result(socket, id, result).await.is_ok()
         }
         "subscribe_events" => {
-            if subscriptions.len() >= MAX_SUBSCRIPTIONS_PER_SOCKET {
+            if active_subscription_count(native, subscriptions, raw_log_streams)
+                >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            {
                 return send_error(
                     socket,
                     id,
@@ -468,7 +565,34 @@ async fn handle_command(
                 .await
                 .is_ok();
             };
-            if subscriptions.remove(&subscription_id).is_none() {
+            let native_manager = native.clone();
+            let native_command = Value::Object(message.clone());
+            match run_blocking(move || {
+                native_manager
+                    .lock()
+                    .map_err(|_| CoreError::Service("Subscription lock failed".into()))?
+                    .handle_command(&native_command)
+            })
+            .await
+            {
+                Ok(Some(response)) => {
+                    if send_success(socket, id, response.result).await.is_err() {
+                        return false;
+                    }
+                    for frame in response.events {
+                        if send_json(socket, &frame).await.is_err() {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                Ok(None) => {}
+                Err(error) if error.code == "not_found" => {}
+                Err(error) => return send_error(socket, id, error).await.is_ok(),
+            }
+            let removed_event = subscriptions.remove(&subscription_id).is_some();
+            let removed_raw_log = raw_log_streams.remove(subscription_id).await;
+            if !removed_event && !removed_raw_log {
                 return send_error(
                     socket,
                     id,
@@ -478,6 +602,74 @@ async fn handle_command(
                 .is_ok();
             }
             send_success(socket, id, Value::Null).await.is_ok()
+        }
+        "system_log/list" => {
+            let Some(manager) = state.features.system_log.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "System log integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let result = run_blocking(move || manager.list()).await;
+            send_core_result(socket, id, result).await.is_ok()
+        }
+        "system_log/subscribe_raw" => {
+            if active_subscription_count(native, subscriptions, raw_log_streams)
+                >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("subscription_limit", "Subscription limit reached"),
+                )
+                .await
+                .is_ok();
+            }
+            let integration = match message.get("integration") {
+                None => None,
+                Some(Value::String(integration)) => Some(integration.clone()),
+                Some(_) => {
+                    return send_error(
+                        socket,
+                        id,
+                        WsError::new("invalid_format", "integration must be a string"),
+                    )
+                    .await
+                    .is_ok();
+                }
+            };
+            let Some(manager) = state.features.system_log.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "System log integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let stream = match manager.subscribe_raw(integration.as_deref()) {
+                Ok(stream) => stream,
+                Err(CoreError::NotFound(_)) => {
+                    return send_error(
+                        socket,
+                        id,
+                        WsError::new("not_found", "Integration not found"),
+                    )
+                    .await
+                    .is_ok();
+                }
+                Err(error) => {
+                    return send_error(socket, id, map_core_error(error)).await.is_ok();
+                }
+            };
+            if send_success(socket, id, Value::Null).await.is_err() {
+                return false;
+            }
+            raw_log_streams.insert(id, stream);
+            true
         }
         "fire_event" => {
             let Some(event_type) = message.get("event_type").and_then(Value::as_str) else {
@@ -627,6 +819,108 @@ struct WsError {
     message: String,
 }
 
+enum RawLogFrame {
+    Event { id: u64, lines: Vec<String> },
+    Error { id: u64, error: CoreError },
+    Closed { id: u64 },
+}
+
+struct RawLogStreams {
+    tasks: HashMap<u64, tokio::task::JoinHandle<()>>,
+    sender: mpsc::Sender<RawLogFrame>,
+    receiver: mpsc::Receiver<RawLogFrame>,
+}
+
+impl RawLogStreams {
+    fn new() -> Self {
+        let (sender, receiver) = mpsc::channel(MAX_SUBSCRIPTIONS_PER_SOCKET);
+        Self {
+            tasks: HashMap::new(),
+            sender,
+            receiver,
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.tasks.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.tasks.is_empty()
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        self.tasks.contains_key(&id)
+    }
+
+    fn insert(&mut self, id: u64, mut subscription: hass_system_log::RawLogSubscription) {
+        let sender = self.sender.clone();
+        let task = tokio::spawn(async move {
+            match subscription.initial().await {
+                Ok(lines) => {
+                    if sender.send(RawLogFrame::Event { id, lines }).await.is_err() {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(RawLogFrame::Error { id, error }).await;
+                    return;
+                }
+            }
+
+            loop {
+                match subscription.next_batch().await {
+                    Ok(Some(lines)) => {
+                        if sender.send(RawLogFrame::Event { id, lines }).await.is_err() {
+                            return;
+                        }
+                    }
+                    Ok(None) => {
+                        let _ = sender.send(RawLogFrame::Closed { id }).await;
+                        return;
+                    }
+                    Err(error) => {
+                        let _ = sender.send(RawLogFrame::Error { id, error }).await;
+                        return;
+                    }
+                }
+            }
+        });
+        if let Some(previous) = self.tasks.insert(id, task) {
+            previous.abort();
+        }
+    }
+
+    async fn recv(&mut self) -> Option<RawLogFrame> {
+        self.receiver.recv().await
+    }
+
+    async fn remove(&mut self, id: u64) -> bool {
+        let Some(task) = self.tasks.remove(&id) else {
+            return false;
+        };
+        task.abort();
+        let _ = task.await;
+        true
+    }
+
+    async fn shutdown(&mut self) {
+        let tasks = std::mem::take(&mut self.tasks);
+        for (_, task) in tasks {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for RawLogStreams {
+    fn drop(&mut self) {
+        for task in self.tasks.values() {
+            task.abort();
+        }
+    }
+}
+
 impl WsError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
@@ -712,7 +1006,14 @@ async fn send_json(socket: &mut WebSocket, value: &Value) -> Result<(), ()> {
 }
 
 async fn send_message(socket: &mut WebSocket, message: Message) -> Result<(), ()> {
-    match timeout(SEND_TIMEOUT, socket.send(message)).await {
+    match timeout(
+        SEND_TIMEOUT,
+        socket
+            .send(message)
+            .instrument(debug_span!("hass_raw_stream_delivery")),
+    )
+    .await
+    {
         Ok(Ok(())) => Ok(()),
         _ => Err(()),
     }
