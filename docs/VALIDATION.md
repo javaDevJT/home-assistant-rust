@@ -1,5 +1,36 @@
 # Validation evidence
 
+## Accepted local Hardware source (39 crates)
+
+The final workspace passes **970 tests across 110 targets**, with no failed
+or ignored cases, including 144 app-bin cases and 19 compiled-process cases.
+Formatting, strict locked offline workspace all-target Clippy and the
+optimized workspace build pass. The optimized macOS `hass` SHA-256 is
+`dfa016496a5979e7956843e3c494632d1c9ae3a12335c8b126848125d32c51c9`.
+
+New focused evidence includes 16 Hardware SDK cases, 15 native-metrics fixture
+cases, eight loopback API cases, one YAML case and one real process case.
+The latter loads Hardware, returns the actual empty loaded-provider list,
+and joins the idle sampler on SIGTERM with an open WebSocket. It does not
+subscribe to host metrics. SDK tests cover shared/delayed sampling, canceled
+read ownership, channel closure, zero-memory rejection, recovery, exact guard
+replacement and interval timing. API tests cover ordinary-user access, silent
+stream session revocation and terminal lag without removing another stream.
+
+Independent metrics review exposed a decimal-rounding difference. The native
+helper now agrees with Python's built-in `round(x, 1)` for 17,007 percentage,
+tie and adjacent-f64 values; CPU 69/2000 becomes 3.5%, then 4 in the API, and
+memory 51/2000 becomes 2.5%. No HA or dependency package was executed.
+
+The optimized CLI validates the example and empty, empty-Hardware,
+false-Hardware and ignored-parameter configs, rejects an unknown root key,
+does not echo an ignored fixture secret, and creates no database or extra
+files. Linux conditional metrics code passes supplementary cross-target
+Clippy using the installed Rustup 1.92 and manifest MSRV override. Source
+publication and exact native Linux CI are pending. Physical CPU/memory
+collection, Supervisor providers, Windows and full upstream parity are not
+verified by these fixture-only checks.
+
 ## Accepted local USB source (37 crates)
 
 The final 37-crate workspace passes **929 tests across 105 targets**, with

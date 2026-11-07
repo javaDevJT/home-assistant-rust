@@ -62,6 +62,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Zeroconf | Native DNS-SD wire/cache, generated matching, HomeKit flow policy, local advertisement, duplicate-ID repair and admin WebSocket feed |
 | DHCP | Native observation cache/matching, selected passive capture, Linux PTR/neighbor scans, tracker and config-flow bridges, admin WebSocket feed |
 | USB | Native Linux/Darwin serial enumeration, owned hotplug/polling, scanner SDK, discovery/removal and admin port usage APIs |
+| Hardware | Loaded-provider records, shared native CPU/memory sampler and authenticated private status subscriptions |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -89,6 +90,10 @@ cargo test --workspace --locked
 - [Pinned Zeroconf discovery and mDNS port contract](docs/ZEROCONF-PORT.md)
 - [Pinned DHCP observation and packet-engine port contract](docs/DHCP-PORT.md)
 - [Pinned USB discovery and serial-provider port contract](docs/USB-PORT.md)
+- [Hardware provider and system-metrics source contract](docs/HARDWARE-PORT.md)
+- [Native Hardware SDK, provider ownership and sampler checks](crates/hass-hardware/README.md)
+- [Native platform metrics and psutil source provenance](crates/hass-hardware-metrics/README.md)
+- [Application Credentials storage, provider and OAuth boundary](docs/APPLICATION-CREDENTIALS-PORT.md)
 - [Native USB SDK and synthetic lifecycle checks](crates/hass-usb/README.md)
 - [Native serial backend provenance](crates/hass-usb-backend/THIRD-PARTY-NOTICES.md)
 - [Native SSDP SDK, scanner and UPnP server APIs](crates/hass-ssdp/README.md)

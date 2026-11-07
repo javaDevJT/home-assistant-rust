@@ -42,6 +42,7 @@ use tracing_subscriber::prelude::*;
 
 const DHCP_CONFIGURATION_WARNING: &str = "The dhcp integration does not support configuration parameters; remove the parameters from configuration.";
 const USB_CONFIGURATION_WARNING: &str = "The usb integration does not support configuration parameters; remove the parameters from configuration.";
+const HARDWARE_CONFIGURATION_WARNING: &str = "The hardware integration does not support configuration parameters; remove the parameters from configuration.";
 
 #[derive(Parser)]
 #[command(
@@ -106,6 +107,9 @@ async fn main() -> Result<()> {
         }
         if config.usb_has_parameters() {
             eprintln!("{USB_CONFIGURATION_WARNING}");
+        }
+        if config.hardware_has_parameters() {
+            eprintln!("{HARDWARE_CONFIGURATION_WARNING}");
         }
         println!("Configuration valid (supported Rust subset)");
         return Ok(());
@@ -234,6 +238,9 @@ async fn main() -> Result<()> {
     if config.usb_has_parameters() {
         tracing::error!(target: "hass::usb", "{USB_CONFIGURATION_WARNING}");
     }
+    if config.hardware_has_parameters() {
+        tracing::error!(target: "hass::hardware", "{HARDWARE_CONFIGURATION_WARNING}");
+    }
     let discovery_dispatcher = discovery::DiscoveryDispatcher::new(config_entries.clone());
     let mut dhcp = if config.dhcp_enabled {
         Some(dhcp::DhcpHost::start(
@@ -256,6 +263,16 @@ async fn main() -> Result<()> {
         Arc::new(usb_usage::UsbUsage::new(config_entries.clone()))
             as Arc<dyn hass_api::UsbUsageProvider>
     });
+    let mut hardware = if config.hardware_enabled {
+        Some(hass_hardware::HardwareIntegration::new(Arc::new(
+            hass_hardware_metrics::NativeMetricsProvider::new(),
+        ))?)
+    } else {
+        None
+    };
+    let hardware_manager = hardware
+        .as_ref()
+        .map(hass_hardware::HardwareIntegration::manager);
     let mut zeroconf = if config.zeroconf_enabled {
         Some(
             zeroconf::ZeroconfHost::start(
@@ -478,6 +495,7 @@ async fn main() -> Result<()> {
             dhcp: dhcp_manager,
             usb: usb_manager,
             usb_usage,
+            hardware: hardware_manager,
             network_adapters: Some(network_adapter_manager),
         },
         Some(shutdown_rx),
@@ -488,6 +506,11 @@ async fn main() -> Result<()> {
     );
     let result = axum_serve(listener, app, shutdown_tx, restart.receiver()).await;
     let restart_requested = restart.requested();
+    let hardware_result = if let Some(hardware) = &mut hardware {
+        hardware.shutdown().await
+    } else {
+        Ok(())
+    };
     let usb_result = if let Some(usb) = usb {
         usb.shutdown().await
     } else {
@@ -555,6 +578,7 @@ async fn main() -> Result<()> {
     dhcp_result?;
     dhcp_providers_result?;
     usb_result?;
+    hardware_result?;
     recorder_result?;
     automation_result?;
     system_sensor_result?;

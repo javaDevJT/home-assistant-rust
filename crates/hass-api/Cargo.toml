@@ -28,6 +28,7 @@ hass-logger.workspace = true
 hass-system-log.workspace = true
 hass-repairs.workspace = true
 hass-system-health.workspace = true
+hass-hardware.workspace = true
 hass-ssdp.workspace = true
 hass-zeroconf.workspace = true
 hass-network.workspace = true

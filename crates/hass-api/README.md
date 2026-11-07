@@ -298,3 +298,20 @@ Core selector integration names preserve the pinned generated order; custom
 overrides can be supplied through the app's usage-provider seam. The current
 app has no custom-component loader or Supervisor source and does not invent
 their consumers. See [USB source and native contracts](../../docs/USB-PORT.md).
+
+### Hardware records and system status
+
+Authenticated callers can use `hardware/info` and
+`hardware/subscribe_system_status`; neither adds an administrator requirement.
+Info returns the nullable records from actually loaded native providers, with
+failed providers omitted. With no loaded provider it returns `{hardware: []}`.
+The configured metrics provider does not infer Supervisor or USB board rows.
+
+Status subscriptions acknowledge with null, then share one five-second
+sampler. There is no immediate sample. Bounded lag is a terminal error for
+that subscription; other subscriptions survive. Delivery and bounded idle
+polls revalidate sessions, so failed metrics cannot retain a revoked stream.
+Unsubscribe/disconnect releases the exact sampler guard; the final subscriber
+stops further reads. Owner shutdown closes receivers and joins admitted
+metrics and hardware-info callbacks, including canceled callers. See the
+[Hardware contract](../../docs/HARDWARE-PORT.md) for payloads and platform limits.

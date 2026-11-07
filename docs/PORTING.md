@@ -33,12 +33,43 @@ paths and 304 symbol references, confirmed only USB's three integration-row
 fields changed, and reconciled the stale policy summary to all 43 partial
 domains (1,522 unported; zero complete).
 
-Completed USB owners and reviewers are released. Hardware source/dependency
-audit owns only `docs/HARDWARE-PORT.md`; its separate SDK owner writes only
-the isolated new `crates/hass-hardware/`. API drafting owns only the future
-hardware helper and draft fixtures. Root retains shared manifests, app wiring,
-metrics-provider selection, index, checks and Git. Hardware is unported until
-an executable boundary passes acceptance. All workers use explicit native
+Completed USB owners and reviewers are released. The Hardware source and
+dependency audit is complete in `docs/HARDWARE-PORT.md`; root selected direct
+Linux proc/Mac Mach metrics to preserve the pinned available-memory formulas
+and explicit failure handling. The released SDK is now workspace member 38.
+Root corrected receiver closure, zero-total-memory acceptance, canceled info
+request ownership, timestamp precision and interval cadence; all 16 injected
+SDK cases and strict all-target Clippy pass. The released API adapter's seven
+initial loopback cases pass after those corrections, and its full API
+regression run passes. API review found revoked sessions could retain silent
+failed-metrics streams. Root added bounded poll-time revalidation and an eighth
+protocol case proving close and sampler release without any status event.
+Strict all-target API Clippy passes; the lag case also checks another public
+event subscription survives terminal Hardware removal.
+
+The native metrics owner is released and `hass-hardware-metrics` is member 39.
+Root corrected Python decimal-rounding behavior after independent review;
+all 15 backend fixture cases and strict Clippy pass, and 17,007 pure Python
+rounding oracles agree with the helper. Linux conditional code passes
+supplementary cross-target Clippy. App/YAML wiring now passes its targeted
+configuration case and actual compiled-process hardware/info plus joined
+idle-sampler shutdown. No host metrics subscription was made.
+
+Root owns all released SDK/API/backend code, app/YAML wiring, root
+manifests/lock, index, checks and Git. The final 39-crate gate passes 970 tests
+over 110 targets (zero failures/ignored), formatting, strict locked offline
+workspace all-target Clippy and release build. The optimized macOS binary
+SHA-256 is `dfa016496a5979e7956843e3c494632d1c9ae3a12335c8b126848125d32c51c9`.
+Example/empty/Hardware-empty/false/ignored CLI configs pass without extra
+files or secret echo; invalid root keys fail. Inventory reconciliation to
+Hardware partial and exact native Linux publication/CI are next.
+
+The Application Credentials source audit is released in its indexed contract.
+One owner implements only the isolated next `hass-application-credentials`
+SDK; it is outside this 39-crate acceptance and publication. Root chose to
+protect imported credential aliases from in-use deletion and will document
+that intentional correction to the pinned source behavior.
+All workers use explicit native
 `gpt-6-luna` with `max`; backend/tier are unexposed. No worker children or live
 hardware/Supervisor probing is authorized by these fixture assignments.
 

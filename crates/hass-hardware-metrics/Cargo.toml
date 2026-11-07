@@ -1,0 +1,15 @@
+[package]
+name = "hass-hardware-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+hass-core.workspace = true
+hass-hardware.workspace = true
+libc = "=0.2.191"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "=0.4.3"

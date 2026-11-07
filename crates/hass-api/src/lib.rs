@@ -12,6 +12,7 @@ mod config_entries;
 mod config_subentries;
 mod dhcp;
 mod extensions;
+mod hardware;
 mod history;
 mod http;
 mod images;
@@ -73,6 +74,7 @@ pub struct ApiFeatures {
     pub system_log: Option<hass_system_log::SystemLogManager>,
     pub repairs: Option<hass_repairs::RepairsManager>,
     pub system_health: Option<hass_system_health::SystemHealthManager>,
+    pub hardware: Option<hass_hardware::HardwareManager>,
     pub dhcp: Option<hass_dhcp::DhcpManager>,
     pub ssdp: Option<hass_ssdp::SsdpManager>,
     pub zeroconf: Option<hass_zeroconf::ZeroconfManager>,

@@ -826,6 +826,8 @@ dependencies = [
  "hass-dhcp-wire",
  "hass-entity",
  "hass-group",
+ "hass-hardware",
+ "hass-hardware-metrics",
  "hass-image-upload",
  "hass-logger",
  "hass-mqtt",
@@ -879,6 +881,7 @@ dependencies = [
  "hass-core",
  "hass-dhcp",
  "hass-entity",
+ "hass-hardware",
  "hass-image-upload",
  "hass-logger",
  "hass-network",
@@ -1060,6 +1063,28 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hass-hardware"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hass-hardware-metrics"
+version = "0.1.0"
+dependencies = [
+ "hass-core",
+ "hass-hardware",
+ "libc",
+ "mach2",
 ]
 
 [[package]]

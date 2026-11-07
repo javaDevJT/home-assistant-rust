@@ -220,6 +220,42 @@ automation:
     config
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn real_process_hardware_info_uses_loaded_providers_and_joins_idle_sampler() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(&config, "hardware:\nrecorder:\n  db_path: state.sqlite\n").unwrap();
+    let mut server = Server::start(&config).await;
+    let configuration: Value = server.get("/api/config").await.json().await.unwrap();
+    assert!(
+        configuration["components"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("hardware"))
+    );
+    let mut socket = authenticated_socket(&server).await;
+    let info = ws_command(&mut socket, json!({"id":1,"type":"hardware/info"})).await;
+    assert_eq!(info["success"], true, "{info}");
+    assert_eq!(info["result"], json!({"hardware":[]}));
+    // No status subscription is created: the actual native metrics provider
+    // stays idle and this fixture reads no host CPU/memory measurements.
+    let pid = server.child.id().unwrap();
+    assert!(
+        std::process::Command::new("/bin/kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let status = tokio::time::timeout(Duration::from_secs(5), server.child.wait())
+        .await
+        .expect("hardware owner must drain on SIGTERM")
+        .unwrap();
+    assert!(status.success());
+}
+
 #[tokio::test]
 async fn real_process_system_health_reports_native_runtime_and_saved_timezone() {
     use futures_util::StreamExt;

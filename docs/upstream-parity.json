@@ -55281,7 +55281,69 @@
       "component_directory": "homeassistant/components/hardware/",
       "config_flow_classes": [],
       "domain": "hardware",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "docs/HARDWARE-PORT.md",
+        "crates/hass-hardware/README.md",
+        "crates/hass-hardware/src/lib.rs",
+        "crates/hass-hardware/src/integration.rs",
+        "crates/hass-hardware/src/models.rs",
+        "crates/hass-hardware/src/provider.rs",
+        "crates/hass-hardware/src/tests.rs#hardware_models_keep_nullable_fields_in_serialized_shape",
+        "crates/hass-hardware/src/tests.rs#system_status_uses_ties_to_even_and_preserves_provider_memory_percent",
+        "crates/hass-hardware/src/tests.rs#system_status_rejects_invalid_metrics_instead_of_fabricating_values",
+        "crates/hass-hardware/src/tests.rs#status_timestamp_keeps_python_datetime_microsecond_precision",
+        "crates/hass-hardware/src/tests.rs#no_loaded_provider_is_an_empty_success_and_provider_guards_are_exact",
+        "crates/hass-hardware/src/tests.rs#provider_errors_and_panics_are_isolated_to_their_loaded_provider",
+        "crates/hass-hardware/src/tests.rs#manager_is_weak_and_operations_fail_after_owner_shutdown",
+        "crates/hass-hardware/src/tests.rs#subscribers_share_delayed_sampling_and_last_unsubscribe_stops_it",
+        "crates/hass-hardware/src/tests.rs#zero_to_one_generation_does_not_deliver_an_old_in_flight_read",
+        "crates/hass-hardware/src/tests.rs#status_read_duration_does_not_delay_the_next_interval",
+        "crates/hass-hardware/src/tests.rs#explicit_shutdown_closes_subscriptions_while_owner_is_retained",
+        "crates/hass-hardware/src/tests.rs#cancelled_info_request_remains_owned_until_shutdown_joins_provider",
+        "crates/hass-hardware/src/tests.rs#invalid_zero_memory_and_failed_metrics_are_omitted_before_recovery",
+        "crates/hass-hardware/src/tests.rs#shutdown_waits_for_an_admitted_blocking_metrics_read",
+        "crates/hass-hardware/src/tests.rs#lagged_status_is_observable_and_queue_is_bounded",
+        "crates/hass-hardware/src/tests.rs#config_rejects_zero_interval_and_zero_queue_capacity",
+        "crates/hass-hardware-metrics/Cargo.toml",
+        "crates/hass-hardware-metrics/THIRD_PARTY_NOTICES.md",
+        "crates/hass-hardware-metrics/src/lib.rs",
+        "crates/hass-hardware-metrics/src/cpu.rs",
+        "crates/hass-hardware-metrics/src/linux.rs",
+        "crates/hass-hardware-metrics/src/macos.rs",
+        "crates/hass-hardware-metrics/src/macos_metrics.rs",
+        "crates/hass-hardware-metrics/src/memory.rs",
+        "crates/hass-hardware-metrics/src/tests.rs#first_cpu_sample_uses_two_reads_and_later_sample_retains_baseline",
+        "crates/hass-hardware-metrics/src/tests.rs#cpu_read_error_keeps_the_previous_baseline",
+        "crates/hass-hardware-metrics/src/tests.rs#cpu_delta_excludes_guest_double_count_and_iowait_from_busy",
+        "crates/hass-hardware-metrics/src/tests.rs#regressing_cpu_fields_are_clamped_individually_and_zero_total_is_zero",
+        "crates/hass-hardware-metrics/src/tests.rs#cpu_one_decimal_rounding_uses_ties_to_even",
+        "crates/hass-hardware-metrics/src/tests.rs#percentage_rounding_preserves_python_binary_values_before_decimal_ties",
+        "crates/hass-hardware-metrics/src/tests.rs#linux_cpu_parser_reads_guest_fields_and_defaults_absent_optional_fields",
+        "crates/hass-hardware-metrics/src/tests.rs#linux_memavailable_is_primary_and_negative_or_excess_values_match_psutil_clamps",
+        "crates/hass-hardware-metrics/src/tests.rs#linux_missing_or_zero_memavailable_uses_zone_watermark_formula",
+        "crates/hass-hardware-metrics/src/tests.rs#linux_fallback_uses_memfree_plus_cached_when_inputs_or_zoneinfo_are_missing",
+        "crates/hass-hardware-metrics/src/tests.rs#linux_fallback_underflow_clamps_to_zero_and_meminfo_errors_propagate",
+        "crates/hass-hardware-metrics/src/tests.rs#linux_meminfo_parsing_preserves_kibibytes_and_last_duplicate_value",
+        "crates/hass-hardware-metrics/src/tests.rs#macos_cpu_maps_host_ticks_to_psutil_time_fields",
+        "crates/hass-hardware-metrics/src/tests.rs#macos_available_is_inactive_plus_free_before_any_speculative_adjustment",
+        "crates/hass-hardware-metrics/src/tests.rs#memory_read_errors_and_invalid_mach_values_do_not_become_zero",
+        "crates/hass-api/src/hardware.rs",
+        "crates/hass-api/src/lib.rs",
+        "crates/hass-api/src/websocket.rs",
+        "crates/hass-api/tests/hardware_protocol.rs#info_returns_an_empty_list_without_providers_to_an_authenticated_user",
+        "crates/hass-api/tests/hardware_protocol.rs#info_preserves_typed_nullable_fields_and_omits_only_failed_providers",
+        "crates/hass-api/tests/hardware_protocol.rs#status_waits_for_the_five_second_sample_and_sends_one_private_event",
+        "crates/hass-api/tests/hardware_protocol.rs#subscribers_share_one_sampler_and_the_last_unsubscribe_stops_reads",
+        "crates/hass-api/tests/hardware_protocol.rs#lag_reports_the_missed_count_and_removes_only_that_subscription",
+        "crates/hass-api/tests/hardware_protocol.rs#status_delivery_revalidates_the_authenticated_session",
+        "crates/hass-api/tests/hardware_protocol.rs#revoked_session_closes_a_silent_failed_metrics_subscription",
+        "crates/hass-api/tests/hardware_protocol.rs#status_subscriptions_share_the_thirty_two_command_limit",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/main.rs",
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass/src/config.rs#hardware_yaml_presence_enables_setup_and_parameters_are_ignored",
+        "crates/hass/tests/end_to_end.rs#real_process_hardware_info_uses_loaded_providers_and_joins_idle_sampler"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -55298,10 +55360,10 @@
       },
       "manifest_blob_oid": "f2772e609db4ff730bde21f5bb321cfc18d2d525",
       "manifest_path": "homeassistant/components/hardware/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "The pinned Supervisor DATA_OS_INFO board-provider behavior and config-entry-backed USB hardware records are not implemented; the app does not fabricate board or USB-device rows. The native metrics backend covers Linux and macOS only; Windows is unsupported. Metrics fixtures use synthetic or injected readings, and the compiled process exercises an empty hardware/info response plus SIGTERM cleanup while the sampler is idle. No physical CPU, memory, USB, or Supervisor reads were performed. Full pinned upstream setup, provider, platform, and failure acceptance remains open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "16_shared_library:psutil-home-assistant==0.0.1",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -168754,6 +168816,134 @@
         "verification": "Primary focused and protocol acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       },
       {
+        "domain": "hardware",
+        "local_evidence": [
+          {
+            "path": "docs/HARDWARE-PORT.md"
+          },
+          {
+            "path": "crates/hass-hardware/README.md"
+          },
+          {
+            "path": "crates/hass-hardware/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-hardware/src/integration.rs"
+          },
+          {
+            "path": "crates/hass-hardware/src/models.rs"
+          },
+          {
+            "path": "crates/hass-hardware/src/provider.rs"
+          },
+          {
+            "path": "crates/hass-hardware/src/tests.rs",
+            "test_functions_present": [
+              "hardware_models_keep_nullable_fields_in_serialized_shape",
+              "system_status_uses_ties_to_even_and_preserves_provider_memory_percent",
+              "system_status_rejects_invalid_metrics_instead_of_fabricating_values",
+              "status_timestamp_keeps_python_datetime_microsecond_precision",
+              "no_loaded_provider_is_an_empty_success_and_provider_guards_are_exact",
+              "provider_errors_and_panics_are_isolated_to_their_loaded_provider",
+              "manager_is_weak_and_operations_fail_after_owner_shutdown",
+              "subscribers_share_delayed_sampling_and_last_unsubscribe_stops_it",
+              "zero_to_one_generation_does_not_deliver_an_old_in_flight_read",
+              "status_read_duration_does_not_delay_the_next_interval",
+              "explicit_shutdown_closes_subscriptions_while_owner_is_retained",
+              "cancelled_info_request_remains_owned_until_shutdown_joins_provider",
+              "invalid_zero_memory_and_failed_metrics_are_omitted_before_recovery",
+              "shutdown_waits_for_an_admitted_blocking_metrics_read",
+              "lagged_status_is_observable_and_queue_is_bounded",
+              "config_rejects_zero_interval_and_zero_queue_capacity"
+            ]
+          },
+          {
+            "path": "crates/hass-hardware-metrics/Cargo.toml"
+          },
+          {
+            "path": "crates/hass-hardware-metrics/THIRD_PARTY_NOTICES.md"
+          },
+          {
+            "path": "crates/hass-hardware-metrics/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-hardware-metrics/src/cpu.rs"
+          },
+          {
+            "path": "crates/hass-hardware-metrics/src/linux.rs"
+          },
+          {
+            "path": "crates/hass-hardware-metrics/src/macos.rs"
+          },
+          {
+            "path": "crates/hass-hardware-metrics/src/macos_metrics.rs"
+          },
+          {
+            "path": "crates/hass-hardware-metrics/src/memory.rs"
+          },
+          {
+            "path": "crates/hass-hardware-metrics/src/tests.rs",
+            "test_functions_present": [
+              "first_cpu_sample_uses_two_reads_and_later_sample_retains_baseline",
+              "cpu_read_error_keeps_the_previous_baseline",
+              "cpu_delta_excludes_guest_double_count_and_iowait_from_busy",
+              "regressing_cpu_fields_are_clamped_individually_and_zero_total_is_zero",
+              "cpu_one_decimal_rounding_uses_ties_to_even",
+              "percentage_rounding_preserves_python_binary_values_before_decimal_ties",
+              "linux_cpu_parser_reads_guest_fields_and_defaults_absent_optional_fields",
+              "linux_memavailable_is_primary_and_negative_or_excess_values_match_psutil_clamps",
+              "linux_missing_or_zero_memavailable_uses_zone_watermark_formula",
+              "linux_fallback_uses_memfree_plus_cached_when_inputs_or_zoneinfo_are_missing",
+              "linux_fallback_underflow_clamps_to_zero_and_meminfo_errors_propagate",
+              "linux_meminfo_parsing_preserves_kibibytes_and_last_duplicate_value",
+              "macos_cpu_maps_host_ticks_to_psutil_time_fields",
+              "macos_available_is_inactive_plus_free_before_any_speculative_adjustment",
+              "memory_read_errors_and_invalid_mach_values_do_not_become_zero"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/hardware.rs"
+          },
+          {
+            "path": "crates/hass-api/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-api/src/websocket.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/hardware_protocol.rs",
+            "test_functions_present": [
+              "info_returns_an_empty_list_without_providers_to_an_authenticated_user",
+              "info_preserves_typed_nullable_fields_and_omits_only_failed_providers",
+              "status_waits_for_the_five_second_sample_and_sends_one_private_event",
+              "subscribers_share_one_sampler_and_the_last_unsubscribe_stops_reads",
+              "lag_reports_the_missed_count_and_removes_only_that_subscription",
+              "status_delivery_revalidates_the_authenticated_session",
+              "revoked_session_closes_a_silent_failed_metrics_subscription",
+              "status_subscriptions_share_the_thirty_two_command_limit"
+            ]
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "hardware_yaml_presence_enables_setup_and_parameters_are_ignored"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_hardware_info_uses_loaded_providers_and_joins_idle_sampler"
+            ]
+          }
+        ],
+        "remaining": "The pinned Supervisor DATA_OS_INFO board-provider behavior and config-entry-backed USB hardware records are not implemented; the app does not fabricate board or USB-device rows. The native metrics backend covers Linux and macOS only; Windows is unsupported. Metrics fixtures use synthetic or injected readings, and the compiled process exercises an empty hardware/info response plus SIGTERM cleanup while the sampler is idle. No physical CPU, memory, USB, or Supervisor reads were performed. Full pinned upstream setup, provider, platform, and failure acceptance remains open.",
+        "status": "partial",
+        "verification": "Root reports the exact current 39-crate gate: 970 tests across 110 targets (0 failed, 0 ignored), with formatting, strict locked offline workspace all-target Clippy, and release workspace build passing; the app run passed 144 tests and end-to-end passed 19. The metrics backend carries 17,007 Python built-in percentage-oracle inputs with zero mismatches. The source-derived BSD-3-Clause notice is present. Optimized CLI checks accepted the example, empty config, empty hardware config, false value, and ignored-parameter config; rejected an unknown root key; created no extra files or database; and did not leak the fixture secret to stdout/stderr. Optimized macOS candidate binary SHA-256: dfa016496a5979e7956843e3c494632d1c9ae3a12335c8b126848125d32c51c9. No 39-crate commit or CI receipt is claimed. All metrics fixtures use synthetic/injected values; the compiled process covers hardware/info with no loaded provider and SIGTERM while the sampler is idle. No physical CPU, memory, USB, or Supervisor read was performed. The inventory writer did not run tests."
+      },
+      {
         "domain": "homeassistant",
         "local_evidence": [
           {
@@ -170460,10 +170650,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 43,
+    "partial": 44,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1522
+    "unported": 1521
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

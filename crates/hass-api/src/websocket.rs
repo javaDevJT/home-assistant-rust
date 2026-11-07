@@ -25,6 +25,7 @@ use tracing::{Instrument, debug_span};
 
 use crate::AppState;
 use crate::dhcp::DhcpStream;
+use crate::hardware::HardwareStatusStream;
 use crate::ssdp::SsdpStream;
 use crate::system_health::HealthStream;
 use crate::zeroconf::ZeroconfStream;
@@ -153,6 +154,7 @@ async fn handle_socket(
     let mut ssdp_streams = HashMap::<u64, SsdpStream>::new();
     let mut zeroconf_streams = HashMap::<u64, ZeroconfStream>::new();
     let mut dhcp_streams = HashMap::<u64, DhcpStream>::new();
+    let mut hardware_streams = HashMap::<u64, HardwareStatusStream>::new();
     let mut last_command_id: Option<u64> = None;
     let mut native = crate::subscriptions::NativeSubscriptions::new(
         state.api.runtime.clone(),
@@ -428,6 +430,74 @@ async fn handle_socket(
                         break 'connection;
                     }
                 }
+
+                let mut hardware_frames = Vec::new();
+                let mut hardware_errors = Vec::new();
+                let mut finished_hardware = Vec::new();
+                for (id, stream) in &mut hardware_streams {
+                    for _ in 0..MAX_SUBSCRIPTIONS_PER_SOCKET {
+                        match stream.try_recv() {
+                            Ok(frame) => hardware_frames.push(frame),
+                            Err(broadcast::error::TryRecvError::Empty) => break,
+                            Err(broadcast::error::TryRecvError::Lagged(missed)) => {
+                                hardware_errors.push((
+                                    *id,
+                                    WsError::new(
+                                        "event_stream_lagged",
+                                        format!(
+                                            "Hardware status subscription lagged and missed {missed} event(s); subscribe again to resume"
+                                        ),
+                                    ),
+                                ));
+                                finished_hardware.push(*id);
+                                break;
+                            }
+                            Err(broadcast::error::TryRecvError::Closed) => {
+                                hardware_errors.push((
+                                    *id,
+                                    WsError::new(
+                                        "event_stream_closed",
+                                        "Hardware status stream is closed",
+                                    ),
+                                ));
+                                finished_hardware.push(*id);
+                                break;
+                            }
+                        }
+                    }
+                }
+                for id in finished_hardware {
+                    hardware_streams.remove(&id);
+                }
+                // Failed metrics intentionally produce no event. Revalidate
+                // active hardware subscriptions on the bounded poll as well,
+                // so a silent stream cannot retain a revoked session.
+                if (!hardware_streams.is_empty() || !hardware_frames.is_empty() || !hardware_errors.is_empty())
+                    && identity.user_id.is_some()
+                {
+                    match crate::extensions::authenticate_token(&state, &token).await {
+                        Ok(current)
+                            if crate::extensions::same_authority(&identity, &current)
+                                && (!current.local_only || origin.is_local) =>
+                        {
+                            identity = current;
+                        }
+                        _ => {
+                            close_socket(&mut socket).await;
+                            break 'connection;
+                        }
+                    }
+                }
+                for frame in hardware_frames {
+                    if send_json(&mut socket, &frame).await.is_err() {
+                        break 'connection;
+                    }
+                }
+                for (id, error) in hardware_errors {
+                    if send_error(&mut socket, id, error).await.is_err() {
+                        break 'connection;
+                    }
+                }
             }
             _ = &mut shutdown_wait => {
                 close_socket(&mut socket).await;
@@ -502,9 +572,9 @@ async fn handle_socket(
                             continue;
                         }
                         if (crate::subscriptions::is_subscription_command(command_type)
-                            || command_type == "dhcp/subscribe_discovery")
+                            || matches!(command_type, "dhcp/subscribe_discovery" | "hardware/subscribe_system_status"))
                             && !matches!(command_type, "unsubscribe_events" | "config_entries/flow/progress")
-                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams, &ssdp_streams, &zeroconf_streams, &dhcp_streams)
+                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams, &ssdp_streams, &zeroconf_streams, &dhcp_streams, &hardware_streams)
                                 >= MAX_SUBSCRIPTIONS_PER_SOCKET
                         {
                             if send_error(
@@ -548,6 +618,7 @@ async fn handle_socket(
                             &mut ssdp_streams,
                             &mut zeroconf_streams,
                             &mut dhcp_streams,
+                            &mut hardware_streams,
                             &native,
                             (id, command_type),
                             object,
@@ -706,6 +777,7 @@ async fn receive_auth(socket: &mut WebSocket) -> Option<String> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn active_subscription_count(
     native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
     event_subscriptions: &HashMap<u64, Option<String>>,
@@ -714,6 +786,7 @@ fn active_subscription_count(
     ssdp_streams: &HashMap<u64, SsdpStream>,
     zeroconf_streams: &HashMap<u64, ZeroconfStream>,
     dhcp_streams: &HashMap<u64, DhcpStream>,
+    hardware_streams: &HashMap<u64, HardwareStatusStream>,
 ) -> usize {
     let native_count = native
         .lock()
@@ -726,6 +799,7 @@ fn active_subscription_count(
         .saturating_add(ssdp_streams.len())
         .saturating_add(zeroconf_streams.len())
         .saturating_add(dhcp_streams.len())
+        .saturating_add(hardware_streams.len())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -739,6 +813,7 @@ async fn handle_command(
     ssdp_streams: &mut HashMap<u64, SsdpStream>,
     zeroconf_streams: &mut HashMap<u64, ZeroconfStream>,
     dhcp_streams: &mut HashMap<u64, DhcpStream>,
+    hardware_streams: &mut HashMap<u64, HardwareStatusStream>,
     native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
     command: (u64, &str),
     message: &serde_json::Map<String, Value>,
@@ -793,6 +868,80 @@ async fn handle_command(
             let result = run_blocking(move || Ok(runtime.services())).await;
             send_core_result(socket, id, result).await.is_ok()
         }
+        "hardware/info" => {
+            if message.len() != 2 {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
+            let Some(manager) = state.features.hardware.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "Hardware integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let result = crate::hardware::info(&manager).await;
+            send_core_result(socket, id, result.map_err(map_core_error))
+                .await
+                .is_ok()
+        }
+        "hardware/subscribe_system_status" => {
+            if message.len() != 2 {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
+            let Some(manager) = state.features.hardware.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "Hardware integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            if active_subscription_count(
+                native,
+                subscriptions,
+                raw_log_streams,
+                health_streams,
+                ssdp_streams,
+                zeroconf_streams,
+                dhcp_streams,
+                hardware_streams,
+            ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("subscription_limit", "Subscription limit reached"),
+                )
+                .await
+                .is_ok();
+            }
+            let stream = match HardwareStatusStream::subscribe(&manager, id) {
+                Ok(stream) => stream,
+                Err(error) => {
+                    return send_error(socket, id, map_core_error(error)).await.is_ok();
+                }
+            };
+            if send_success(socket, id, Value::Null).await.is_err() {
+                return false;
+            }
+            hardware_streams.insert(id, stream);
+            true
+        }
         "subscribe_events" => {
             if active_subscription_count(
                 native,
@@ -802,6 +951,7 @@ async fn handle_command(
                 ssdp_streams,
                 zeroconf_streams,
                 dhcp_streams,
+                hardware_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -922,12 +1072,14 @@ async fn handle_command(
                 }
                 None => false,
             };
+            let removed_hardware = hardware_streams.remove(&subscription_id).is_some();
             if !removed_event
                 && !removed_raw_log
                 && !removed_health
                 && !removed_ssdp
                 && !removed_zeroconf
                 && !removed_dhcp
+                && !removed_hardware
             {
                 return send_error(
                     socket,
@@ -999,6 +1151,7 @@ async fn handle_command(
                 ssdp_streams,
                 zeroconf_streams,
                 dhcp_streams,
+                hardware_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1042,6 +1195,7 @@ async fn handle_command(
                 ssdp_streams,
                 zeroconf_streams,
                 dhcp_streams,
+                hardware_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1092,6 +1246,7 @@ async fn handle_command(
                 ssdp_streams,
                 zeroconf_streams,
                 dhcp_streams,
+                hardware_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1235,6 +1390,7 @@ async fn handle_command(
                 ssdp_streams,
                 zeroconf_streams,
                 dhcp_streams,
+                hardware_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -1340,6 +1496,7 @@ async fn handle_command(
                 ssdp_streams,
                 zeroconf_streams,
                 dhcp_streams,
+                hardware_streams,
             ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
