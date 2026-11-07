@@ -1,6 +1,6 @@
 //! Native discovery startup queue and configuration-flow admission.
 
-use hass_config::{ConfigEntries, DiscoveryKey, DiscoveryKeyValue};
+use hass_config::{ConfigEntries, DiscoveryDataKind, DiscoveryKey, DiscoveryKeyValue};
 use hass_core::{Error, Result};
 use hass_ssdp::{DiscoveryAction, DiscoverySink};
 use indexmap::IndexMap;
@@ -22,6 +22,7 @@ struct Candidate {
     source: String,
     context: Map<String, Value>,
     data: Map<String, Value>,
+    data_kind: Option<DiscoveryDataKind>,
 }
 
 enum Work {
@@ -35,6 +36,10 @@ pub enum DiscoveryRemoval {
         location: Option<String>,
     },
     ZeroconfName(String),
+    Usb {
+        domains: Vec<String>,
+        info: Map<String, Value>,
+    },
 }
 
 impl DiscoveryRemoval {
@@ -44,7 +49,18 @@ impl DiscoveryRemoval {
             // Both flow sources carry ZeroconfServiceInfo in the pinned
             // runtime. Removal matches that data type, including HomeKit.
             Self::ZeroconfName(_) => &["zeroconf", "homekit"],
+            Self::Usb { .. } => &["usb"],
         }
+    }
+
+    fn matches_domain(&self, domain: &str) -> bool {
+        match self {
+            Self::Usb { domains, .. } => domains.iter().any(|candidate| candidate == domain),
+            _ => true,
+        }
+    }
+    fn matches_kind(&self, kind: Option<DiscoveryDataKind>) -> bool {
+        !matches!(self, Self::Usb { .. }) || kind == Some(DiscoveryDataKind::Usb)
     }
     fn matches(&self, data: &Map<String, Value>) -> bool {
         match self {
@@ -55,6 +71,7 @@ impl DiscoveryRemoval {
             Self::ZeroconfName(name) => {
                 data.get("name").and_then(Value::as_str) == Some(name.as_str())
             }
+            Self::Usb { info, .. } => info == data,
         }
     }
 }
@@ -128,12 +145,14 @@ impl DiscoveryHandle {
         &self,
         domain: String,
         source: String,
-        key: DiscoveryKey,
+        key: impl Into<Option<DiscoveryKey>>,
         mut context: Map<String, Value>,
         data: Map<String, Value>,
     ) -> Result<()> {
         context.insert("source".into(), json!(source));
-        context.insert("discovery_key".into(), json!(key));
+        if let Some(key) = key.into() {
+            context.insert("discovery_key".into(), json!(key));
+        }
         enqueue(
             &self.inner,
             Work::Create(Candidate {
@@ -141,6 +160,28 @@ impl DiscoveryHandle {
                 source,
                 context,
                 data,
+                data_kind: None,
+            }),
+        )
+    }
+
+    /// Only native typed USB observations enter this path. HTTP flow sources
+    /// and arbitrary maps cannot acquire this marker through JSON context.
+    pub fn create_usb(
+        &self,
+        domain: String,
+        mut context: Map<String, Value>,
+        data: Map<String, Value>,
+    ) -> Result<()> {
+        context.insert("source".into(), json!("usb"));
+        enqueue(
+            &self.inner,
+            Work::Create(Candidate {
+                domain,
+                source: "usb".into(),
+                context,
+                data,
+                data_kind: Some(DiscoveryDataKind::Usb),
             }),
         )
     }
@@ -245,10 +286,9 @@ fn enqueue(inner: &Weak<Inner>, work: Work) -> Result<()> {
                     .pending
                     .entry((candidate.domain.clone(), candidate.source.clone()))
                     .or_default();
-                if !pending
-                    .iter()
-                    .any(|existing| existing.data == candidate.data)
-                {
+                if !pending.iter().any(|existing| {
+                    existing.data == candidate.data && existing.data_kind == candidate.data_kind
+                }) {
                     pending.push(candidate);
                 }
             } else {
@@ -256,9 +296,12 @@ fn enqueue(inner: &Weak<Inner>, work: Work) -> Result<()> {
             }
         }
         Work::Dismiss(removal) => {
-            for ((_, source), candidates) in &mut state.pending {
-                if removal.sources().contains(&source.as_str()) {
-                    candidates.retain(|candidate| !removal.matches(&candidate.data));
+            for ((domain, source), candidates) in &mut state.pending {
+                if removal.sources().contains(&source.as_str()) && removal.matches_domain(domain) {
+                    candidates.retain(|candidate| {
+                        !removal.matches_kind(candidate.data_kind)
+                            || !removal.matches(&candidate.data)
+                    });
                 }
             }
             state.pending.retain(|_, candidates| !candidates.is_empty());
@@ -304,6 +347,7 @@ async fn run(inner: Arc<Inner>, entries: ConfigEntries) {
                         existing.domain == candidate.domain
                             && existing.source == candidate.source
                             && existing.data == candidate.data
+                            && existing.data_kind == candidate.data_kind
                             && candidate
                                 .context
                                 .iter()
@@ -327,21 +371,23 @@ async fn run(inner: Arc<Inner>, entries: ConfigEntries) {
                 match work {
                     Work::Create(candidate) => {
                         if lock(&complete.state).stopping
-                            || entries.has_matching_discovery_flow(
+                            || entries.has_matching_discovery_flow_with_kind(
                                 &candidate.domain,
                                 &candidate.source,
                                 &candidate.context,
                                 &candidate.data,
+                                candidate.data_kind,
                             )
                         {
                             Ok(())
                         } else {
                             entries
-                                .init_config_flow_with_input(
+                                .init_config_flow_with_typed_input(
                                     &candidate.domain,
                                     &candidate.source,
                                     candidate.context,
                                     Some(candidate.data),
+                                    candidate.data_kind,
                                 )
                                 .map(|_| ())
                         }
@@ -349,12 +395,23 @@ async fn run(inner: Arc<Inner>, entries: ConfigEntries) {
                     Work::Dismiss(removal) => {
                         let mut result = Ok(());
                         for domain in entries.flow_handlers() {
+                            if !removal.matches_domain(&domain) {
+                                continue;
+                            }
                             for source in removal.sources() {
-                                if let Err(error) =
+                                let outcome = if matches!(removal, DiscoveryRemoval::Usb { .. }) {
+                                    entries.abort_matching_discovery_flows(
+                                        &domain,
+                                        source,
+                                        DiscoveryDataKind::Usb,
+                                        |data| removal.matches(data),
+                                    )
+                                } else {
                                     entries.dismiss_discovery_flows(&domain, source, |data| {
                                         removal.matches(data)
                                     })
-                                {
+                                };
+                                if let Err(error) = outcome {
                                     result = Err(error);
                                 }
                             }
@@ -405,6 +462,7 @@ impl Drop for Completion {
                     || existing.source != candidate.source
                     || existing.context != candidate.context
                     || existing.data != candidate.data
+                    || existing.data_kind != candidate.data_kind
             });
         }
         drop(state);
@@ -557,6 +615,102 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].unique_id.as_deref(), Some("uuid:stored"));
         assert!(found[0].public_json().get("discovery_keys").is_none());
+        dispatcher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn keyless_usb_creation_does_not_invent_a_persisted_discovery_key() {
+        let (entries, driver, dispatcher) = fixture(true, false);
+        dispatcher
+            .handle()
+            .create_usb(
+                "discovery_fixture".into(),
+                Map::new(),
+                Map::from_iter([("device".into(), json!("/dev/ttyFixture"))]),
+            )
+            .unwrap();
+        dispatcher.mark_started().await;
+        let requests = lock(&driver.requests).clone();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].context.contains_key("discovery_key"));
+        let stored = entries.list_entries(Some("discovery_fixture"));
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].source, "usb");
+        assert!(stored[0].discovery_keys.is_empty());
+        dispatcher.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn usb_removal_aborts_protected_matching_data_only_in_matching_domains() {
+        let (entries, driver, dispatcher) = fixture(false, false);
+        let handle = dispatcher.handle();
+        let original = Map::from_iter([("device".into(), json!("/dev/ttyOriginal"))]);
+        let untyped = entries
+            .init_config_flow_with_input(
+                "discovery_fixture",
+                "usb",
+                Map::from_iter([("data_kind".into(), json!("Usb"))]),
+                Some(original.clone()),
+            )
+            .unwrap();
+        let untyped_id = untyped["flow_id"].as_str().unwrap();
+        for (source, data, context) in [
+            (
+                "usb",
+                original.clone(),
+                Map::from_iter([("dismiss_protected".into(), json!(true))]),
+            ),
+            (
+                "usb",
+                Map::from_iter([("device".into(), json!("/dev/ttyOther"))]),
+                Map::new(),
+            ),
+            ("zeroconf", original.clone(), Map::new()),
+        ] {
+            if source == "usb" {
+                handle
+                    .create_usb("discovery_fixture".into(), context, data)
+                    .unwrap();
+            } else {
+                handle
+                    .create(
+                        "discovery_fixture".into(),
+                        source.into(),
+                        None,
+                        context,
+                        data,
+                    )
+                    .unwrap();
+            }
+        }
+        dispatcher.mark_started().await;
+        let requests = lock(&driver.requests).clone();
+        assert_eq!(requests.len(), 4);
+        handle
+            .dismiss(DiscoveryRemoval::Usb {
+                domains: vec!["another_domain".into()],
+                info: original.clone(),
+            })
+            .unwrap();
+        dispatcher.wait_idle().await;
+        assert!(
+            requests
+                .iter()
+                .all(|request| entries.flow_result(&request.flow_id).is_ok())
+        );
+        handle
+            .dismiss(DiscoveryRemoval::Usb {
+                domains: vec!["discovery_fixture".into()],
+                info: original.clone(),
+            })
+            .unwrap();
+        dispatcher.wait_idle().await;
+        for request in requests {
+            let removed = request.source == "usb"
+                && request.user_input.as_ref() == Some(&original)
+                && request.flow_id != untyped_id;
+            assert_eq!(entries.flow_result(&request.flow_id).is_err(), removed);
+        }
         dispatcher.shutdown().await;
     }
 

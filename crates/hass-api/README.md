@@ -281,3 +281,20 @@ These protocol callbacks do not introduce synthetic public Runtime events.
 [SSDP](../../docs/SSDP-PORT.md), [Zeroconf](../../docs/ZEROCONF-PORT.md),
 [DHCP](../../docs/DHCP-PORT.md) and [Network](../../docs/NETWORK-PORT.md) contracts
 for command payloads, ownership and remaining compatibility limits.
+
+### USB serial discovery
+
+`usb/scan`, `usb/list_serial_ports` and `usb/list_serial_integrations` are
+admin-only request-response commands. The first requests the source's manual
+scan route and returns null; an active watcher suppresses that request.
+Port listing accepts only optional boolean `include_usage` (default false),
+reads a fresh provider/scanner snapshot on the blocking pool, and never starts
+discovery or changes its cache. Isolated scanner failures are logged; a base
+provider error is an `unknown_error` carrying its concrete message.
+
+Usage includes actual config-entry consumers, typed USB discovery flows and
+missing configured ports, with alias resolution and URL query redaction.
+Core selector integration names preserve the pinned generated order; custom
+overrides can be supplied through the app's usage-provider seam. The current
+app has no custom-component loader or Supervisor source and does not invent
+their consumers. See [USB source and native contracts](../../docs/USB-PORT.md).

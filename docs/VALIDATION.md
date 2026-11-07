@@ -1,5 +1,34 @@
 # Validation evidence
 
+## Accepted local USB source (37 crates)
+
+The final 37-crate workspace passes **929 tests across 105 targets**, with
+zero failures or ignored cases. Its app binary passes 143 cases, including
+the injected USB host bridge, joined fallback polling, shared scheduler and
+actual config-entry usage projection. Formatting, strict locked offline
+workspace all-target Clippy and the optimized workspace build pass.
+The optimized macOS `hass` SHA-256 is
+`98e4f4a2e30ce750d6b5b83805c0649d399a5768afcbe84fb54e24abf55d7da3`.
+
+Focused USB proof includes 23 SDK cases, eight native backend fixtures on
+macOS, seven loopback WebSocket cases, four app-host cases, five usage cases
+and five scheduler cases. The shared discovery module's eight cases and all
+31 configuration SDK cases pass, including protected USB removal and
+keyless creation. Native init-data provenance survives form submissions and
+keeps arbitrary JSON with source `usb` out of usage, duplicate matching and
+USB removal. Separate source reviews exposed and prompted the corrected
+diagnostic, lookup, symlink and shutdown behavior.
+
+The final optimized executable validates the example plus empty, empty-USB,
+false-USB and ignored-USB-parameter configurations, rejects an unknown root
+key and creates no database or other extra files. Validation starts no
+provider. No live USB tree, IOKit inventory, serial device, Supervisor app or
+device command was exercised. Linux-only watcher code and fixtures pass a
+conditional cross-target Clippy check with the installed Rustup 1.92 compiler
+and manifest MSRV override; this is supplementary compile evidence, separate
+from the workspace's Rust 1.99 checks and pending native Linux CI execution.
+The new source is awaiting publication and exact-head CI.
+
 ## Accepted local DHCP source (35 crates)
 
 The native DHCP candidate passes 874 tests across 100 targets with zero failed
@@ -7,7 +36,12 @@ or ignored. A final app-bin run passes all 126 cases. Formatting, strict locked
 offline workspace all-target Clippy and the optimized workspace build pass.
 The macOS optimized `hass` binary SHA-256 is
 `3d7db1362393f27d411694fdb6c7b7c6a4a7bfa60375f2aed0591caa93e6b817`.
-Exact-source publication and Linux CI follow this local receipt.
+The local receipt is published at `996f0e42fa7dce04cdff59ca7d0c4cd60b78cd0d`.
+Its Linux run exposed one `filter_next` lint in a Linux-only selector.
+`3f97a2d00c21daa1adfa8b205adb14e07244a69b` uses the equivalent `find` expression
+and compiles/exercises that helper in portable fixtures. Its six provider cases
+and strict app Clippy pass locally. [Exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42374354822)
+passes at that corrected head.
 
 ```sh
 cargo fmt --all -- --check

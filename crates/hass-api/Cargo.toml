@@ -31,6 +31,7 @@ hass-system-health.workspace = true
 hass-ssdp.workspace = true
 hass-zeroconf.workspace = true
 hass-network.workspace = true
+hass-usb.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true

@@ -62,6 +62,10 @@ pub struct Config {
     pub dhcp: serde_yaml::Value,
     #[serde(skip)]
     pub dhcp_enabled: bool,
+    #[serde(default)]
+    pub usb: serde_yaml::Value,
+    #[serde(skip)]
+    pub usb_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_sun")]
     pub sun: bool,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
@@ -311,6 +315,7 @@ impl Config {
                 "ssdp",
                 "zeroconf",
                 "dhcp",
+                "usb",
                 "sun",
                 "sensor",
                 "timer",
@@ -327,6 +332,7 @@ impl Config {
         let ssdp_enabled = mapping.contains_key(serde_yaml::Value::String("ssdp".into()));
         let zeroconf_enabled = mapping.contains_key(serde_yaml::Value::String("zeroconf".into()));
         let dhcp_enabled = mapping.contains_key(serde_yaml::Value::String("dhcp".into()));
+        let usb_enabled = mapping.contains_key(serde_yaml::Value::String("usb".into()));
         let mut config: Self = serde_path_to_error::deserialize(value).map_err(|error| {
             // A typed decoding error can quote an invalid scalar. Preserve
             // its configuration path without printing resolved secret values.
@@ -339,6 +345,7 @@ impl Config {
         config.ssdp_enabled = ssdp_enabled;
         config.zeroconf_enabled = zeroconf_enabled;
         config.dhcp_enabled = dhcp_enabled;
+        config.usb_enabled = usb_enabled;
         config.validate()?;
         Ok(config)
     }
@@ -433,6 +440,10 @@ impl Config {
         yaml_truthy(&self.dhcp)
     }
 
+    pub fn usb_has_parameters(&self) -> bool {
+        yaml_truthy(&self.usb)
+    }
+
     pub fn zeroconf_has_deprecated_parameters(&self) -> bool {
         self.zeroconf.has_deprecated_parameters()
     }
@@ -485,6 +496,9 @@ impl Config {
         }
         if self.dhcp_enabled {
             components.push("dhcp");
+        }
+        if self.usb_enabled {
+            components.push("usb");
         }
         if !self.script.is_empty() {
             components.push("script");
@@ -818,6 +832,36 @@ mod tests {
                     .contains(&json!("dhcp"))
             );
         }
+    }
+
+    #[test]
+    fn usb_yaml_tracks_presence_and_accepts_ignored_parameters() {
+        let absent = Config::parse("{}\n").unwrap();
+        assert!(!absent.usb_enabled);
+        for (value, warns) in [
+            ("null", false),
+            ("false", false),
+            ("{}", false),
+            ("[]", false),
+            ("{ignored: value}", true),
+            ("[ignored]", true),
+            ("value", true),
+        ] {
+            let config = Config::parse(&format!("usb: {value}\n")).unwrap();
+            assert!(config.usb_enabled);
+            assert_eq!(config.usb_has_parameters(), warns);
+            assert!(
+                config.api_config()["components"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("usb"))
+            );
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("configuration.yaml");
+        std::fs::write(&path, "usb: {ignored: value}\n").unwrap();
+        assert!(Config::load(&path).unwrap().usb_enabled);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]

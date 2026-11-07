@@ -17,6 +17,9 @@ mod restart;
 mod ssdp;
 mod system_health;
 mod system_sensors;
+mod usb;
+mod usb_scheduler;
+mod usb_usage;
 mod yaml;
 mod zeroconf;
 mod zeroconf_network;
@@ -38,6 +41,7 @@ use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
 
 const DHCP_CONFIGURATION_WARNING: &str = "The dhcp integration does not support configuration parameters; remove the parameters from configuration.";
+const USB_CONFIGURATION_WARNING: &str = "The usb integration does not support configuration parameters; remove the parameters from configuration.";
 
 #[derive(Parser)]
 #[command(
@@ -99,6 +103,9 @@ async fn main() -> Result<()> {
         }
         if config.dhcp_has_parameters() {
             eprintln!("{DHCP_CONFIGURATION_WARNING}");
+        }
+        if config.usb_has_parameters() {
+            eprintln!("{USB_CONFIGURATION_WARNING}");
         }
         println!("Configuration valid (supported Rust subset)");
         return Ok(());
@@ -224,6 +231,9 @@ async fn main() -> Result<()> {
     if config.dhcp_has_parameters() {
         tracing::error!(target: "hass::dhcp", "{DHCP_CONFIGURATION_WARNING}");
     }
+    if config.usb_has_parameters() {
+        tracing::error!(target: "hass::usb", "{USB_CONFIGURATION_WARNING}");
+    }
     let discovery_dispatcher = discovery::DiscoveryDispatcher::new(config_entries.clone());
     let mut dhcp = if config.dhcp_enabled {
         Some(dhcp::DhcpHost::start(
@@ -236,6 +246,16 @@ async fn main() -> Result<()> {
         None
     };
     let dhcp_manager = dhcp.as_ref().map(dhcp::DhcpHost::manager);
+    let usb = if config.usb_enabled {
+        Some(usb::UsbHost::start(discovery_dispatcher.handle()).await?)
+    } else {
+        None
+    };
+    let usb_manager = usb.as_ref().map(usb::UsbHost::manager);
+    let usb_usage = usb.as_ref().map(|_| {
+        Arc::new(usb_usage::UsbUsage::new(config_entries.clone()))
+            as Arc<dyn hass_api::UsbUsageProvider>
+    });
     let mut zeroconf = if config.zeroconf_enabled {
         Some(
             zeroconf::ZeroconfHost::start(
@@ -412,6 +432,9 @@ async fn main() -> Result<()> {
     .await??;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     discovery_dispatcher.mark_started().await;
+    if let Some(host) = &usb {
+        host.mark_started().await?;
+    }
     let dhcp_providers = if let Some(host) = &mut dhcp {
         let providers =
             dhcp_providers::DhcpProviders::start(host.manager(), network_adapter_manager.clone())
@@ -453,6 +476,8 @@ async fn main() -> Result<()> {
             ssdp: ssdp_manager,
             zeroconf: zeroconf_manager,
             dhcp: dhcp_manager,
+            usb: usb_manager,
+            usb_usage,
             network_adapters: Some(network_adapter_manager),
         },
         Some(shutdown_rx),
@@ -463,6 +488,11 @@ async fn main() -> Result<()> {
     );
     let result = axum_serve(listener, app, shutdown_tx, restart.receiver()).await;
     let restart_requested = restart.requested();
+    let usb_result = if let Some(usb) = usb {
+        usb.shutdown().await
+    } else {
+        Ok(())
+    };
     let dhcp_providers_result = if let Some(providers) = dhcp_providers {
         providers.shutdown().await
     } else {
@@ -524,6 +554,7 @@ async fn main() -> Result<()> {
     zeroconf_stop_result?;
     dhcp_result?;
     dhcp_providers_result?;
+    usb_result?;
     recorder_result?;
     automation_result?;
     system_sensor_result?;

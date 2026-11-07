@@ -8,6 +8,34 @@ The primary owns the workspace manifest/dependencies, app configuration and inte
 
 ## Current wave contracts
 
+### USB native boundary and next Hardware audit (2026-11-07)
+
+Root integrates the released USB SDK, Linux/Darwin backend, admin API adapter,
+actual config-entry usage provider and owned Tokio timer scheduler. SDK,
+backend and API/usage reviews have independent scopes; root corrected lost
+debounced diagnostics, provider-only lookup, callback/stop races, dangling
+symlink identity and typed flow provenance. USB flow data has no persisted
+discovery key. Native init-data provenance is separate from user JSON source
+and survives form steps; removals match typed original data and exact domains,
+including protected flows. Normal SSDP/Zeroconf protection remains unchanged.
+
+The final 37-crate gate passes 929 tests over 105 targets with zero failures or
+ignored cases, including all 143 app-bin cases. Strict locked offline
+workspace all-target Clippy, formatting, optimized workspace build and CLI
+validation pass. The optimized macOS binary SHA-256 is
+`98e4f4a2e30ce750d6b5b83805c0649d399a5768afcbe84fb54e24abf55d7da3`.
+No live USB tree, physical serial port, IOKit inventory or device command was
+exercised. Source publication and exact-head Linux CI are the next checks.
+
+Completed USB owners and reviewers are released. Hardware source/dependency
+audit owns only `docs/HARDWARE-PORT.md`; its separate SDK owner writes only
+the isolated new `crates/hass-hardware/`. API drafting owns only the future
+hardware helper and draft fixtures. Root retains shared manifests, app wiring,
+metrics-provider selection, index, checks and Git. Hardware is unported until
+an executable boundary passes acceptance. All workers use explicit native
+`gpt-6-luna` with `max`; backend/tier are unexposed. No worker children or live
+hardware/Supervisor probing is authorized by these fixture assignments.
+
 ### Sun next-port investigation (2026-11-06)
 
 Queued `sun_native_plan_v10`: read-only pinned Sun/astral contract and native algorithm investigation for the primary's next executable port. Base `831dce75694a2bdba0777aaeef985614895eacae`, shared tag/composite/recording changes present. Exclusive deliverable `docs/SUN-PORT.md`; no source, manifest, Git or live-service changes. Resolve entity, config-entry, observer, timestamp, condition and trigger behavior with source anchors and deterministic astronomical falsifiers. Native catalog has one Luna member, `gpt-6-luna` with `max`; explicit selection, backend/tier unexposed. Release on concise evidence-backed handoff; root integrates the result.
@@ -712,8 +740,40 @@ Optimized macOS binary SHA-256 is
 No live capture, real resolver, LAN scan or device traffic was exercised.
 Root reconciles the inventory and publishes this source before exact Linux CI.
 
+The 35-crate receipt is published at
+`996f0e42fa7dce04cdff59ca7d0c4cd60b78cd0d`. Root independently resolved all
+79 DHCP evidence paths and 60 test symbols, verified only its three JSON
+status/evidence fields changed, and retained all source snapshots and other
+domain records. Status counts are 42 partial / 1,523 unported / zero complete.
+The first Linux run found a Linux-only `filter_next` lint. Source
+`3f97a2d00c21daa1adfa8b205adb14e07244a69b` replaces it with `find` and exercises
+the selector in portable fixtures; all six provider tests and strict app
+Clippy pass. [Exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42374354822)
+passes at that corrected head. USB files and work were excluded from both publications.
+
 USB source-contract v86 is outside this receipt. Root corrected its speculative
 key proposal: pinned USB supplies no discovery key, so the native shared bridge
 will need no-key admission rather than invented persistence/reload behavior.
 The USB consumer unique-ID helper is not the scanner cache key and can collide
 when metadata is absent; path-specific records must remain distinct.
+
+### Active USB implementation contracts
+
+SDK owner v88 writes only the isolated future `crates/hass-usb` model, matcher,
+provider/scanner registry and cancellable scan/debounce owner. Source and engine
+contracts v86/v89 are complete in USB-PORT.md; no dependency package code was
+imported or executed. Backend owner v90 writes only `crates/hass-usb-backend`,
+aligning its records with the SDK and retaining enumeration/watcher resources
+through joined stop. API owner v91 writes only the new USB adapter and draft
+protocol fixture; these are three admin request-response commands, not streams.
+Root owns all shared manifests, existing app/API wiring and usage provider.
+Every USB fixture must avoid live USB/serial enumeration, opens and commands.
+
+Root generalized shared flow admission to optional keys while preserving the
+existing keyed callers. USB removal matches exact service data and only the
+most-specific domains; source USB aborts even protected flows, unlike ordinary
+SSDP/Zeroconf dismissal. A new trusted ConfigEntries abort helper shares the
+existing matching/recheck path without changing ordinary protection. Eight
+dispatcher cases pass, including two no-key/USB-removal cases; all 31 config
+SDK cases pass after that refactor. USB remains unaccepted and unported in the
+inventory until its own implementation, checks and receipt are complete.

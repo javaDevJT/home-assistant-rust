@@ -1115,6 +1115,99 @@ async fn handle_command(
             dhcp_streams.insert(id, stream);
             true
         }
+        "usb/scan" => {
+            if message.len() != 2 {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
+            let Some(manager) = state.features.usb.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "USB integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let result = run_usb_blocking(move || crate::usb::request_scan(&manager)).await;
+            send_core_result(socket, id, result).await.is_ok()
+        }
+        "usb/list_serial_ports" => {
+            if message.len() > 3
+                || message
+                    .keys()
+                    .any(|field| !matches!(field.as_str(), "id" | "type" | "include_usage"))
+            {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
+            let include_usage = match message.get("include_usage") {
+                None => false,
+                Some(Value::Bool(include_usage)) => *include_usage,
+                Some(_) => {
+                    return send_error(
+                        socket,
+                        id,
+                        WsError::new("invalid_format", "include_usage must be a boolean"),
+                    )
+                    .await
+                    .is_ok();
+                }
+            };
+            let Some(manager) = state.features.usb.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "USB integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let usage_provider = state.features.usb_usage.clone();
+            let result = run_usb_blocking(move || {
+                crate::usb::list_serial_ports(&manager, include_usage, usage_provider.as_deref())
+            })
+            .await;
+            send_core_result(socket, id, result).await.is_ok()
+        }
+        "usb/list_serial_integrations" => {
+            if message.len() != 2 {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
+            let Some(_manager) = state.features.usb.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "USB integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let usage_provider = state.features.usb_usage.clone();
+            let result = run_usb_blocking(move || {
+                Ok::<_, hass_usb::UsbError>(crate::usb::list_serial_integrations(
+                    usage_provider.as_deref(),
+                ))
+            })
+            .await;
+            send_core_result(socket, id, result).await.is_ok()
+        }
         "system_health/info" => {
             if message.len() != 2 {
                 return send_error(
@@ -1703,6 +1796,17 @@ where
         .await
         .map_err(|_| WsError::new("unknown_error", "Internal server error"))?
         .map_err(map_core_error)
+}
+
+async fn run_usb_blocking<T, F>(operation: F) -> Result<T, WsError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, hass_usb::UsbError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| WsError::new("unknown_error", "Internal server error"))?
+        .map_err(|error| WsError::new("unknown_error", error.message()))
 }
 
 async fn run_repairs<T, F>(operation: F) -> Result<T, WsError>

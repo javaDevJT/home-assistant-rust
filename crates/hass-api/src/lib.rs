@@ -25,6 +25,7 @@ mod ssdp;
 mod subscriptions;
 mod system_health;
 mod tags;
+mod usb;
 mod webhooks;
 mod websocket;
 mod zeroconf;
@@ -76,7 +77,11 @@ pub struct ApiFeatures {
     pub ssdp: Option<hass_ssdp::SsdpManager>,
     pub zeroconf: Option<hass_zeroconf::ZeroconfManager>,
     pub network_adapters: Option<hass_network::NetworkManager>,
+    pub usb: Option<hass_usb::UsbManager>,
+    pub usb_usage: Option<Arc<dyn UsbUsageProvider>>,
 }
+
+pub use usb::{UsbDiscoveryFlowUsage, UsbUsageClaim, UsbUsageProvider, UsbUsageSnapshot};
 
 #[derive(Clone)]
 pub(crate) struct AppState {

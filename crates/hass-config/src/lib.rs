@@ -57,6 +57,23 @@ pub enum DiscoveryKeyValue {
     Tuple(Vec<String>),
 }
 
+/// Trusted integration view of a config discovery flow's original data.
+/// This is deliberately not serializable and is not an ordinary API fragment.
+#[derive(Clone)]
+pub struct ConfigDiscoveryFlowSnapshot {
+    pub flow_id: String,
+    pub domain: String,
+    pub initial_data: Map<String, Value>,
+    pub data_kind: Option<DiscoveryDataKind>,
+}
+
+/// Native init-data provenance. This is never read from JSON flow context or
+/// serialized into an API response; a source string alone cannot supply it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DiscoveryDataKind {
+    Usb,
+}
+
 /// Persisted config entry data. `data` and `options` are available to trusted
 /// native drivers, but are intentionally omitted from ordinary API fragments.
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
@@ -857,6 +874,7 @@ struct FlowSession {
     request: ConfigFlowRequest,
     kind: FlowKind,
     initial_data: Option<Map<String, Value>>,
+    data_kind: Option<DiscoveryDataKind>,
     result: Value,
 }
 
@@ -1395,8 +1413,26 @@ impl ConfigEntries {
         match_context: &Map<String, Value>,
         initial_data: &Map<String, Value>,
     ) -> bool {
+        self.has_matching_discovery_flow_with_kind(
+            domain,
+            source,
+            match_context,
+            initial_data,
+            None,
+        )
+    }
+
+    pub fn has_matching_discovery_flow_with_kind(
+        &self,
+        domain: &str,
+        source: &str,
+        match_context: &Map<String, Value>,
+        initial_data: &Map<String, Value>,
+        data_kind: Option<DiscoveryDataKind>,
+    ) -> bool {
         self.lock_state().flows.values().any(|flow| {
             flow.kind == FlowKind::Config
+                && flow.data_kind == data_kind
                 && flow.request.domain == domain
                 && flow.request.source == source
                 && match_context
@@ -1404,6 +1440,34 @@ impl ConfigEntries {
                     .all(|(key, value)| flow.request.context.get(key) == Some(value))
                 && flow.initial_data.as_ref() == Some(initial_data)
         })
+    }
+
+    /// Atomically clone entries and original config discovery data for a
+    /// trusted provider such as USB usage inference. Ordinary API fragments
+    /// continue to redact entry data and never expose this snapshot directly.
+    pub fn snapshot_with_discovery_flows(
+        &self,
+        source: &str,
+    ) -> (Vec<ConfigEntry>, Vec<ConfigDiscoveryFlowSnapshot>) {
+        let state = self.lock_state();
+        let entries = state.entries.values().cloned().collect();
+        let mut flows = state
+            .flows
+            .iter()
+            .filter_map(|(flow_id, flow)| {
+                if flow.kind != FlowKind::Config || flow.request.source != source {
+                    return None;
+                }
+                Some(ConfigDiscoveryFlowSnapshot {
+                    flow_id: flow_id.clone(),
+                    domain: flow.request.domain.clone(),
+                    initial_data: flow.initial_data.clone()?,
+                    data_kind: flow.data_kind,
+                })
+            })
+            .collect::<Vec<_>>();
+        flows.sort_by(|left, right| left.flow_id.cmp(&right.flow_id));
+        (entries, flows)
     }
 
     /// Dismiss matching config discovery flows for one handler and source.
@@ -1414,6 +1478,30 @@ impl ConfigEntries {
         source: &str,
         matcher: impl Fn(&Map<String, Value>) -> bool,
     ) -> Result<usize> {
+        self.remove_matching_discovery_flows(domain, source, true, None, matcher)
+    }
+
+    /// Abort matching config discovery flows, including user-protected flows.
+    /// USB removal uses the pinned source's unconditional abort semantics.
+    /// Options and subentry flows remain outside this operation.
+    pub fn abort_matching_discovery_flows(
+        &self,
+        domain: &str,
+        source: &str,
+        data_kind: DiscoveryDataKind,
+        matcher: impl Fn(&Map<String, Value>) -> bool,
+    ) -> Result<usize> {
+        self.remove_matching_discovery_flows(domain, source, false, Some(data_kind), matcher)
+    }
+
+    fn remove_matching_discovery_flows(
+        &self,
+        domain: &str,
+        source: &str,
+        respect_protection: bool,
+        data_kind: Option<DiscoveryDataKind>,
+        matcher: impl Fn(&Map<String, Value>) -> bool,
+    ) -> Result<usize> {
         let candidates = {
             let state = self.lock_state();
             state
@@ -1421,9 +1509,12 @@ impl ConfigEntries {
                 .iter()
                 .filter(|(_, flow)| {
                     flow.kind == FlowKind::Config
+                        && data_kind.is_none_or(|kind| flow.data_kind == Some(kind))
                         && flow.request.domain == domain
                         && flow.request.source == source
-                        && flow.request.context.get("dismiss_protected") != Some(&Value::Bool(true))
+                        && (!respect_protection
+                            || flow.request.context.get("dismiss_protected")
+                                != Some(&Value::Bool(true)))
                 })
                 .filter_map(|(flow_id, flow)| {
                     flow.initial_data
@@ -1441,9 +1532,12 @@ impl ConfigEntries {
             for (flow_id, initial_data) in &candidates {
                 let matching = state.flows.get(flow_id).is_some_and(|flow| {
                     flow.kind == FlowKind::Config
+                        && data_kind.is_none_or(|kind| flow.data_kind == Some(kind))
                         && flow.request.domain == domain
                         && flow.request.source == source
-                        && flow.request.context.get("dismiss_protected") != Some(&Value::Bool(true))
+                        && (!respect_protection
+                            || flow.request.context.get("dismiss_protected")
+                                != Some(&Value::Bool(true)))
                         && flow.initial_data.as_ref() == Some(initial_data)
                 });
                 if matching {
@@ -2037,7 +2131,7 @@ impl ConfigEntries {
             user_input: None,
             context,
         };
-        self.run_flow_step(request, FlowKind::Config, driver, None)
+        self.run_flow_step(request, FlowKind::Config, driver, None, None)
     }
 
     /// Begin a user/import/discovery config flow through the registered driver.
@@ -2055,8 +2149,21 @@ impl ConfigEntries {
         &self,
         domain: &str,
         source: &str,
+        context: Map<String, Value>,
+        user_input: Option<Map<String, Value>>,
+    ) -> Result<Value> {
+        self.init_config_flow_with_typed_input(domain, source, context, user_input, None)
+    }
+
+    /// Trusted native discovery entrypoint. HTTP/WS initialization uses the
+    /// untyped wrapper, so user JSON cannot assert native payload provenance.
+    pub fn init_config_flow_with_typed_input(
+        &self,
+        domain: &str,
+        source: &str,
         mut context: Map<String, Value>,
         user_input: Option<Map<String, Value>>,
+        data_kind: Option<DiscoveryDataKind>,
     ) -> Result<Value> {
         validate_domain(domain)?;
         validate_source(source)?;
@@ -2084,7 +2191,7 @@ impl ConfigEntries {
             user_input,
             context,
         };
-        self.run_flow_step(request, FlowKind::Config, driver, initial_data)
+        self.run_flow_step(request, FlowKind::Config, driver, initial_data, data_kind)
     }
 
     /// Begin an entry's registered options flow.
@@ -2119,7 +2226,7 @@ impl ConfigEntries {
             user_input,
             context,
         };
-        self.run_flow_step(request, FlowKind::Options, driver, None)
+        self.run_flow_step(request, FlowKind::Options, driver, None, None)
     }
 
     /// Begin a supported native subentry flow. New flows use `source = "user"`
@@ -2233,10 +2340,11 @@ impl ConfigEntries {
             ))
         })?;
         let initial_data = session.initial_data;
+        let data_kind = session.data_kind;
         let kind = session.kind;
         let mut request = session.request;
         request.user_input = Some(user_input);
-        self.run_flow_step(request, kind, driver, initial_data)
+        self.run_flow_step(request, kind, driver, initial_data, data_kind)
     }
 
     /// Return the persisted core configuration.
@@ -2595,6 +2703,7 @@ impl ConfigEntries {
         kind: FlowKind,
         driver: Arc<dyn ConfigEntryDriver>,
         initial_data: Option<Map<String, Value>>,
+        data_kind: Option<DiscoveryDataKind>,
     ) -> Result<Value> {
         let result = match kind {
             FlowKind::Config => driver.config_flow(&request)?,
@@ -2617,6 +2726,7 @@ impl ConfigEntries {
                             request: stored_request,
                             kind,
                             initial_data,
+                            data_kind,
                             result: result_json.clone(),
                         },
                     );

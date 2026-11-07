@@ -199,6 +199,9 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
             "system_log/list"
                 | "system_log/subscribe_raw"
                 | "dhcp/subscribe_discovery"
+                | "usb/scan"
+                | "usb/list_serial_ports"
+                | "usb/list_serial_integrations"
                 | "zeroconf/subscribe_discovery"
         )
         || kind.starts_with("config/auth_provider/")

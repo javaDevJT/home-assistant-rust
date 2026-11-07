@@ -148832,7 +148832,91 @@
       "component_directory": "homeassistant/components/usb/",
       "config_flow_classes": [],
       "domain": "usb",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "docs/USB-PORT.md",
+        "crates/hass-usb/src/lib.rs",
+        "crates/hass-usb/src/debounce.rs",
+        "crates/hass-usb/src/generated.rs",
+        "crates/hass-usb/src/manager.rs",
+        "crates/hass-usb/src/matcher.rs",
+        "crates/hass-usb/src/models.rs",
+        "crates/hass-usb/src/paths.rs",
+        "crates/hass-usb/src/tests.rs#provider_models_and_service_info_preserve_exact_source_fields",
+        "crates/hass-usb/src/tests.rs#matcher_case_wildcards_specificity_and_stable_ties_match_source",
+        "crates/hass-usb/src/tests.rs#generated_matcher_and_selector_order_are_pinned",
+        "crates/hass-usb/src/tests.rs#scanner_merge_replaces_exact_path_in_place_and_isolates_failures",
+        "crates/hass-usb/src/tests.rs#metadata_change_is_remove_then_add_and_actions_have_no_usb_key",
+        "crates/hass-usb/src/tests.rs#non_usb_ports_never_enter_discovery_diff_and_empty_success_finishes_initial_scan",
+        "crates/hass-usb/src/tests.rs#event_callback_errors_are_isolated_and_exact_callback_guard_removes_one",
+        "crates/hass-usb/src/tests.rs#scanner_guard_removes_exact_registration_and_base_errors_propagate",
+        "crates/hass-usb/src/tests.rs#moved_path_requires_one_matching_unique_serial_candidate",
+        "crates/hass-usb/src/tests.rs#usb_path_lookup_uses_injected_realpath_and_ignores_non_usb_ports",
+        "crates/hass-usb/src/tests.rs#manual_and_change_debouncers_keep_source_cooldown_and_observer_rules",
+        "crates/hass-usb/src/tests.rs#watcher_is_strongly_owned_uses_weak_callback_and_is_joined_on_stop",
+        "crates/hass-usb/src/tests.rs#only_inotify_unavailable_is_a_distinct_watcher_start_failure",
+        "crates/hass-usb/src/tests.rs#watcher_join_error_is_returned_after_pending_work_is_canceled",
+        "crates/hass-usb/src/tests.rs#failed_first_scan_does_not_complete_initial_callbacks",
+        "crates/hass-usb/src/tests.rs#scan_request_and_initial_callback_order_follow_source_lifecycle",
+        "crates/hass-usb/src/tests.rs#initial_scan_callback_failure_stops_reverse_order_dispatch",
+        "crates/hass-usb/src/tests.rs#macos_silabs_duplicate_is_removed_from_discovery_snapshot_only",
+        "crates/hass-usb/src/tests.rs#stop_waits_for_in_progress_provider_work_and_blocks_stale_dispatch",
+        "crates/hass-usb/src/tests.rs#provider_path_lookup_excludes_registered_scanner_contributions",
+        "crates/hass-usb/src/tests.rs#requested_scans_report_nonfatal_scanner_and_event_errors",
+        "crates/hass-usb/src/tests.rs#stop_waits_for_requested_callbacks_before_provider_phase",
+        "crates/hass-usb/src/tests.rs#delayed_scan_shutdown_does_not_dispatch_error_callbacks_after_stop_begins",
+        "crates/hass-usb-backend/src/lib.rs",
+        "crates/hass-usb-backend/src/darwin.rs",
+        "crates/hass-usb-backend/src/errors.rs",
+        "crates/hass-usb-backend/src/linux.rs",
+        "crates/hass-usb-backend/src/paths.rs",
+        "crates/hass-usb-backend/src/udev.rs",
+        "crates/hass-usb-backend/src/watcher_events.rs",
+        "crates/hass-usb-backend/src/watcher_linux.rs",
+        "crates/hass-usb-backend/src/watcher_unavailable.rs",
+        "crates/hass-usb-backend/src/tests.rs#maps_injected_darwin_iokit_records_without_host_queries",
+        "crates/hass-usb-backend/src/tests.rs#linux_fixture_enumeration_keeps_by_id_and_resolved_paths_and_native_ports",
+        "crates/hass-usb-backend/src/tests.rs#linux_fixture_enumeration_skips_incomplete_devices_and_tolerates_absent_roots",
+        "crates/hass-usb-backend/src/tests.rs#path_resolution_and_udev_id_helpers_keep_alias_identity",
+        "crates/hass-usb-backend/src/tests.rs#non_strict_realpath_follows_dangling_links_and_missing_tails",
+        "crates/hass-usb-backend/src/tests.rs#udev_stem_matches_source_fields_and_port_suffix",
+        "crates/hass-usb-backend/src/tests.rs#watcher_change_mask_matches_the_pinned_event_set",
+        "crates/hass-usb-backend/src/tests.rs#watcher_reports_only_the_source_inotify_unavailable_case",
+        "crates/hass-api/src/lib.rs",
+        "crates/hass-api/src/extensions.rs",
+        "crates/hass-api/src/usb.rs",
+        "crates/hass-api/src/websocket.rs",
+        "crates/hass-api/tests/usb_protocol.rs#all_usb_commands_require_admin_and_exact_request_shapes",
+        "crates/hass-api/tests/usb_protocol.rs#list_serial_ports_uses_fresh_usb_and_non_usb_records_without_discovery_scan",
+        "crates/hass-api/tests/usb_protocol.rs#usb_scan_observer_suppression_and_manual_scan_request_are_preserved",
+        "crates/hass-api/tests/usb_protocol.rs#usage_maps_symlinks_keeps_missing_and_url_claims_and_redacts_psk",
+        "crates/hass-api/tests/usb_protocol.rs#list_serial_ports_maps_provider_errors_to_unknown_error_verbatim",
+        "crates/hass-api/tests/usb_protocol.rs#selector_integrations_keep_generated_order_and_filter_custom_overrides",
+        "crates/hass-api/tests/usb_protocol.rs#usb_api_keeps_only_a_weak_manager_and_reports_owner_teardown",
+        "crates/hass-config/src/lib.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/main.rs",
+        "crates/hass/src/usb.rs",
+        "crates/hass/src/usb_scheduler.rs",
+        "crates/hass/src/usb_usage.rs",
+        "crates/hass/src/discovery.rs",
+        "crates/hass/src/config.rs#usb_yaml_tracks_presence_and_accepts_ignored_parameters",
+        "crates/hass/src/usb.rs#native_serial_policy_retains_serialx_placeholder_and_exact_membership",
+        "crates/hass/src/usb.rs#started_scan_and_owned_watcher_stop_use_only_injected_provider",
+        "crates/hass/src/usb.rs#usb_scan_bridge_queues_keyless_flows_and_removes_exact_device",
+        "crates/hass/src/usb.rs#unavailable_watcher_polls_and_shutdown_joins_admitted_provider",
+        "crates/hass/src/usb_usage.rs#snapshot_extracts_only_literal_paths_for_eligible_nonignored_entries",
+        "crates/hass/src/usb_usage.rs#snapshot_projects_only_usb_source_flow_device_fields",
+        "crates/hass/src/usb_usage.rs#reports_loaded_and_retrying_entries_as_active",
+        "crates/hass/src/usb_usage.rs#realpath_resolves_owned_symlinks_and_normalizes_missing_paths",
+        "crates/hass/src/usb_usage.rs#active_state_list_is_the_source_compatible_set",
+        "crates/hass/src/usb_scheduler.rs#cancelling_a_pending_timer_never_runs_its_callback",
+        "crates/hass/src/usb_scheduler.rs#dropping_the_last_scheduler_owner_cancels_pending_timers",
+        "crates/hass/src/usb_scheduler.rs#callbacks_run_on_the_blocking_pool",
+        "crates/hass/src/usb_scheduler.rs#shutdown_waits_for_running_callback_and_self_cancel_is_nonblocking",
+        "crates/hass/src/usb_scheduler.rs#recursive_scheduling_is_supported_and_completed_jobs_are_reaped",
+        "crates/hass/src/discovery.rs#keyless_usb_creation_does_not_invent_a_persisted_discovery_key",
+        "crates/hass/src/discovery.rs#usb_removal_aborts_protected_matching_data_only_in_matching_domains"
+      ],
       "manifest": {
         "after_dependencies": [
           "hassio"
@@ -148857,10 +148941,10 @@
       },
       "manifest_blob_oid": "631189599c0ba9f73aba65cdb24e9be6976303a8",
       "manifest_path": "homeassistant/components/usb/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Supervisor-specific setup integration, Python custom-component matcher override loading, and native custom serial-proxy transports are not implemented. Native serialx-compatible enumeration is limited to Linux and Darwin providers; Windows is unsupported and physical USB hardware behavior is unverified. USB discovery flows are keyless, with no USB DiscoveryKey persistence or reload behavior implemented. Full pinned upstream source/test acceptance remains open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "09_modbus_serial_usb",
       "protocol_families": [
         "modbus_serial_usb"
@@ -168505,6 +168589,154 @@
         "verification": "Primary scoped, transport and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       },
       {
+        "domain": "dhcp",
+        "local_evidence": [
+          {
+            "path": "docs/DHCP-PORT.md"
+          },
+          {
+            "path": "crates/hass-api/src/dhcp.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/dhcp_protocol.rs",
+            "test_functions_present": [
+              "command_is_admin_only_and_has_an_exact_schema",
+              "snapshot_and_updates_use_raw_cache_data_and_source_mac_formatting",
+              "bounded_queue_reports_overflow",
+              "dhcp_subscription_uses_the_shared_thirty_two_subscription_limit",
+              "unsubscribe_cancels_snapshot_and_tolerates_sdk_owner_teardown"
+            ]
+          },
+          {
+            "path": "crates/hass-dhcp/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-dhcp/src/manager.rs"
+          },
+          {
+            "path": "crates/hass-dhcp/src/matcher.rs",
+            "test_functions_present": [
+              "generated_matcher_snapshot_retains_pinned_order_and_metadata",
+              "registered_device_matching_depends_on_key_presence_including_false",
+              "hostname_patterns_follow_python_fnmatchcase_semantics"
+            ]
+          },
+          {
+            "path": "crates/hass-dhcp/src/tests.rs",
+            "test_functions_present": [
+              "cache_preserves_mac_order_source_dedup_force_and_snapshot_forms",
+              "source_ip_rejections_and_ipv6_compression_are_exact",
+              "matcher_registry_and_discovery_action_keep_source_payload_and_order",
+              "rediscovery_only_replays_cached_dhcp_version_one_string_keys",
+              "update_guard_removes_only_its_listener_and_weak_manager_does_not_own_sdk",
+              "source_mac_formatter_canonicalizes_only_documented_shapes"
+            ]
+          },
+          {
+            "path": "crates/hass-dhcp-wire/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-dhcp-wire/src/capture.rs",
+            "test_functions_present": [
+              "empty_selection_is_idle_and_never_enumerates_interfaces",
+              "only_explicit_interfaces_are_opened_and_duplicate_selection_is_deduplicated",
+              "unknown_interfaces_and_permission_failures_are_returned",
+              "weak_stop_and_sync_shutdown_join_the_reader",
+              "async_shutdown_joins_reader_threads"
+            ]
+          },
+          {
+            "path": "crates/hass-dhcp-wire/src/decode.rs",
+            "test_functions_present": [
+              "requested_address_hostname_and_ethernet_source_are_reported",
+              "idna2003_round_trip_falls_back_for_sharp_s_punycode",
+              "renewal_uses_ipv4_source_and_missing_hostname_is_empty",
+              "ipv6_dhcp_request_requires_requested_address",
+              "ipv6_extension_and_udp_lengths_are_bounds_checked",
+              "duplicate_options_use_last_value_and_end_stops_parsing",
+              "malformed_idna_falls_back_to_utf8_and_invalid_utf8_uses_replacement",
+              "nonrequests_wrong_ports_and_non_ipv4_frames_are_ignored",
+              "both_udp_port_directions_are_admitted",
+              "corrupt_option_lengths_and_truncated_headers_are_errors",
+              "malformed_fixed_options_are_errors"
+            ]
+          },
+          {
+            "path": "crates/hass-dhcp-discover/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-dhcp-discover/src/dns.rs",
+            "test_functions_present": [
+              "total_dns_name_limit_includes_the_terminating_root_label"
+            ]
+          },
+          {
+            "path": "crates/hass-dhcp-discover/src/system.rs"
+          },
+          {
+            "path": "crates/hass-dhcp-discover/src/tests.rs",
+            "test_functions_present": [
+              "failed_resolver_cache_skips_only_after_success_and_resets_on_revision_or_expiry",
+              "an_entirely_unresponsive_resolver_set_is_retried_on_the_next_scan",
+              "scan_observations_follow_ascending_host_order",
+              "scan_uses_fallback_prefix_and_emits_only_complete_hosts",
+              "neighbors_are_read_and_probed_only_for_ptr_named_addresses",
+              "router_neighbor_is_checked_before_ptr_and_can_supply_nameserver",
+              "oversized_subnets_are_skipped_before_dns_or_neighbor_work",
+              "public_nameservers_are_ignored",
+              "the_2048_address_boundary_is_scanned",
+              "overlap_is_skipped_and_cancellation_releases_the_scan_gate",
+              "cancellation_during_neighbor_cache_wait_stops_before_reread",
+              "loopback_dns_uses_rd_zero_and_decodes_ptr_response",
+              "loopback_dns_rejects_malformed_answers",
+              "loopback_dns_timeout_and_cancellation_close_lookup_future",
+              "route_resolver_and_neighbor_parsers_are_bounded_and_synthetic",
+              "cidr_address_count_and_host_edges_match_ipv4_network_rules",
+              "malformed_compression_pointer_is_rejected",
+              "ptr_hostname_and_mac_validation_match_consumer_expectations"
+            ]
+          },
+          {
+            "path": "crates/hass-device-tracker/src/lib.rs"
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "dhcp_yaml_enables_only_an_explicit_section_and_ignores_legacy_parameters"
+            ]
+          },
+          {
+            "path": "crates/hass/src/dhcp.rs"
+          },
+          {
+            "path": "crates/hass/src/dhcp_providers.rs",
+            "test_functions_present": [
+              "capture_selection_uses_only_enabled_local_indexed_adapters_and_deduplicates",
+              "selected_capture_decodes_real_frame_into_the_dhcp_cache_and_joins",
+              "empty_selection_never_enumerates_or_opens_a_capture_interface",
+              "scan_schedule_starts_immediately_runs_hourly_ticks_and_joins",
+              "long_scan_skips_missed_ticks_instead_of_starting_a_catch_up_scan",
+              "scanner_reports_overlap_and_cancels_its_blocked_provider"
+            ]
+          },
+          {
+            "path": "crates/hass/src/dhcp_tests.rs",
+            "test_functions_present": [
+              "tracker_observation_uses_initial_home_router_states_and_only_new_matching_states",
+              "connected_device_publisher_uses_private_signal_and_ignores_missing_identity_fields",
+              "registered_device_matching_collects_domains_from_each_native_registry_row",
+              "queued_roomba_flow_persists_typed_key_and_replays_it_after_entry_removal"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          }
+        ],
+        "remaining": "Other link-layer decoders, custom matcher loading, platform hot-rebinding, frontend behavior, kernel-level packet filtering, and full pinned upstream acceptance remain open. System scanning is Linux-only; fixtures use synthetic or loopback data, with no live capture, external DNS, or production provider activity.",
+        "status": "partial",
+        "verification": "Published 35-crate source revision 996f0e42fa7dce04cdff59ca7d0c4cd60b78cd0d has a local receipt of 874 tests across 100 targets, strict locked offline workspace all-target Clippy and formatting, a fresh 126-test binary run, release build, and optimized CLI checks; its macOS candidate binary SHA-256 is 3d7db1362393f27d411694fdb6c7b7c6a4a7bfa60375f2aed0591caa93e6b817. The corrected Linux selector at 3f97a2d00c21daa1adfa8b205adb14e07244a69b has a green Linux CI run https://github.com/javaDevJT/home-assistant-rust/actions/runs/42374354822. The inventory writer did not execute tests."
+      },
+      {
         "domain": "group",
         "local_evidence": [
           {
@@ -169752,6 +169984,178 @@
         "verification": "Primary actual transport/process acceptance and ongoing full-wave checks are recorded in docs/PORTING.md; published immutable full-workspace receipts are in docs/VALIDATION.md."
       },
       {
+        "domain": "usb",
+        "local_evidence": [
+          {
+            "path": "docs/USB-PORT.md"
+          },
+          {
+            "path": "crates/hass-usb/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-usb/src/debounce.rs"
+          },
+          {
+            "path": "crates/hass-usb/src/generated.rs"
+          },
+          {
+            "path": "crates/hass-usb/src/manager.rs"
+          },
+          {
+            "path": "crates/hass-usb/src/matcher.rs"
+          },
+          {
+            "path": "crates/hass-usb/src/models.rs"
+          },
+          {
+            "path": "crates/hass-usb/src/paths.rs"
+          },
+          {
+            "path": "crates/hass-usb/src/tests.rs",
+            "test_functions_present": [
+              "provider_models_and_service_info_preserve_exact_source_fields",
+              "matcher_case_wildcards_specificity_and_stable_ties_match_source",
+              "generated_matcher_and_selector_order_are_pinned",
+              "scanner_merge_replaces_exact_path_in_place_and_isolates_failures",
+              "metadata_change_is_remove_then_add_and_actions_have_no_usb_key",
+              "non_usb_ports_never_enter_discovery_diff_and_empty_success_finishes_initial_scan",
+              "event_callback_errors_are_isolated_and_exact_callback_guard_removes_one",
+              "scanner_guard_removes_exact_registration_and_base_errors_propagate",
+              "moved_path_requires_one_matching_unique_serial_candidate",
+              "usb_path_lookup_uses_injected_realpath_and_ignores_non_usb_ports",
+              "manual_and_change_debouncers_keep_source_cooldown_and_observer_rules",
+              "watcher_is_strongly_owned_uses_weak_callback_and_is_joined_on_stop",
+              "only_inotify_unavailable_is_a_distinct_watcher_start_failure",
+              "watcher_join_error_is_returned_after_pending_work_is_canceled",
+              "failed_first_scan_does_not_complete_initial_callbacks",
+              "scan_request_and_initial_callback_order_follow_source_lifecycle",
+              "initial_scan_callback_failure_stops_reverse_order_dispatch",
+              "macos_silabs_duplicate_is_removed_from_discovery_snapshot_only",
+              "stop_waits_for_in_progress_provider_work_and_blocks_stale_dispatch",
+              "provider_path_lookup_excludes_registered_scanner_contributions",
+              "requested_scans_report_nonfatal_scanner_and_event_errors",
+              "stop_waits_for_requested_callbacks_before_provider_phase",
+              "delayed_scan_shutdown_does_not_dispatch_error_callbacks_after_stop_begins"
+            ]
+          },
+          {
+            "path": "crates/hass-usb-backend/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/darwin.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/errors.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/linux.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/paths.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/udev.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/watcher_events.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/watcher_linux.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/watcher_unavailable.rs"
+          },
+          {
+            "path": "crates/hass-usb-backend/src/tests.rs",
+            "test_functions_present": [
+              "maps_injected_darwin_iokit_records_without_host_queries",
+              "linux_fixture_enumeration_keeps_by_id_and_resolved_paths_and_native_ports",
+              "linux_fixture_enumeration_skips_incomplete_devices_and_tolerates_absent_roots",
+              "path_resolution_and_udev_id_helpers_keep_alias_identity",
+              "non_strict_realpath_follows_dangling_links_and_missing_tails",
+              "udev_stem_matches_source_fields_and_port_suffix",
+              "watcher_change_mask_matches_the_pinned_event_set",
+              "watcher_reports_only_the_source_inotify_unavailable_case"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-api/src/extensions.rs"
+          },
+          {
+            "path": "crates/hass-api/src/usb.rs"
+          },
+          {
+            "path": "crates/hass-api/src/websocket.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/usb_protocol.rs",
+            "test_functions_present": [
+              "all_usb_commands_require_admin_and_exact_request_shapes",
+              "list_serial_ports_uses_fresh_usb_and_non_usb_records_without_discovery_scan",
+              "usb_scan_observer_suppression_and_manual_scan_request_are_preserved",
+              "usage_maps_symlinks_keeps_missing_and_url_claims_and_redacts_psk",
+              "list_serial_ports_maps_provider_errors_to_unknown_error_verbatim",
+              "selector_integrations_keep_generated_order_and_filter_custom_overrides",
+              "usb_api_keeps_only_a_weak_manager_and_reports_owner_teardown"
+            ]
+          },
+          {
+            "path": "crates/hass-config/src/lib.rs"
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "usb_yaml_tracks_presence_and_accepts_ignored_parameters"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/src/usb.rs",
+            "test_functions_present": [
+              "native_serial_policy_retains_serialx_placeholder_and_exact_membership",
+              "started_scan_and_owned_watcher_stop_use_only_injected_provider",
+              "usb_scan_bridge_queues_keyless_flows_and_removes_exact_device",
+              "unavailable_watcher_polls_and_shutdown_joins_admitted_provider"
+            ]
+          },
+          {
+            "path": "crates/hass/src/usb_scheduler.rs",
+            "test_functions_present": [
+              "cancelling_a_pending_timer_never_runs_its_callback",
+              "dropping_the_last_scheduler_owner_cancels_pending_timers",
+              "callbacks_run_on_the_blocking_pool",
+              "shutdown_waits_for_running_callback_and_self_cancel_is_nonblocking",
+              "recursive_scheduling_is_supported_and_completed_jobs_are_reaped"
+            ]
+          },
+          {
+            "path": "crates/hass/src/usb_usage.rs",
+            "test_functions_present": [
+              "snapshot_extracts_only_literal_paths_for_eligible_nonignored_entries",
+              "snapshot_projects_only_usb_source_flow_device_fields",
+              "reports_loaded_and_retrying_entries_as_active",
+              "realpath_resolves_owned_symlinks_and_normalizes_missing_paths",
+              "active_state_list_is_the_source_compatible_set"
+            ]
+          },
+          {
+            "path": "crates/hass/src/discovery.rs",
+            "test_functions_present": [
+              "keyless_usb_creation_does_not_invent_a_persisted_discovery_key",
+              "usb_removal_aborts_protected_matching_data_only_in_matching_domains"
+            ]
+          }
+        ],
+        "remaining": "Supervisor-specific setup integration, Python custom-component matcher override loading, and native custom serial-proxy transports are not implemented. Native serialx-compatible enumeration is limited to Linux and Darwin providers; Windows is unsupported and physical USB hardware behavior is unverified. USB discovery flows are keyless, with no USB DiscoveryKey persistence or reload behavior implemented. Full pinned upstream source/test acceptance remains open.",
+        "status": "partial",
+        "verification": "Root reports the full 37-crate workspace gate passed: 929 tests across 105 targets (0 failed, 0 ignored), strict locked offline all-target Clippy, formatting, and release build; the final app run passed 143 tests. Focused USB evidence covers 23 SDK tests, eight backend tests on macOS, seven USB API protocol tests, four host tests, five usage tests, five scheduler tests, and the two USB-specific cases in the eight-test discovery-dispatch module. Optimized CLI checks accepted the example, empty, empty-USB, false-USB, and ignored-USB-parameter configurations and rejected an invalid root key without creating extra files or a database. Optimized macOS binary SHA-256: 98e4f4a2e30ce750d6b5b83805c0649d399a5768afcbe84fb54e24abf55d7da3. Linux-targeted backend code passed all-target cross-Clippy with Rust 1.92 and --ignore-rust-version; this is not Linux runtime evidence. There is no USB-specific commit or CI receipt yet; the inventory writer did not run tests."
+      },
+      {
         "domain": "webhook",
         "local_evidence": [
           {
@@ -169879,6 +170283,157 @@
         "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests."
       },
       {
+        "domain": "zeroconf",
+        "local_evidence": [
+          {
+            "path": "docs/ZEROCONF-PORT.md"
+          },
+          {
+            "path": "vendor/mdns-sd/PATCHES.md"
+          },
+          {
+            "path": "crates/hass-api/src/zeroconf.rs"
+          },
+          {
+            "path": "crates/hass-zeroconf/src/backend.rs"
+          },
+          {
+            "path": "crates/hass-zeroconf/src/homekit.rs",
+            "test_functions_present": [
+              "exact_and_prefix_model_lookup_preserve_source_precedence",
+              "wildcard_lookup_is_case_sensitive_and_keeps_registry_order",
+              "paired_and_always_discover_control_ordinary_flow_context",
+              "null_paired_status_preserves_homekit_admission"
+            ]
+          },
+          {
+            "path": "crates/hass-zeroconf/src/manager.rs"
+          },
+          {
+            "path": "crates/hass-zeroconf/src/matcher.rs",
+            "test_functions_present": [
+              "matcher_preserves_candidate_lowercasing_and_original_patterns",
+              "missing_and_valueless_properties_fail_but_empty_values_are_present",
+              "domain_only_matcher_matches_every_instance_of_its_type",
+              "fnmatch_matches_python_brackets_ranges_negation_and_backslashes",
+              "generated_index_preserves_bucket_and_matcher_order",
+              "bundled_registry_contains_the_pinned_generated_matchers"
+            ]
+          },
+          {
+            "path": "crates/hass-zeroconf/src/models.rs",
+            "test_functions_present": [
+              "selects_first_usable_address_without_reordering_source_vector",
+              "returns_none_for_missing_or_only_unusable_addresses",
+              "missing_hostname_is_preserved_when_a_usable_address_exists",
+              "keeps_scoped_ipv6_addresses_and_numeric_zone_in_text",
+              "decodes_txt_keys_and_values_and_preserves_presence_semantics",
+              "decoded_replacement_collisions_keep_first_slot_and_last_value",
+              "serializes_source_field_names_and_address_and_property_strings"
+            ]
+          },
+          {
+            "path": "crates/hass/src/discovery.rs"
+          },
+          {
+            "path": "crates/hass/src/instance_id.rs",
+            "test_functions_present": [
+              "legacy_native_identity_is_preserved_and_recreation_updates_the_shared_envelope",
+              "malformed_or_future_identity_is_reported_without_replacing_existing_data",
+              "concurrent_protocol_initialization_observes_one_identity"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/src/restart.rs",
+            "test_functions_present": [
+              "service_call_sets_request_and_preserves_context",
+              "non_admin_user_is_denied_without_requesting_restart",
+              "internal_system_context_can_request_restart",
+              "unsupported_restart_options_have_no_effect",
+              "failed_duplicate_start_preserves_the_existing_owner",
+              "shutdown_and_drop_remove_only_the_owned_handler"
+            ]
+          },
+          {
+            "path": "crates/hass/src/zeroconf.rs"
+          },
+          {
+            "path": "crates/hass/src/zeroconf_network.rs"
+          },
+          {
+            "path": "crates/hass/src/zeroconf_repairs.rs",
+            "test_functions_present": [
+              "detects_disjoint_duplicate_with_nonpersistent_error_and_source_placeholders",
+              "duplicate_detection_waits_for_local_identity_and_ignores_reflections",
+              "requires_a_truthy_exact_uuid_and_usable_converted_service_info",
+              "a_discovered_uuid_change_clears_its_conflict",
+              "issue_remains_until_the_last_conflicting_name_is_removed",
+              "missing_hostname_errors_after_tracking_the_conflicting_name",
+              "confirmation_recreates_shared_uuid_then_calls_real_restart_service_with_caller_context",
+              "showing_and_cancelling_confirmation_does_not_change_identity_or_restart",
+              "unknown_issues_do_not_receive_a_generic_confirmation_flow",
+              "teardown_unregisters_owned_callbacks_and_platform_without_a_strong_host_cycle"
+            ]
+          },
+          {
+            "path": "crates/hass-zeroconf/tests/manager.rs",
+            "test_functions_present": [
+              "complete_cache_hit_is_synchronous_and_does_not_resolve",
+              "incomplete_cache_miss_uses_owned_ten_second_lookup",
+              "raw_update_listeners_observe_unusable_records_before_address_filtering",
+              "removal_is_name_scoped_and_keeps_the_backend_cache_untouched",
+              "rediscovery_reuses_cache_then_owned_lookup_without_publishing_events",
+              "dropped_guard_removes_only_its_listener",
+              "provider_thread_callback_uses_captured_runtime_handle",
+              "shutdown_aborts_and_joins_owned_resolver_future",
+              "cache_snapshot_walks_generated_types_but_browser_includes_special_types",
+              "callback_errors_and_panics_do_not_break_other_listeners_or_dispatch",
+              "public_resolve_returns_records_and_preserves_backend_errors"
+            ]
+          },
+          {
+            "path": "crates/hass-zeroconf/tests/backend_loopback.rs",
+            "test_functions_present": [
+              "empty_interface_snapshot_remains_idle_and_joins_without_binding_udp",
+              "drop_fallback_requests_shutdown_and_releases_the_worker_port",
+              "loopback_browse_resolves_raw_data_notifies_waiters_and_removes_cache",
+              "registration_uses_conflict_renamed_name_and_unregistration_sends_goodbye"
+            ]
+          },
+          {
+            "path": "crates/hass-api/tests/zeroconf_protocol.rs",
+            "test_functions_present": [
+              "subscribe_discovery_requires_admin_and_rejects_extra_fields",
+              "acknowledgement_precedes_snapshot_and_live_events_have_source_shapes",
+              "queue_overflow_is_bounded_and_reports_a_terminal_subscription_error",
+              "unsubscribe_cancels_and_joins_a_pending_snapshot_resolution",
+              "client_close_and_server_shutdown_close_loopback_subscriptions",
+              "weak_manager_owner_removed_during_snapshot_reports_failure_after_ack"
+            ]
+          },
+          {
+            "path": "crates/hass/src/zeroconf_tests.rs",
+            "test_functions_present": [
+              "advertisement_bounds_preserve_utf8_and_enforce_txt_value_limit",
+              "host_advertises_shared_identity_bound_http_port_and_goodbye_on_loopback",
+              "external_homekit_service_waits_for_startup_and_goodbye_dismisses_all_source_flows"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/restart_process.rs",
+            "test_functions_present": [
+              "compiled_process_restart_reexecs_in_place_and_preserves_state_and_config"
+            ]
+          }
+        ],
+        "remaining": "The local 32-crate candidate implements native service models and ordered TXT decoding, generated matcher and HomeKit lookup, cache-first resolution, selected-interface mDNS I/O, YAML-presence-gated host startup, source-tagged shared discovery, bound-port/native-version/shared-identity advertisements, goodbye and protected-removal handling, duplicate-UUID Repairs, and process restart. Focused evidence is 17 SDK matcher/model/HomeKit tests, 11 manager tests, 4 loopback-wire tests, 6 WebSocket protocol tests, 3 actual-host fixtures, 10 Repairs-host tests, 6 restart tests, 3 persistent-identity tests, and 1 compiled-process restart. Custom integration matcher loading, Python wrapper interception, legacy `.uuid` file import, upstream URL-policy/TLS/cloud inference, live interface rebinding, and full pinned upstream fixture acceptance remain open. The generated catalog and HomeKit model entries are discovery metadata, not acceptance of those integrations. Packet fixtures use explicit loopback interfaces and nonstandard ports; no LAN or live-provider traffic is claimed.",
+        "status": "partial",
+        "verification": "The local 32-crate gate passes 814 tests across 93 targets (0 failed, 0 ignored), formatting, strict locked offline workspace all-target Clippy, release build, and optimized CLI checks for empty, deprecated, and invalid Zeroconf configuration without database creation. The optimized macOS candidate binary SHA-256 is b18e3006af3628d797c2a59b735e4f39a5c38663b4eb860986d6411a79fd94be. The inventory writer did not execute tests."
+      },
+      {
         "domain": "zone",
         "local_evidence": [
           {
@@ -169905,10 +170460,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 40,
+    "partial": 43,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1525
+    "unported": 1522
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

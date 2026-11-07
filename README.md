@@ -61,6 +61,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | SSDP | Native discovery cache/callbacks, UDP scanning, UPnP XML/advertisements, config-flow bridge and admin WebSocket feed |
 | Zeroconf | Native DNS-SD wire/cache, generated matching, HomeKit flow policy, local advertisement, duplicate-ID repair and admin WebSocket feed |
 | DHCP | Native observation cache/matching, selected passive capture, Linux PTR/neighbor scans, tracker and config-flow bridges, admin WebSocket feed |
+| USB | Native Linux/Darwin serial enumeration, owned hotplug/polling, scanner SDK, discovery/removal and admin port usage APIs |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -87,6 +88,9 @@ cargo test --workspace --locked
 - [Native Network SDK and injected-provider checks](crates/hass-network/README.md)
 - [Pinned Zeroconf discovery and mDNS port contract](docs/ZEROCONF-PORT.md)
 - [Pinned DHCP observation and packet-engine port contract](docs/DHCP-PORT.md)
+- [Pinned USB discovery and serial-provider port contract](docs/USB-PORT.md)
+- [Native USB SDK and synthetic lifecycle checks](crates/hass-usb/README.md)
+- [Native serial backend provenance](crates/hass-usb-backend/THIRD-PARTY-NOTICES.md)
 - [Native SSDP SDK, scanner and UPnP server APIs](crates/hass-ssdp/README.md)
 - [Repairs and issue registry port contracts](docs/REPAIRS-PORT.md)
 - [Config subentries, native flow callbacks and lifecycle contracts](docs/CONFIG-SUBENTRIES-PORT.md)

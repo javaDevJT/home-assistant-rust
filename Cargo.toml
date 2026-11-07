@@ -18,6 +18,8 @@ members = [
     "crates/hass-dhcp",
     "crates/hass-dhcp-wire",
     "crates/hass-dhcp-discover",
+    "crates/hass-usb",
+    "crates/hass-usb-backend",
 ]
 
 [workspace.package]
@@ -69,6 +71,8 @@ hass-zeroconf = { path = "crates/hass-zeroconf" }
 hass-dhcp = { path = "crates/hass-dhcp" }
 hass-dhcp-wire = { path = "crates/hass-dhcp-wire" }
 hass-dhcp-discover = { path = "crates/hass-dhcp-discover" }
+hass-usb = { path = "crates/hass-usb" }
+hass-usb-backend = { path = "crates/hass-usb-backend" }
 idna = "=1.1.0"
 pnet_datalink = "=0.35.0"
 stringprep = "=0.1.5"
