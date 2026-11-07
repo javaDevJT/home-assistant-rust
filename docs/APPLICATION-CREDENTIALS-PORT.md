@@ -10,7 +10,9 @@ coverage pass within the final 998-test/114-target workspace gate. Formatting,
 strict all-target Clippy, optimized build and seven optimized CLI cases pass.
 The macOS binary SHA-256 is
 `6a517d876da5d337f80f8656e91ddb29b6a1f4f3a0604178db097c448bb17d57`.
-Publication and exact Linux CI are pending.
+Source `d9025ac2860539d05752990723d6b138f5c606a2` is published and passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42398882199),
+including formatting, strict all-target Clippy, all tests and CLI validation.
 
 The native subset is partial. The app registers no production credential
 platforms and does not advertise the 54 upstream providers as working. OAuth

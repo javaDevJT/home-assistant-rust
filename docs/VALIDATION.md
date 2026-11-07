@@ -7,7 +7,9 @@ zero failed or ignored cases, including 145 app-bin cases and 20 compiled-proces
 cases. Formatting, strict locked offline workspace all-target Clippy and the
 optimized workspace build pass. The optimized macOS `hass` SHA-256 is
 `6a517d876da5d337f80f8656e91ddb29b6a1f4f3a0604178db097c448bb17d57`.
-Source publication and exact Linux CI remain pending.
+Source `d9025ac2860539d05752990723d6b138f5c606a2` is published and passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42398882199):
+formatting, strict all-target Clippy, all workspace tests and CLI validation.
 
 New proof includes 12 credential SDK cases, five slug cases, nine loopback API
 cases, one YAML-presence case and one process restart case. Storage is private

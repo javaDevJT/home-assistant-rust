@@ -24,7 +24,12 @@ and the final release check. The final exact-source gate passes 998 tests over
 workspace all-target Clippy and the optimized workspace build. Seven optimized
 CLI cases pass without extra files/database or ignored-secret echo. The macOS
 binary SHA-256 is `6a517d876da5d337f80f8656e91ddb29b6a1f4f3a0604178db097c448bb17d57`.
-Publication and exact Linux CI remain pending. Inventory correction v99 is
+Source `d9025ac2860539d05752990723d6b138f5c606a2` is published and passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42398882199),
+including formatting, strict all-target Clippy, all tests and CLI validation.
+Root independently resolved all 662 partial-row evidence paths and 373 Rust
+function references, checked that only Credentials' three domain-row fields
+changed, and retained all pinned source snapshots. Inventory correction v99 is
 released with 45 partial / 1,520 unported / zero complete; root reviews its
 semantic delta and evidence before publishing.
 
