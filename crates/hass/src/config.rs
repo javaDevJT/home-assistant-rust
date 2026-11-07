@@ -382,6 +382,7 @@ impl Config {
         let mut components = vec![
             "api",
             "websocket_api",
+            "network",
             "recorder",
             "auth",
             "template",

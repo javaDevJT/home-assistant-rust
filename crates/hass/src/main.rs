@@ -161,6 +161,16 @@ async fn main() -> Result<()> {
     let repairs_manager = repairs.manager();
     let system_health = system_health::start(runtime.clone())?;
     let system_health_manager = system_health.manager();
+    let network_runtime = runtime.clone();
+    let network_adapters = tokio::task::spawn_blocking(move || {
+        hass_network::NetworkIntegration::start(
+            network_runtime,
+            Arc::new(hass_network::SystemAdapterEnumerator),
+            Arc::new(hass_network::SystemRouteSourceResolver),
+        )
+    })
+    .await??;
+    let network_adapter_manager = network_adapters.manager();
     let logger_runtime = runtime.clone();
     let logger_auth = auth.clone();
     let logger_config = config.logger.clone().unwrap_or_default();
@@ -192,7 +202,14 @@ async fn main() -> Result<()> {
         tracing::error!(target: "hass::ssdp", "{}", ssdp::CONFIGURATION_WARNING);
     }
     let mut ssdp = if config.ssdp_enabled {
-        Some(ssdp::SsdpHost::start(runtime.clone(), config_entries.clone()).await?)
+        Some(
+            ssdp::SsdpHost::start(
+                runtime.clone(),
+                config_entries.clone(),
+                network_adapter_manager.clone(),
+            )
+            .await?,
+        )
     } else {
         None
     };
@@ -369,6 +386,7 @@ async fn main() -> Result<()> {
             repairs: Some(repairs_manager),
             system_health: Some(system_health_manager),
             ssdp: ssdp_manager,
+            network_adapters: Some(network_adapter_manager),
         },
         Some(shutdown_rx),
     );
@@ -402,6 +420,7 @@ async fn main() -> Result<()> {
     let group_result = groups.shutdown().await;
     let notification_result = notifications.shutdown();
     drop(repairs);
+    network_adapters.shutdown();
     let system_log_result = system_log.shutdown().await;
     let logger_result = logger.shutdown();
     let stop_result = tokio::task::spawn_blocking(move || {

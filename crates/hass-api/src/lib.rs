@@ -17,6 +17,7 @@ mod images;
 mod logger;
 mod login;
 pub mod network;
+mod network_adapters;
 mod persons;
 mod repairs;
 mod ssdp;
@@ -70,6 +71,7 @@ pub struct ApiFeatures {
     pub repairs: Option<hass_repairs::RepairsManager>,
     pub system_health: Option<hass_system_health::SystemHealthManager>,
     pub ssdp: Option<hass_ssdp::SsdpManager>,
+    pub network_adapters: Option<hass_network::NetworkManager>,
 }
 
 #[derive(Clone)]

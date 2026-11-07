@@ -29,6 +29,7 @@ pub fn catalog() -> IntegrationCatalog {
         ("input_text", &["hass::helpers::input_text"]),
         ("logger", &["hass_logger"]),
         ("mqtt", &["hass_mqtt"]),
+        ("network", &["hass_network", "hass_api::network_adapters"]),
         ("persistent_notification", &["hass_notifications"]),
         ("person", &["hass_person", "hass::persons"]),
         ("recorder", &["hass::recorder", "hass_storage"]),

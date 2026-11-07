@@ -25,7 +25,9 @@ pub use matcher::{
     IntegrationMatchers, IntegrationMatchersConfig, MatchDict, headers_match,
     pinned_integration_matchers,
 };
-pub use network::{SsdpInterface, SsdpScanner, SsdpScannerOptions, enabled_sources};
+pub use network::{
+    SsdpInterface, SsdpScanner, SsdpScannerOptions, enabled_sources, select_sources,
+};
 pub use protocol::{
     DecodeError, MessageKind, SsdpMessage, build_search_packet, decode_ssdp_packet,
     is_valid_ssdp_packet, udn_from_usn,

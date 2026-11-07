@@ -514,3 +514,60 @@ remains immutable. Inventory owner `ssdp_inventory_v46` writes only PARITY.md
 and upstream-parity.json; only SSDP may gain partial status. The next source
 owner writes only NETWORK-PORT.md, outside this publication. No deployment,
 LAN/device or external provider activity occurred.
+
+Published SSDP source `b424ecc6f040aebb95232b67ab8babe46bbdc807` passed the local
+717-case gate. Exact Linux CI exposed a scheduling assumption in the
+invalidation fixture: its waiter could see a completed replacement, which is
+valid behavior. Test-only source `7de268dc2960425fa518436b5a000fc23ee0ed93`
+polls both futures to their defined states before release, preserves assertions,
+and passes [exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42357576357).
+No production cache behavior changed. Root independently checked the inventory:
+only SSDP changed status; config/API/WebSocket evidence changed, protected
+records and pinned source/coverage stayed unchanged, and every new reference
+resolved. The inventory remains 39 partial, 1,526 unported and zero complete.
+
+## Network integration and next mDNS boundary
+
+The 31st workspace crate is `hass-network`. Its isolated owner v48 and API draft
+owner v49 completed; root now owns both implementations and shared wiring.
+Fourteen SDK cases pass, including injected enumeration/routes, real SQLite,
+atomic write failure, provider reentry and shutdown commit serialization.
+Independent review v51 found no requested correctness issue. Four actual
+loopback WebSocket cases pass the three source commands, roles, strict input,
+stored preferences, saved core URLs and weak-owner teardown. URL reporting uses
+actual core configuration; unavailable cloud data is null. Root added detailed
+internal error logging while keeping client failures generic.
+
+Main strongly owns Network and exposes a weak manager. SSDP consumes its
+selected address snapshot before its own eligibility filter, with a dedicated
+app falsifier showing that disabled adapters are never re-enabled. The HTTP
+proxy/local-origin `NetworkPolicy` remains separate. Normal main startup reads
+OS interface/route metadata; its UDP route resolver connects and reads the
+chosen source without sending a datagram. Focused API/SDK fixtures use injected
+providers. Owner v54 adds a separate actual-process SQLite restart case over
+loopback. The current full gate passes 736 cases across 86 targets, formatting,
+strict Clippy and optimized build; its final process check/publication follow.
+
+Next mDNS implementation is explicitly separated from this gate. Contract v47
+pins Python zeroconf 0.152.0. Investigation v50 verified native Rust `mdns-sd`
+0.21.7 and its limits: constructors initialize interfaces before selection,
+the worker handle is discarded, and incoming TXT normalization loses data.
+Root chose a narrow local vendor patch instead of a new DNS engine. Owner v52
+writes only `vendor/mdns-sd/**`: explicit interface snapshots/custom ports before
+joins, true thread ownership, raw TXT and cache-ordered scoped addresses. The
+per-family wildcard socket remains necessary; selected memberships and packet
+filtering define the boundary. Explicit mode never enumerates other interfaces.
+Owner v53 writes only the future Zeroconf model/matcher/metadata files and tests
+them in an isolated temporary harness. Root owns future manager/app/API work.
+All workers use native Luna/max; provider speed/tier controls are unexposed.
+No mDNS test may touch local Bonjour port 5353 or a production interface.
+
+Final Network local gate passes 737 tests across 87 targets, zero failed or
+ignored, formatting, strict locked workspace all-target Clippy, optimized build
+and optimized CLI checks. Its macOS binary SHA-256 is
+`d53d9d1caa008998e671d2f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`.
+The actual-process case uses native providers, loopback transport and temporary
+SQLite, persists adapter/URL settings, then gracefully stops/reaps and restarts
+the child. API and SDK fixtures remain provider-injected. Inventory owner v55
+writes only PARITY.md/upstream-parity.json and may promote only Network. Root
+owns final semantic reconciliation, source publication and exact CI.

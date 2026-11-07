@@ -43,6 +43,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Authentication | Password users, roles, JWT access, rotating refresh sessions, TOTP MFA, signed paths |
 | Registries | Persistent entity/device/area/floor/label identity and CRUD |
 | Configuration | Persistent entries and subentries, native create/options/reconfigure flows, setup/unload/retry, core settings |
+| Network | Persistent adapter selection, typed address snapshots, source-route selection and authenticated WebSocket settings |
 | Native helpers | input_boolean/number/text/select/button/datetime, counter, timer, schedule |
 | Groups and controls | Legacy aggregate groups, native membership services, generic turn_on/turn_off/toggle delegation |
 | Notifications | Internal feed, create/dismiss services, authenticated current/live WebSocket updates and automation triggers |
@@ -80,6 +81,9 @@ cargo test --workspace --locked
 - [System Log source contracts and stream acceptance cases](docs/SYSTEM-LOG-PORT.md)
 - [System Health provider and subscription port contracts](docs/SYSTEM-HEALTH-PORT.md)
 - [SSDP discovery and pinned dependency port contracts](docs/SSDP-PORT.md)
+- [Network adapter selection and source-IP contracts](docs/NETWORK-PORT.md)
+- [Native Network SDK and injected-provider checks](crates/hass-network/README.md)
+- [Pinned Zeroconf discovery and mDNS port contract](docs/ZEROCONF-PORT.md)
 - [Native SSDP SDK, scanner and UPnP server APIs](crates/hass-ssdp/README.md)
 - [Repairs and issue registry port contracts](docs/REPAIRS-PORT.md)
 - [Config subentries, native flow callbacks and lifecycle contracts](docs/CONFIG-SUBENTRIES-PORT.md)

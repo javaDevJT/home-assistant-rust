@@ -28,6 +28,7 @@ hass-system-log.workspace = true
 hass-repairs.workspace = true
 hass-system-health.workspace = true
 hass-ssdp.workspace = true
+hass-network.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true

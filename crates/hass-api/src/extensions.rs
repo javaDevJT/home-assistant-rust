@@ -193,6 +193,7 @@ pub(crate) fn command_requires_admin(kind: &str) -> bool {
         || kind == "webhook/list"
         || matches!(kind, "tag/create" | "tag/update" | "tag/delete")
         || matches!(kind, "logger/log_level" | "logger/integration_log_level")
+        || matches!(kind, "network" | "network/configure")
         || matches!(kind, "system_log/list" | "system_log/subscribe_raw")
         || kind.starts_with("config/auth_provider/")
         || matches!(
@@ -274,6 +275,9 @@ pub(crate) async fn handle_ws(
     command: &Value,
 ) -> Option<Result<Value>> {
     let kind = command.get("type")?.as_str()?;
+    if matches!(kind, "network" | "network/configure" | "network/url") {
+        return Some(crate::network_adapters::handle(state, command, identity).await);
+    }
     if matches!(
         kind,
         "logger/log_info" | "logger/log_level" | "logger/integration_log_level"

@@ -1022,7 +1022,7 @@
     {
       "area": "HTTP server, REST API, proxy trust and request safety",
       "coverage_status": "partial_or_unported",
-      "gap": "Native REST and WebSocket transports cover state/services/events/history/templates/auth and config flows with origin/proxy/local-only policy. Repairs fix-flow and config-subentry flow routes now have focused HTTP fixtures, alongside WebSocket adapters for their supported commands. Remaining endpoints, IP bans, CORS, middleware/header, exact error and fine-grained permission parity stay open.",
+      "gap": "Native REST and WebSocket transports cover state/services/events/history/templates/auth and config flows with origin/proxy/local-only policy. Network adapter inventory/configuration and saved Core URL reads now use strict role-checked commands on the existing WebSocket dispatcher; they add no network HTTP route, service, or event. Repairs fix-flow and config-subentry flow routes have focused HTTP fixtures alongside WebSocket adapters for their supported commands. Remaining endpoints, IP bans, CORS, middleware/header, exact error and fine-grained permission parity stay open.",
       "id": "http_rest_and_proxy_security",
       "local_evidence_paths": [
         "crates/hass-api/src/http.rs",
@@ -1031,9 +1031,12 @@
         "crates/hass-api/src/repairs.rs",
         "crates/hass-api/src/config_subentries.rs",
         "crates/hass-api/tests/repairs_protocol.rs",
-        "crates/hass-api/tests/config_subentries_protocol.rs"
+        "crates/hass-api/tests/config_subentries_protocol.rs",
+        "crates/hass-api/src/network_adapters.rs",
+        "crates/hass-api/tests/network_protocol.rs",
+        "crates/hass/tests/network_process.rs"
       ],
-      "next_acceptance": "Port each endpoint and middleware from pinned source; exercise trusted/untrusted proxy, invalid auth, rate/ban, body limits, status/error shapes, CORS and headers with local HTTP fixtures.",
+      "next_acceptance": "Port each endpoint and middleware from pinned source; exercise trusted/untrusted proxy, invalid auth, rate/ban, body limits, status/error shapes, CORS and headers with local HTTP fixtures. Complete the remaining pinned network command, configuration and lifecycle acceptance with local WebSocket fixtures.",
       "pinned_upstream_sources": [
         "homeassistant/components/http/__init__.py",
         "homeassistant/components/http/auth.py",
@@ -1499,7 +1502,7 @@
     {
       "area": "Discovery, protocol managers, device events and transport lifecycles",
       "coverage_status": "partial_or_unported",
-      "gap": "A fixture-backed native SSDP protocol, manager, host and API stream now exists. The current port still has no accepted shared Bluetooth, Zigbee, Z-Wave, Matter/Thread, serial, USB, infrared or general discovery/network transport layer; the SSDP catalog's 44 domains and 94 matchers are metadata and do not establish driver ports.",
+      "gap": "A native adapter-address SDK now enumerates IPv4/IPv6 interfaces, persists selected adapter names and resolves a literal IPv4 route; SSDP consumes the selected addresses and applies its own protocol filter. A fixture-backed native SSDP protocol, manager, host and API stream also exists. The current port still has no accepted shared Bluetooth, Zigbee, Z-Wave, Matter/Thread, serial, USB, infrared or general discovery transport layer beyond SSDP and local adapter selection; the SSDP catalog's 44 domains and 94 matchers are metadata and do not establish driver ports.",
       "id": "discovery_and_shared_transports",
       "local_evidence_paths": [
         "crates/hass-ssdp/src/lib.rs",
@@ -1513,9 +1516,16 @@
         "crates/hass-api/src/ssdp.rs",
         "crates/hass-api/tests/ssdp_protocol.rs",
         "crates/hass-mqtt/src/lib.rs",
-        "crates/hass-native/src/lib.rs"
+        "crates/hass-native/src/lib.rs",
+        "crates/hass-network/README.md",
+        "crates/hass-network/src/lib.rs",
+        "crates/hass-network/tests/network.rs",
+        "crates/hass-api/src/network_adapters.rs",
+        "crates/hass-api/tests/network_protocol.rs",
+        "crates/hass/tests/network_process.rs",
+        "docs/NETWORK-PORT.md"
       ],
-      "next_acceptance": "Complete SSDP header-parser edge parity, uncommon text codecs, network-adapter preferences, icon asset serving, and pinned source acceptance; separately build fixture-backed shared transports and discovery lifecycle, then use the JSON protocol family membership lists to port all dependent adapters.",
+      "next_acceptance": "Complete SSDP header-parser edge parity, uncommon text codecs, native icon serving, live adapter-change handling and pinned SSDP source acceptance; do not imply live socket rebinding or Supervisor reload debounce. Separately build fixture-backed shared transports and discovery lifecycle, then use the JSON protocol-family membership lists to port all dependent adapters.",
       "pinned_upstream_sources": [
         {
           "path_count": 18,
@@ -12645,7 +12655,13 @@
         "crates/hass-api/tests/config_subentries_protocol.rs",
         "crates/hass-api/src/repairs.rs",
         "crates/hass-api/tests/repairs_protocol.rs",
-        "crates/hass/tests/end_to_end.rs"
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass-api/src/network_adapters.rs",
+        "crates/hass-api/tests/network_protocol.rs::websocket_commands_match_roles_wire_shapes_and_adapter_selection",
+        "crates/hass-api/tests/network_protocol.rs::validation_rejects_unknown_fields_and_wrong_nested_types",
+        "crates/hass-api/tests/network_protocol.rs::saved_preferences_survive_owner_restart_and_old_manager_goes_weak",
+        "crates/hass-api/tests/network_protocol.rs::missing_config_returns_null_urls_and_missing_manager_is_generic",
+        "crates/hass/tests/network_process.rs::compiled_process_network_admin_selection_and_urls_survive_restart"
       ],
       "manifest": {
         "codeowners": [
@@ -12662,7 +12678,7 @@
       },
       "manifest_blob_oid": "bdadbef32797d22b4cf39f27846abde8309e7815",
       "manifest_path": "homeassistant/components/api/manifest.json",
-      "outstanding_acceptance": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The API also exposes an admin-only SSDP callback feed over its bounded WebSocket queue, with cached replay, live add/remove, overflow termination and shutdown coverage. The config-subentry API test passes through graceful fixture teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, and history semantics require complete acceptance.",
+      "outstanding_acceptance": "Native HTTP/WebSocket fixtures cover config-subentry flows and Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The API also exposes an admin-only SSDP callback feed over its bounded WebSocket queue, with cached replay, live add/remove, overflow termination and shutdown coverage. Network adapter inventory/configuration and saved Core URL reads are limited to the `network`, `network/configure`, and `network/url` WebSocket commands, with admin writes, any-auth URL reads, strict fields and omitted-config `{}` default; no additional network event, service, or HTTP route is introduced. The config-subentry API test passes through graceful fixture teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, history, and complete network API semantics require acceptance.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -93838,7 +93854,32 @@
       "component_directory": "homeassistant/components/network/",
       "config_flow_classes": [],
       "domain": "network",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-network/README.md",
+        "crates/hass-network/src/lib.rs",
+        "crates/hass-network/tests/network.rs::default_adapter_and_auto_fallback_follow_pinned_selection_rules",
+        "crates/hass-network/tests/network.rs::route_failure_auto_selects_every_external_adapter",
+        "crates/hass-network/tests/network.rs::reload_reorders_renames_and_applies_only_surviving_configured_names",
+        "crates/hass-network/tests/network.rs::enabled_sources_preserve_order_duplicates_scope_zero_and_drop_flowinfo",
+        "crates/hass-network/tests/network.rs::source_ip_uses_ordered_route_fallback_then_first_enabled_ipv4",
+        "crates/hass-network/tests/network.rs::store_envelope_round_trips_with_real_memory_store_and_rejects_unwrapped_legacy_data",
+        "crates/hass-network/tests/network.rs::store_envelope_survives_sqlite_runtime_restart",
+        "crates/hass-network/tests/network.rs::failed_persistence_keeps_the_previous_configured_and_adapter_snapshot",
+        "crates/hass-network/tests/network.rs::enumeration_callback_runs_without_operation_lock_and_reload_uses_latest_names",
+        "crates/hass-network/tests/network.rs::route_callback_runs_without_operation_lock_and_reload_uses_latest_names",
+        "crates/hass-network/tests/network.rs::owner_shutdown_deactivates_a_reload_that_is_still_in_provider_work",
+        "crates/hass-network/tests/network.rs::manager_weak_handle_fails_after_owner_shutdown",
+        "crates/hass-network/tests/network.rs::store_load_rejects_an_unknown_version_without_migration",
+        "crates/hass-network/tests/network.rs::scoped_ip_json_keeps_ipv6_scope_zero",
+        "crates/hass-api/src/network_adapters.rs",
+        "crates/hass-api/tests/network_protocol.rs::websocket_commands_match_roles_wire_shapes_and_adapter_selection",
+        "crates/hass-api/tests/network_protocol.rs::validation_rejects_unknown_fields_and_wrong_nested_types",
+        "crates/hass-api/tests/network_protocol.rs::saved_preferences_survive_owner_restart_and_old_manager_goes_weak",
+        "crates/hass-api/tests/network_protocol.rs::missing_config_returns_null_urls_and_missing_manager_is_generic",
+        "crates/hass/tests/network_process.rs::compiled_process_network_admin_selection_and_urls_survive_restart",
+        "crates/hass/src/ssdp.rs::ssdp_only_uses_selected_network_addresses_then_applies_its_own_filter",
+        "docs/NETWORK-PORT.md"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -93855,10 +93896,10 @@
       },
       "manifest_blob_oid": "7dee6332f58303b1b08f1e7483a3e351e47fcb36",
       "manifest_path": "homeassistant/components/network/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "A native adapter SDK and host integration enumerate IPv4/IPv6 addresses, retain configured names, persist selections atomically, reload selected snapshots, and resolve a literal IPv4 source address. Unknown or renamed configured names remain stored; reload applies only surviving exact names even if interface order changes. IPv6 scope IDs are preserved (including zero), while flowinfo is cleared to zero. The WebSocket surface is limited to `network` (admin inventory), `network/configure` (admin preferences; an omitted config defaults to `{}`), and `network/url` (any authenticated user receives saved Core URLs and cloud `null`); no network event, service, or HTTP route is added. SDK tests use injected providers; the actual-process fixture uses SystemAdapterEnumerator plus UDP connect/read-local-address without sending, and temporary SQLite writes preferences only. This does not alter OS interfaces or perform LAN discovery. SSDP consumes the selected network addresses before its own protocol filter, with selection captured at startup; live socket rebinding and Supervisor reload debounce are not claimed. Platform limits remain: if-addrs nice_name mappings are not exact on every platform, IPv6 flowinfo defaults to zero with inferred scope, and route resolution is literal-IPv4-only. Full pinned Python/provider, UI and network lifecycle acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "17_integration_type:system",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -131338,7 +131379,9 @@
         "crates/hass/src/ssdp.rs#stable_identity_round_trips_and_malformed_storage_is_preserved",
         "crates/hass/src/ssdp.rs#app_owner_without_enabled_interfaces_stops_and_releases_weak_manager",
         "crates/hass/src/ssdp.rs#sqlite_identity_survives_a_new_host_without_retaining_the_old_writer",
-        "crates/hass/src/config.rs#ssdp_yaml_tracks_explicit_enablement_and_ignored_parameter_truthiness"
+        "crates/hass/src/config.rs#ssdp_yaml_tracks_explicit_enablement_and_ignored_parameter_truthiness",
+        "crates/hass-network/src/lib.rs",
+        "crates/hass/src/ssdp.rs::ssdp_only_uses_selected_network_addresses_then_applies_its_own_filter"
       ],
       "manifest": {
         "codeowners": [],
@@ -131360,7 +131403,7 @@
       },
       "manifest_blob_oid": "3908d7f06d3c2d1b9ef246e971fbcb8d9321b38b",
       "manifest_path": "homeassistant/components/ssdp/manifest.json",
-      "outstanding_acceptance": "Partial native parity is evidenced by the Rust SSDP SDK, shared manager/cache/scanner/server, native host integration, typed config-entry discovery identity, and an admin-only bounded WebSocket callback stream with cancellable cleanup. The wildcard listener receives multicast M-SEARCH on loopback, and /device.xml HEAD requests preserve the GET content length with an empty body. Description lookup fetches the first observed location and evaluates the latest headers after HTTP; live notifications retain the first location while getters and replay follow the current header location. Tracking uses UTC instants while public timestamp metadata follows the dependency's naive local microsecond shape. Callbacks remain private and do not become Runtime history. Remaining acceptance includes exact pinned fixture parity, header-parser edge behavior, uncommon Python text codecs, network-adapter preference configuration, native frontend icon assets/consumers, and any uncovered pinned source behavior. The bundled 44-domain/94-matcher metadata catalog does not establish those integrations as ported. SERVER/model/version values describe the Rust implementation, and no icon URLs are advertised until native assets are served. Evidence is limited to synthetic datagrams and loopback HTTP/UDP/WebSocket fixtures; no physical device, production-interface activity, or live provider traffic is claimed.",
+      "outstanding_acceptance": "Partial native parity is evidenced by the Rust SSDP SDK, shared manager/cache/scanner/server, native host integration, typed config-entry discovery identity, and an admin-only bounded WebSocket callback stream with cancellable cleanup. The host now consumes addresses selected by the native Network SDK and then applies the SSDP protocol filter; that selection is captured at startup, and live socket rebinding or Supervisor reload debounce is not claimed. The wildcard listener receives multicast M-SEARCH on loopback, and /device.xml HEAD requests preserve the GET content length with an empty body. Description lookup fetches the first observed location and evaluates the latest headers after HTTP; live notifications retain the first location while getters and replay follow the current header location. Tracking uses UTC instants while public timestamp metadata follows the dependency's naive local microsecond shape. Callbacks remain private and do not become Runtime history. Remaining acceptance includes exact pinned fixture parity, header-parser edge behavior, uncommon Python text codecs, native frontend icon assets/consumers, live adapter-change lifecycle and any uncovered pinned source behavior. The bundled 44-domain/94-matcher metadata catalog does not establish those integrations as ported. SERVER/model/version values describe the Rust implementation, and no icon URLs are advertised until native assets are served. Evidence is limited to synthetic datagrams and loopback HTTP/UDP/WebSocket fixtures; no physical device, production-interface activity, or live provider traffic is claimed.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -155276,7 +155319,13 @@
         "crates/hass-api/src/config_subentries.rs",
         "crates/hass-api/tests/config_subentries_protocol.rs",
         "crates/hass-api/tests/repairs_protocol.rs",
-        "crates/hass/tests/end_to_end.rs"
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass-api/src/network_adapters.rs",
+        "crates/hass-api/tests/network_protocol.rs::websocket_commands_match_roles_wire_shapes_and_adapter_selection",
+        "crates/hass-api/tests/network_protocol.rs::validation_rejects_unknown_fields_and_wrong_nested_types",
+        "crates/hass-api/tests/network_protocol.rs::saved_preferences_survive_owner_restart_and_old_manager_goes_weak",
+        "crates/hass-api/tests/network_protocol.rs::missing_config_returns_null_urls_and_missing_manager_is_generic",
+        "crates/hass/tests/network_process.rs::compiled_process_network_admin_selection_and_urls_survive_restart"
       ],
       "manifest": {
         "codeowners": [
@@ -155293,7 +155342,7 @@
       },
       "manifest_blob_oid": "315411ea4cf88f1fddfc571ccbe3742826cbc63c",
       "manifest_path": "homeassistant/components/websocket_api/manifest.json",
-      "outstanding_acceptance": "Repairs list/get-data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce their typed fields, privacy and role boundaries; focused actual-transport fixtures for both subsets pass. The Tag private subscription feed also has actual-transport evidence. An admin-only SSDP discovery feed uses a bounded callback queue; tests cover cached replay before live updates, overflow termination, unsubscribe and server-shutdown cleanup. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused actual-transport fixtures for both subsets pass. The Tag private subscription feed also has actual-transport evidence. An admin-only SSDP discovery feed uses a bounded callback queue; tests cover cached replay before live updates, overflow termination, unsubscribe and server-shutdown cleanup. Network adds only `network` inventory and `network/configure` preferences for admins, plus `network/url` for any authenticated reader; command fields are strict and omitted config defaults to `{}`. Only supported command/channel subsets are implemented: no network event, service, or HTTP route is added, and remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -168037,11 +168086,29 @@
               "callback_queue_overflow_reports_error_and_terminates_subscription",
               "weak_manager_reports_failure_after_ack_and_server_shutdown_closes_streams"
             ]
+          },
+          {
+            "path": "crates/hass-api/src/network_adapters.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/network_protocol.rs",
+            "test_functions_present": [
+              "websocket_commands_match_roles_wire_shapes_and_adapter_selection",
+              "validation_rejects_unknown_fields_and_wrong_nested_types",
+              "saved_preferences_survive_owner_restart_and_old_manager_goes_weak",
+              "missing_config_returns_null_urls_and_missing_manager_is_generic"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/network_process.rs",
+            "test_functions_present": [
+              "compiled_process_network_admin_selection_and_urls_survive_restart"
+            ]
           }
         ],
-        "remaining": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. System Health adds an authenticated system_health/info feature over the existing WebSocket transport, strict id/type command validation, admin/ordinary/read-only reads, and joined callback cleanup without a new HTTP route or public Runtime listener. The SSDP stream is an admin-only bounded callback subset with cached replay and live add/remove; full pinned API, endpoint, error, authorization, subscription, connection, and history acceptance remains open.",
+        "remaining": "Native HTTP/WebSocket fixtures cover config-subentry flows and Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The API also exposes an admin-only SSDP callback feed over its bounded WebSocket queue, with cached replay, live add/remove, overflow termination and shutdown coverage. Network adapter inventory/configuration and saved Core URL reads are limited to the `network`, `network/configure`, and `network/url` WebSocket commands, with admin writes, any-auth URL reads, strict fields and omitted-config `{}` default; no additional network event, service, or HTTP route is introduced. The config-subentry API test passes through graceful fixture teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, history, and complete network API semantics require acceptance.",
         "status": "partial",
-        "verification": "Root reports the final candidate gate: 717 tests across 82 targets with zero failed or ignored, including the four actual-WebSocket SSDP cases. The inventory writer inspected source and did not run tests. Optimized macOS candidate binary SHA-256: 6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821. Source publication and CI remain pending."
+        "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "auth",
@@ -168622,6 +168689,66 @@
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
       {
+        "domain": "network",
+        "local_evidence": [
+          {
+            "path": "crates/hass-network/README.md"
+          },
+          {
+            "path": "crates/hass-network/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-network/tests/network.rs",
+            "test_functions_present": [
+              "default_adapter_and_auto_fallback_follow_pinned_selection_rules",
+              "route_failure_auto_selects_every_external_adapter",
+              "reload_reorders_renames_and_applies_only_surviving_configured_names",
+              "enabled_sources_preserve_order_duplicates_scope_zero_and_drop_flowinfo",
+              "source_ip_uses_ordered_route_fallback_then_first_enabled_ipv4",
+              "store_envelope_round_trips_with_real_memory_store_and_rejects_unwrapped_legacy_data",
+              "store_envelope_survives_sqlite_runtime_restart",
+              "failed_persistence_keeps_the_previous_configured_and_adapter_snapshot",
+              "enumeration_callback_runs_without_operation_lock_and_reload_uses_latest_names",
+              "route_callback_runs_without_operation_lock_and_reload_uses_latest_names",
+              "owner_shutdown_deactivates_a_reload_that_is_still_in_provider_work",
+              "manager_weak_handle_fails_after_owner_shutdown",
+              "store_load_rejects_an_unknown_version_without_migration",
+              "scoped_ip_json_keeps_ipv6_scope_zero"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/network_adapters.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/network_protocol.rs",
+            "test_functions_present": [
+              "websocket_commands_match_roles_wire_shapes_and_adapter_selection",
+              "validation_rejects_unknown_fields_and_wrong_nested_types",
+              "saved_preferences_survive_owner_restart_and_old_manager_goes_weak",
+              "missing_config_returns_null_urls_and_missing_manager_is_generic"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/network_process.rs",
+            "test_functions_present": [
+              "compiled_process_network_admin_selection_and_urls_survive_restart"
+            ]
+          },
+          {
+            "path": "crates/hass/src/ssdp.rs",
+            "test_functions_present": [
+              "ssdp_only_uses_selected_network_addresses_then_applies_its_own_filter"
+            ]
+          },
+          {
+            "path": "docs/NETWORK-PORT.md"
+          }
+        ],
+        "remaining": "Native IPv4/IPv6 adapter enumeration, injectable route/provider boundaries, configured-name persistence, selection/reload snapshots, URL reads and admin configuration are partial only. Exact OS-specific interface-name mapping, scope inference when the provider omits scope, non-IPv4 route lookup, live socket rebinding, Supervisor reload debounce, UI consumers, Python/platform discovery and complete pinned network integration acceptance remain open.",
+        "status": "partial",
+        "verification": "Root reports the 2026-11-07 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), `cargo fmt --all -- --check`, strict locked workspace all-target Clippy, optimized build, and optimized CLI example plus empty temporary-config/no-database check pass. Network evidence adds 14 SDK cases, 4 actual WebSocket cases, 1 compiled-process restart case, and 1 SSDP selected-address case. The macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`; source publication and CI are pending. The process check uses SystemAdapterEnumerator and UDP connect/read-local-address without sending; temporary SQLite changes preferences only, with no OS interface change or LAN discovery. The inventory writer did not run tests."
+      },
+      {
         "domain": "persistent_notification",
         "local_evidence": [
           {
@@ -169056,7 +169183,8 @@
             "test_functions_present": [
               "stable_identity_round_trips_and_malformed_storage_is_preserved",
               "app_owner_without_enabled_interfaces_stops_and_releases_weak_manager",
-              "sqlite_identity_survives_a_new_host_without_retaining_the_old_writer"
+              "sqlite_identity_survives_a_new_host_without_retaining_the_old_writer",
+              "ssdp_only_uses_selected_network_addresses_then_applies_its_own_filter"
             ]
           },
           {
@@ -169078,9 +169206,9 @@
             ]
           }
         ],
-        "remaining": "Header-parser edge parity, uncommon Python text codecs, network-adapter preference configuration, frontend icon assets/consumers, and full pinned upstream acceptance remain open. Native SERVER/model/version values intentionally describe Rust, and the 44-domain/94-matcher catalog is metadata only.",
+        "remaining": "Header-parser edge parity, uncommon Python text codecs, native frontend icon assets/consumers, live adapter-change lifecycle and full pinned SSDP upstream acceptance remain open. Native host selection now consumes the selected Network addresses before applying the SSDP protocol filter; preferences are read at startup, with no live socket rebinding or Supervisor reload debounce claimed. Native SERVER/model/version values intentionally describe Rust, and the 44-domain/94-matcher catalog is metadata only.",
         "status": "partial",
-        "verification": "Root reports final candidate gates: 717 tests across 82 targets, zero failed or ignored; formatting, strict locked workspace all-target Clippy, locked release build and optimized example/truthy-SSDP CLI checks pass. The optimized macOS candidate binary SHA-256 is 6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821. Source publication and CI remain pending. Focused SSDP evidence comprises 47 SDK unit cases, 8 manager cases, 4 API WebSocket cases, 4 discovery dispatcher cases, 3 host cases, and 1 YAML config case, all synthetic or loopback fixtures; no production interface or provider activity was exercised."
+        "verification": "Historical published 30-crate SSDP source `7de268dc2960425fa518436b5a000fc23ee0ed93` passes formatting, strict locked workspace all-target Clippy, optimized build/CLI validation and 717 tests across 82 targets (0 failed, 0 ignored); exact Linux CI is [run 42357576357](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42357576357). The local 717/82 receipt and macOS binary SHA-256 `6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821` are at `b424ecc6`. CI exposed only test waiter ordering; `7de268d` fixes the test by polling futures deterministically, with runtime behavior unchanged. This published 30-crate receipt is separate from the current 31-crate Network candidate: 737 tests/87 targets and candidate SHA-256 `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`, whose publication and CI remain pending. Focused SSDP evidence comprises 47 SDK unit cases, 8 manager cases, 4 API WebSocket cases, 4 discovery dispatcher cases, 3 host cases and 1 YAML config case, all synthetic or loopback fixtures; no production interface or provider activity was exercised. The inventory writer did not run tests."
       },
       {
         "domain": "sun",
@@ -169569,11 +169697,29 @@
             "test_functions_present": [
               "real_process_repairs_sdk_storage_events_confirm_and_restart"
             ]
+          },
+          {
+            "path": "crates/hass-api/src/network_adapters.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/network_protocol.rs",
+            "test_functions_present": [
+              "websocket_commands_match_roles_wire_shapes_and_adapter_selection",
+              "validation_rejects_unknown_fields_and_wrong_nested_types",
+              "saved_preferences_survive_owner_restart_and_old_manager_goes_weak",
+              "missing_config_returns_null_urls_and_missing_manager_is_generic"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/network_process.rs",
+            "test_functions_present": [
+              "compiled_process_network_admin_selection_and_urls_survive_restart"
+            ]
           }
         ],
-        "remaining": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused transport fixtures cover both subsets. System Health uses the existing authenticated WebSocket dispatcher with strict id/type validation, ordinary/read-only access, generic transport failures, deferred updates, and joined cancellation on unsubscribe, socket close, or server shutdown. The Tag private subscription feed also has actual-transport evidence. The admin-only SSDP feed adds bounded callback delivery with cached replay, live updates, overflow termination, unsubscribe, and shutdown cleanup. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
+        "remaining": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused actual-transport fixtures for both subsets pass. The Tag private subscription feed also has actual-transport evidence. An admin-only SSDP discovery feed uses a bounded callback queue; tests cover cached replay before live updates, overflow termination, unsubscribe and server-shutdown cleanup. Network adds only `network` inventory and `network/configure` preferences for admins, plus `network/url` for any authenticated reader; command fields are strict and omitted config defaults to `{}`. Only supported command/channel subsets are implemented: no network event, service, or HTTP route is added, and remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Root reports the final candidate gate: 717 tests across 82 targets with zero failed or ignored, including the four actual-WebSocket SSDP cases. The inventory writer inspected source and did not run tests. Optimized macOS candidate binary SHA-256: 6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821. Source publication and CI remain pending."
+        "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "zone",
@@ -169602,10 +169748,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 39,
+    "partial": 40,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1526
+    "unported": 1525
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

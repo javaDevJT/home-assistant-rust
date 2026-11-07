@@ -9,7 +9,7 @@ use hass_config::{
 use hass_core::Runtime;
 use hass_ssdp::{
     SsdpIntegration, SsdpInterface, SsdpManager, SsdpScanner, SsdpScannerOptions, UpnpDevice,
-    UpnpServer, UpnpServerOptions, enabled_sources, pinned_integration_matchers,
+    UpnpServer, UpnpServerOptions, pinned_integration_matchers, select_sources,
 };
 use std::{net::SocketAddr, sync::Arc};
 
@@ -44,8 +44,12 @@ pub struct SsdpHost {
 }
 
 impl SsdpHost {
-    pub async fn start(runtime: Runtime, entries: ConfigEntries) -> Result<Self> {
-        let sources = enabled_sources()?;
+    pub async fn start(
+        runtime: Runtime,
+        entries: ConfigEntries,
+        network: hass_network::NetworkManager,
+    ) -> Result<Self> {
+        let sources = selected_sources(&network)?;
         Self::start_with_sources(runtime, entries, sources, SsdpScannerOptions::default()).await
     }
 
@@ -176,6 +180,26 @@ impl SsdpHost {
     }
 }
 
+fn selected_sources(
+    network: &hass_network::NetworkManager,
+) -> hass_core::Result<Vec<SsdpInterface>> {
+    Ok(select_sources(
+        network
+            .enabled_source_ips()?
+            .into_iter()
+            .map(|address| match address {
+                hass_network::ScopedIp::V4(address) => SsdpInterface {
+                    address: address.into(),
+                    index: None,
+                },
+                hass_network::ScopedIp::V6 { address, scope_id } => SsdpInterface {
+                    address: address.into(),
+                    index: Some(scope_id),
+                },
+            }),
+    ))
+}
+
 fn instance_id(runtime: &Runtime) -> Result<String> {
     if let Some(value) = runtime.get_data(INSTANCE_KEY)? {
         let value = value
@@ -225,6 +249,63 @@ mod tests {
             runtime.get_data(INSTANCE_KEY).unwrap(),
             Some(serde_json::json!("broken"))
         );
+    }
+
+    #[test]
+    fn ssdp_only_uses_selected_network_addresses_then_applies_its_own_filter() {
+        struct Adapters;
+        impl hass_network::AdapterEnumerator for Adapters {
+            fn enumerate(&self) -> hass_core::Result<Vec<hass_network::AdapterAddresses>> {
+                Ok([
+                    ("first", "192.0.2.10"),
+                    ("second", "198.51.100.20"),
+                    ("loopback", "127.0.0.1"),
+                    ("global", "8.8.8.8"),
+                ]
+                .into_iter()
+                .enumerate()
+                .map(|(index, (name, address))| hass_network::AdapterAddresses {
+                    name: name.into(),
+                    index: Some(index as u32 + 1),
+                    ipv4: vec![hass_network::Ipv4AddressRecord {
+                        address: address.parse().unwrap(),
+                        network_prefix: 24,
+                    }],
+                    ipv6: Vec::new(),
+                })
+                .collect())
+            }
+        }
+        struct Route;
+        impl hass_network::RouteSourceResolver for Route {
+            fn source_ip(&self, _: std::net::Ipv4Addr) -> Option<std::net::Ipv4Addr> {
+                Some("192.0.2.10".parse().unwrap())
+            }
+        }
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        let owner =
+            hass_network::NetworkIntegration::start(runtime, Arc::new(Adapters), Arc::new(Route))
+                .unwrap();
+        let manager = owner.manager();
+        assert_eq!(
+            selected_sources(&manager).unwrap()[0].address,
+            "192.0.2.10".parse::<IpAddr>().unwrap()
+        );
+        manager.configure(vec!["second".into()]).unwrap();
+        assert_eq!(
+            selected_sources(&manager).unwrap(),
+            vec![SsdpInterface {
+                address: "198.51.100.20".parse().unwrap(),
+                index: None
+            }]
+        );
+        manager
+            .configure(vec!["loopback".into(), "global".into()])
+            .unwrap();
+        assert_eq!(manager.enabled_source_ips().unwrap().len(), 2);
+        assert!(selected_sources(&manager).unwrap().is_empty());
+        owner.shutdown();
+        assert!(selected_sources(&manager).is_err());
     }
 
     #[tokio::test]

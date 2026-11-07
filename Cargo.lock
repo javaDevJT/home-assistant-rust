@@ -816,6 +816,7 @@ dependencies = [
  "hass-logger",
  "hass-mqtt",
  "hass-native",
+ "hass-network",
  "hass-notifications",
  "hass-person",
  "hass-registry",
@@ -861,6 +862,7 @@ dependencies = [
  "hass-entity",
  "hass-image-upload",
  "hass-logger",
+ "hass-network",
  "hass-notifications",
  "hass-person",
  "hass-registry",
@@ -1073,6 +1075,19 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hass-network"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "hass-storage",
+ "if-addrs",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

@@ -71,6 +71,17 @@ pub fn enabled_sources() -> Result<Vec<SsdpInterface>> {
     Ok(sources)
 }
 
+/// Apply SSDP eligibility to an already selected Network snapshot, retaining
+/// first-seen order and removing duplicate source addresses. This performs no
+/// OS enumeration and never enables an unselected adapter.
+pub fn select_sources(candidates: impl IntoIterator<Item = SsdpInterface>) -> Vec<SsdpInterface> {
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|source| source_is_eligible(*source) && seen.insert(*source))
+        .collect()
+}
+
 /// Search destinations, bind ports, timing, and bounded receive-work settings.
 #[derive(Clone, Debug)]
 pub struct SsdpScannerOptions {

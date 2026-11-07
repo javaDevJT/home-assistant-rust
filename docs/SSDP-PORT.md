@@ -111,7 +111,7 @@ queue. Source publication and exact Linux CI remain separate from the local
 gate; see [validation](VALIDATION.md) for immutable receipts.
 
 Open scope: complete header-parser edge parity, uncommon Python text codecs,
-network-adapter preference configuration, frontend assets/consumers and full
+complete platform address metadata, frontend assets/consumers and full
 pinned upstream acceptance. The app advertises no icon URLs until the native
 assets are served. Native SERVER/model/version values intentionally describe
 the running Rust implementation. SDK transferred child tasks receive abort

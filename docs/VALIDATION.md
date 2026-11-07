@@ -1,5 +1,44 @@
 # Validation evidence
 
+## Accepted local Network source (31 crates)
+
+The frozen workspace passes **737 tests across 87 targets**, zero failed or
+ignored, formatting, strict locked workspace all-target Clippy, optimized build
+and optimized example CLI validation on 2026-11-07. Optimized macOS executable
+SHA-256:
+`d53d9d1caa008998e671d2f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`.
+The optimized empty-config check creates no database. Source publication and
+exact Linux CI follow separately; unaccepted mDNS/Zeroconf work is outside this
+receipt.
+
+Fourteen Network SDK cases use injected interface/route providers and cover
+selection, unknown/duplicate names, scopes/order, MemoryStore and actual SQLite
+restart, write failure, provider reentry, concurrent reload/configure and owner
+deactivation serialized against commits. Independent source review found no
+requested correctness issue. Four actual loopback WebSocket cases cover the
+three source commands, administrator versus ordinary/read-only access, strict
+fields/defaults, persisted preferences, saved core URLs, missing features and
+stale weak handles. Unknown cloud data stays null; internal errors retain native
+log detail while client failures remain generic.
+
+The compiled-process case launches the actual native OS providers with a
+temporary SQLite database, selects one returned adapter through the real API,
+saves core URLs, closes the socket, gracefully stops and reaps the process, then
+restarts and verifies the saved selection and URLs. Its only service traffic is
+loopback HTTP/WebSocket. OS enumeration and route-source selection are read-only;
+the UDP route resolver calls connect/getsockname without sending a datagram.
+No OS adapter configuration or LAN discovery is changed. The app selection
+falsifier separately proves that SSDP consumes only enabled Network addresses,
+then applies its own filter, without enabling other adapters.
+
+The native main owns Network strongly; API and protocol consumers hold weak
+handles. It emits no invented Runtime event, service, periodic poll or HTTP
+route. Interface-friendly-name fidelity, unavailable native IPv6 flowinfo,
+hostname route targets, Supervisor reload/debounce, frontend settings and full
+pinned acceptance remain open. `--check` returns before OS provider setup and
+database initialization. No production deployment occurred. The complete
+rewrite continues after this checkpoint.
+
 ## Accepted local SSDP and discovery source (30 crates)
 
 The frozen workspace passes **717 tests across 82 targets**, zero failed or
@@ -7,8 +46,14 @@ ignored, formatting, strict locked workspace all-target Clippy, locked optimized
 build and optimized example CLI validation on 2026-11-07. Optimized macOS
 executable SHA-256:
 `6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821`.
-Source publication and exact Linux CI follow separately. The next Network
-source-contract draft is outside this receipt.
+The original local source is `b424ecc6f040aebb95232b67ab8babe46bbdc807`.
+Its cache-invalidation fixture assumed a spawned waiter had reached its await;
+Linux CI exposed that timing assumption. Test-only correction
+`7de268dc2960425fa518436b5a000fc23ee0ed93` explicitly polls the old waiter and
+replacement lookup before releasing the HTTP response and passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42357576357).
+It preserves the original cache assertions and runtime behavior. Later Network
+integration is outside this immutable 30-crate receipt.
 
 SSDP passes 47 unit and eight manager integration cases. Actual loopback UDP
 and HTTP cover M-SEARCH/advertisement reception, device XML, response matching,

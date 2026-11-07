@@ -45,9 +45,13 @@ listener with separate source-bound outbound sockets, cycles one alive record ev
 header and app-supplied metadata truthfully identify the native implementation.
 The caller supplies stable identity and real presentation/icon URLs.
 
+The application supplies sources from the shared Network manager. Standalone
+callers can still use `enabled_sources`; `select_sources` filters an already
+selected snapshot without enumerating or enabling other adapters.
+
 Tests use synthetic packets and actual loopback HTTP/UDP only. The API fixtures
 add real loopback WebSocket traffic. Full parser edge parity, uncommon Python
-codecs, user-configured network-adapter preferences, frontend assets, and
+codecs, complete platform address metadata, frontend assets, and
 exhaustive upstream acceptance remain open. The app currently emits an empty
 icon list because native frontend icon assets are not served. No LAN/device
 probe or production deployment is part of these checks.

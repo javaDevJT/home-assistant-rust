@@ -12,6 +12,7 @@ members = [
     "crates/hass-sun", "crates/hass-system-log", "crates/hass-repairs",
     "crates/hass-system-health",
     "crates/hass-ssdp",
+    "crates/hass-network",
 ]
 
 [workspace.package]
@@ -58,6 +59,7 @@ hass-system-log = { path = "crates/hass-system-log" }
 hass-repairs = { path = "crates/hass-repairs" }
 hass-system-health = { path = "crates/hass-system-health" }
 hass-ssdp = { path = "crates/hass-ssdp" }
+hass-network = { path = "crates/hass-network" }
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png"] }
 encoding_rs = "0.8"
 indexmap = "2"
