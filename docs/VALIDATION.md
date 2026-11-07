@@ -1,12 +1,61 @@
 # Validation evidence
 
+## Accepted local SSDP and discovery source (30 crates)
+
+The frozen workspace passes **717 tests across 82 targets**, zero failed or
+ignored, formatting, strict locked workspace all-target Clippy, locked optimized
+build and optimized example CLI validation on 2026-11-07. Optimized macOS
+executable SHA-256:
+`6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821`.
+Source publication and exact Linux CI follow separately. The next Network
+source-contract draft is outside this receipt.
+
+SSDP passes 47 unit and eight manager integration cases. Actual loopback UDP
+and HTTP cover M-SEARCH/advertisement reception, device XML, response matching,
+alive cadence, byebye, cache coalescing/negative caching, strict common charset
+decoding, port release and shutdown. Multicast M-SEARCH is exercised on the
+explicitly selected loopback interface; the wildcard listener and separate
+source-bound outbound sockets have a red/green regression. Device XML also
+supports HEAD with query parameters, correct content length and no body.
+Typed metadata, matcher rules, discovery
+order, getter privacy, guarded callbacks, async work cancellation and weak
+manager teardown have focused coverage. A red/green concurrent lookup case
+proves that live callbacks combine the latest device headers after HTTP returns,
+while retaining device identity across updates/removal. Pinned matcher metadata
+matches the upstream generated table exactly: 44 domains and 94 matchers.
+
+Four real WebSocket cases cover administrator access, strict fields, ACK before
+cached/live callbacks, source add/remove shapes, combined capacity accounting,
+observable queue overflow, unsubscribe, close and shutdown. Four dispatcher
+cases use actual native config callbacks for startup/dedup, entry creation and
+private key association, byebye/alive ordering, 20 concurrent admissions and
+joined blocking callbacks. The full run exposed an idle-accounting race; work
+reservation now shares the queue-pop lock, and the corrected full suite passes.
+
+Three host cases cover native instance identity, malformed-data preservation,
+no-interface startup/shutdown and real SQLite cold reopen without retaining
+the previous writer. The configuration suite has 31 passing cases, including
+latest-commit key snapshots and private removal notification after a cleanup
+failure. The cleanup journal remains minimal and never replays discovery
+notifications. One config case checks explicit enablement and ignored-value
+truthiness. The optimized CLI additionally accepts ignored truthy parameters,
+prints a generic warning without the sentinel value and creates no database.
+
+Native SERVER/model/version metadata identifies the real Rust runtime; icon
+URLs are omitted until native assets exist. Parser/codec edges, configured
+adapter preferences, frontend consumers and exhaustive pinned acceptance keep
+SSDP partial. Tests perform no LAN discovery, device/provider command or
+production deployment. The complete rewrite remains open.
+
 ## Accepted cleanup-journal source (29 crates)
 
 The frozen workspace passes **644 tests across 78 targets**, zero failed or
 ignored, formatting, strict locked workspace all-target Clippy, optimized build
 and optimized example CLI validation on 2026-11-07. Optimized macOS executable
 SHA-256: `6b0114feba68c1aeef564c1e3a76fe494d79e41c3270e8c6e579d6c642b6897f`.
-Source publication and exact Linux CI follow separately.
+Published source `56986ed1fa5176b002b948d2a5e68c2b0c43b5b0` also passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42345536763).
+Later SSDP and discovery-key work is outside this immutable receipt.
 
 All 25 config cases pass. Removal and a minimal cleanup record share the same
 metadata commit; registered cleanup consumers run outside manager locks, and

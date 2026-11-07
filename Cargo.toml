@@ -11,6 +11,7 @@ members = [
     "crates/hass-system-sensors", "crates/hass-tag", "crates/hass-logger",
     "crates/hass-sun", "crates/hass-system-log", "crates/hass-repairs",
     "crates/hass-system-health",
+    "crates/hass-ssdp",
 ]
 
 [workspace.package]
@@ -56,7 +57,11 @@ hass-sun = { path = "crates/hass-sun" }
 hass-system-log = { path = "crates/hass-system-log" }
 hass-repairs = { path = "crates/hass-repairs" }
 hass-system-health = { path = "crates/hass-system-health" }
+hass-ssdp = { path = "crates/hass-ssdp" }
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png"] }
+encoding_rs = "0.8"
+indexmap = "2"
+if-addrs = "0.15"
 http-body-util = "0.1"
 ipnet = "2"
 jsonwebtoken = "9"
@@ -67,12 +72,14 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rusqlite = { version = "0.37", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
 regex = "1"
+roxmltree = "0.21.2"
 rumqttc = { version = "0.25", default-features = false, features = ["use-rustls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 serde_path_to_error = "0.1"
 sha2 = "0.10"
+socket2 = { version = "0.6", features = ["all"] }
 subtle = "2"
 tempfile = "3"
 thiserror = "2"

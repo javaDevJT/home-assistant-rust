@@ -1,6 +1,7 @@
 //! Independent native Rust implementation of a subset of Home Assistant Core.
 
 mod config;
+mod discovery;
 mod helpers;
 mod homeassistant;
 mod integration_drivers;
@@ -8,6 +9,7 @@ mod logging;
 mod persons;
 mod recorder;
 mod repairs;
+mod ssdp;
 mod system_health;
 mod system_sensors;
 mod yaml;
@@ -78,6 +80,9 @@ async fn main() -> Result<()> {
     if args.check {
         if config.system_health_has_parameters() {
             eprintln!("{}", system_health::CONFIGURATION_WARNING);
+        }
+        if config.ssdp_has_parameters() {
+            eprintln!("{}", ssdp::CONFIGURATION_WARNING);
         }
         println!("Configuration valid (supported Rust subset)");
         return Ok(());
@@ -183,6 +188,15 @@ async fn main() -> Result<()> {
     if config.system_health_has_parameters() {
         tracing::error!(target: "hass::system_health", "{}", system_health::CONFIGURATION_WARNING);
     }
+    if config.ssdp_has_parameters() {
+        tracing::error!(target: "hass::ssdp", "{}", ssdp::CONFIGURATION_WARNING);
+    }
+    let mut ssdp = if config.ssdp_enabled {
+        Some(ssdp::SsdpHost::start(runtime.clone(), config_entries.clone()).await?)
+    } else {
+        None
+    };
+    let ssdp_manager = ssdp.as_ref().map(ssdp::SsdpHost::manager);
     let image_runtime = runtime.clone();
     let image_directory = args
         .config
@@ -328,6 +342,9 @@ async fn main() -> Result<()> {
     })
     .await??;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    if let Some(host) = &mut ssdp {
+        host.mark_started(bound_address).await?;
+    }
     let app = hass_api::router_with_features(
         hass_api::ApiState {
             runtime: runtime.clone(),
@@ -351,6 +368,7 @@ async fn main() -> Result<()> {
             system_log: Some(system_log_manager),
             repairs: Some(repairs_manager),
             system_health: Some(system_health_manager),
+            ssdp: ssdp_manager,
         },
         Some(shutdown_rx),
     );
@@ -359,6 +377,11 @@ async fn main() -> Result<()> {
         "Rust rewrite in progress; consult docs/upstream-parity.json for verified integration coverage"
     );
     let result = axum_serve(listener, app, shutdown_tx).await;
+    let ssdp_result = if let Some(ssdp) = ssdp {
+        ssdp.shutdown().await
+    } else {
+        Ok(())
+    };
     drop(system_health);
     let recorder_result = recorder.shutdown().await;
     let automation_result = automations.shutdown().await;
@@ -386,6 +409,7 @@ async fn main() -> Result<()> {
     })
     .await?;
     result?;
+    ssdp_result?;
     recorder_result?;
     automation_result?;
     system_sensor_result?;

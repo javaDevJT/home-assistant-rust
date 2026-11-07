@@ -24,6 +24,7 @@ use tokio::{
 use tracing::{Instrument, debug_span};
 
 use crate::AppState;
+use crate::ssdp::SsdpStream;
 use crate::system_health::HealthStream;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -147,6 +148,7 @@ async fn handle_socket(
     let mut subscriptions = HashMap::<u64, Option<String>>::new();
     let mut raw_log_streams = RawLogStreams::new();
     let mut health_streams = HashMap::<u64, HealthStream>::new();
+    let mut ssdp_streams = HashMap::<u64, SsdpStream>::new();
     let mut last_command_id: Option<u64> = None;
     let mut native = crate::subscriptions::NativeSubscriptions::new(
         state.api.runtime.clone(),
@@ -226,6 +228,72 @@ async fn handle_socket(
                 for frame in health_frames {
                     if send_json(&mut socket,&frame).await.is_err() {break 'connection;}
                 }
+
+                let mut ssdp_frames = Vec::new();
+                let mut ssdp_errors = Vec::new();
+                let mut finished_ssdp = Vec::new();
+                for (id, stream) in &mut ssdp_streams {
+                    for _ in 0..stream.capacity() {
+                        match stream.try_recv() {
+                            Ok(frame) => ssdp_frames.push(frame),
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                finished_ssdp.push(*id);
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(error) = stream.take_error() {
+                        ssdp_errors.push((*id, error));
+                        if !finished_ssdp.contains(id) {
+                            finished_ssdp.push(*id);
+                        }
+                    } else if stream.is_finished() && !finished_ssdp.contains(id) {
+                        finished_ssdp.push(*id);
+                    }
+                }
+                for id in finished_ssdp {
+                    if let Some(stream) = ssdp_streams.remove(&id) {
+                        if stream.is_finished() {
+                            stream.join().await;
+                        } else {
+                            stream.cancel().await;
+                        }
+                    }
+                }
+                if (!ssdp_frames.is_empty() || !ssdp_errors.is_empty())
+                    && identity.user_id.is_some()
+                {
+                    match crate::extensions::authenticate_token(&state, &token).await {
+                        Ok(current)
+                            if crate::extensions::same_authority(&identity, &current)
+                                && (!current.local_only || origin.is_local) =>
+                        {
+                            identity = current;
+                        }
+                        _ => {
+                            close_socket(&mut socket).await;
+                            break 'connection;
+                        }
+                    }
+                }
+                for frame in ssdp_frames {
+                    if send_json(&mut socket, &frame).await.is_err() {
+                        break 'connection;
+                    }
+                }
+                for (id, error) in ssdp_errors {
+                    if send_error(
+                        &mut socket,
+                        id,
+                        WsError::new("ssdp_stream_error", error),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break 'connection;
+                    }
+                }
             }
             _ = &mut shutdown_wait => {
                 close_socket(&mut socket).await;
@@ -291,13 +359,17 @@ async fn handle_socket(
                                 }
                             }
                         }
+                        if command_type == "ssdp/subscribe_discovery" && !identity.is_admin {
+                            if send_error(&mut socket,id,WsError::new("unauthorized","Unauthorized")).await.is_err() {break;}
+                            continue;
+                        }
                         if !crate::extensions::websocket_allowed(&identity,command_type,object) {
                             if send_error(&mut socket,id,WsError::new("unauthorized","Unauthorized")).await.is_err() {break;}
                             continue;
                         }
                         if crate::subscriptions::is_subscription_command(command_type)
                             && !matches!(command_type, "unsubscribe_events" | "config_entries/flow/progress")
-                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams)
+                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams, &ssdp_streams)
                                 >= MAX_SUBSCRIPTIONS_PER_SOCKET
                         {
                             if send_error(
@@ -338,6 +410,7 @@ async fn handle_socket(
                             &mut subscriptions,
                             &mut raw_log_streams,
                             &mut health_streams,
+                            &mut ssdp_streams,
                             &native,
                             (id, command_type),
                             object,
@@ -463,6 +536,9 @@ async fn handle_socket(
     for (_, stream) in health_streams {
         stream.cancel().await;
     }
+    for (_, stream) in ssdp_streams {
+        stream.cancel().await;
+    }
 }
 
 async fn receive_auth(socket: &mut WebSocket) -> Option<String> {
@@ -492,6 +568,7 @@ fn active_subscription_count(
     event_subscriptions: &HashMap<u64, Option<String>>,
     raw_log_streams: &RawLogStreams,
     health_streams: &HashMap<u64, HealthStream>,
+    ssdp_streams: &HashMap<u64, SsdpStream>,
 ) -> usize {
     let native_count = native
         .lock()
@@ -501,6 +578,7 @@ fn active_subscription_count(
         .saturating_add(event_subscriptions.len())
         .saturating_add(raw_log_streams.len())
         .saturating_add(health_streams.len())
+        .saturating_add(ssdp_streams.len())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -511,6 +589,7 @@ async fn handle_command(
     subscriptions: &mut HashMap<u64, Option<String>>,
     raw_log_streams: &mut RawLogStreams,
     health_streams: &mut HashMap<u64, HealthStream>,
+    ssdp_streams: &mut HashMap<u64, SsdpStream>,
     native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
     command: (u64, &str),
     message: &serde_json::Map<String, Value>,
@@ -518,7 +597,9 @@ async fn handle_command(
 ) -> bool {
     let (identity, origin) = client;
     let (id, command_type) = command;
-    if (crate::extensions::command_requires_admin(command_type) && !identity.is_admin)
+    if ((crate::extensions::command_requires_admin(command_type)
+        || command_type == "ssdp/subscribe_discovery")
+        && !identity.is_admin)
         || (identity.read_only && matches!(command_type, "call_service" | "fire_event"))
     {
         return send_error(socket, id, WsError::new("unauthorized", "Unauthorized"))
@@ -559,8 +640,13 @@ async fn handle_command(
             send_core_result(socket, id, result).await.is_ok()
         }
         "subscribe_events" => {
-            if active_subscription_count(native, subscriptions, raw_log_streams, health_streams)
-                >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            if active_subscription_count(
+                native,
+                subscriptions,
+                raw_log_streams,
+                health_streams,
+                ssdp_streams,
+            ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
                     socket,
@@ -653,7 +739,16 @@ async fn handle_command(
                 }
                 None => false,
             };
-            if !removed_event && !removed_raw_log && !removed_health {
+            let mut ssdp_error = None;
+            let removed_ssdp = match ssdp_streams.remove(&subscription_id) {
+                Some(stream) => {
+                    ssdp_error = stream.take_error();
+                    stream.cancel().await;
+                    true
+                }
+                None => false,
+            };
+            if !removed_event && !removed_raw_log && !removed_health && !removed_ssdp {
                 return send_error(
                     socket,
                     id,
@@ -662,7 +757,59 @@ async fn handle_command(
                 .await
                 .is_ok();
             }
+            if let Some(error) = ssdp_error
+                && send_error(
+                    socket,
+                    subscription_id,
+                    WsError::new("ssdp_stream_error", error),
+                )
+                .await
+                .is_err()
+            {
+                return false;
+            }
             send_success(socket, id, Value::Null).await.is_ok()
+        }
+        "ssdp/subscribe_discovery" => {
+            if message.len() != 2 {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
+            let Some(manager) = state.features.ssdp.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "SSDP integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            if active_subscription_count(
+                native,
+                subscriptions,
+                raw_log_streams,
+                health_streams,
+                ssdp_streams,
+            ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("subscription_limit", "Subscription limit reached"),
+                )
+                .await
+                .is_ok();
+            }
+            if send_success(socket, id, Value::Null).await.is_err() {
+                return false;
+            }
+            ssdp_streams.insert(id, SsdpStream::start(manager, id));
+            true
         }
         "system_health/info" => {
             if message.len() != 2 {
@@ -683,8 +830,13 @@ async fn handle_command(
                 .await
                 .is_ok();
             };
-            if active_subscription_count(native, subscriptions, raw_log_streams, health_streams)
-                >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            if active_subscription_count(
+                native,
+                subscriptions,
+                raw_log_streams,
+                health_streams,
+                ssdp_streams,
+            ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
                     socket,
@@ -781,8 +933,13 @@ async fn handle_command(
             send_core_result(socket, id, result).await.is_ok()
         }
         "system_log/subscribe_raw" => {
-            if active_subscription_count(native, subscriptions, raw_log_streams, health_streams)
-                >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            if active_subscription_count(
+                native,
+                subscriptions,
+                raw_log_streams,
+                health_streams,
+                ssdp_streams,
+            ) >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
                     socket,

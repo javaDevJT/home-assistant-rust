@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use chrono::{DateTime, Duration, Utc};
@@ -16,6 +17,7 @@ use uuid::Uuid;
 const METADATA_KEY: &str = "hass.config_entries.v1";
 const DOCUMENT_VERSION: u32 = 1;
 const MAX_RETRY_DELAY_SECS: u64 = 86_400;
+const MAX_DISCOVERY_KEYS_PER_DOMAIN: usize = 10;
 
 /// Config entry state, following Home Assistant's persisted lifecycle values.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -38,6 +40,23 @@ impl ConfigEntryState {
     }
 }
 
+/// Serializable identity for one discovery provider's view of a config entry.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryKey {
+    pub domain: String,
+    pub key: DiscoveryKeyValue,
+    pub version: u32,
+}
+
+/// A discovery key is either one string or an ordered tuple of strings.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum DiscoveryKeyValue {
+    String(String),
+    Tuple(Vec<String>),
+}
+
 /// Persisted config entry data. `data` and `options` are available to trusted
 /// native drivers, but are intentionally omitted from ordinary API fragments.
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
@@ -48,6 +67,8 @@ pub struct ConfigEntry {
     pub title: String,
     pub source: String,
     pub unique_id: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub discovery_keys: BTreeMap<String, Vec<DiscoveryKey>>,
     pub version: u32,
     pub minor_version: u32,
     pub data: Map<String, Value>,
@@ -328,6 +349,21 @@ pub enum ConfigLifecycleEvent {
 /// config change.
 pub trait ConfigLifecycleObserver: Send + Sync {
     fn config_lifecycle_changed(&self, event: &ConfigLifecycleEvent) -> Result<()>;
+}
+
+/// Minimal private notification emitted after a keyed entry is removed.
+#[derive(Clone, Debug)]
+pub struct DiscoveryKeyRemoval {
+    pub entry_id: String,
+    pub keys: Vec<DiscoveryKey>,
+}
+
+/// Receives live entry-removal notifications for native discovery providers.
+///
+/// Observer failures are isolated: removal is committed before this background
+/// notification and cannot be rolled back by a consumer.
+pub trait DiscoveryKeyRemovalObserver: Send + Sync {
+    fn discovery_keys_removed(&self, event: &DiscoveryKeyRemoval) -> Result<()>;
 }
 
 fn deserialize_subentries<'de, D>(
@@ -820,6 +856,7 @@ fn validate_optional_url(field: &str, value: Option<&str>) -> Result<()> {
 struct FlowSession {
     request: ConfigFlowRequest,
     kind: FlowKind,
+    initial_data: Option<Map<String, Value>>,
     result: Value,
 }
 
@@ -948,6 +985,7 @@ pub struct ConfigEntries {
     drivers: Arc<RwLock<HashMap<String, Arc<dyn ConfigEntryDriver>>>>,
     operation_lock: Arc<Mutex<()>>,
     lifecycle_observers: Arc<RwLock<Vec<Arc<dyn ConfigLifecycleObserver>>>>,
+    discovery_key_removal_observers: Arc<RwLock<Vec<Arc<dyn DiscoveryKeyRemovalObserver>>>>,
     cleanup_in_flight: Arc<Mutex<HashSet<Uuid>>>,
 }
 
@@ -962,6 +1000,22 @@ pub struct ConfigLifecycleObserverGuard {
 impl Drop for ConfigLifecycleObserverGuard {
     fn drop(&mut self) {
         let _ = self.manager.unregister_lifecycle_observer(&self.observer);
+    }
+}
+
+/// Owned registration for one discovery-key-removal observer.
+///
+/// Dropping the guard unregisters only the observer instance it installed.
+pub struct DiscoveryKeyRemovalObserverGuard {
+    manager: ConfigEntries,
+    observer: Arc<dyn DiscoveryKeyRemovalObserver>,
+}
+
+impl Drop for DiscoveryKeyRemovalObserverGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .manager
+            .unregister_discovery_key_removal_observer(&self.observer);
     }
 }
 
@@ -1025,6 +1079,7 @@ impl ConfigEntries {
             drivers: Arc::new(RwLock::new(HashMap::new())),
             operation_lock: Arc::new(Mutex::new(())),
             lifecycle_observers: Arc::new(RwLock::new(Vec::new())),
+            discovery_key_removal_observers: Arc::new(RwLock::new(Vec::new())),
             cleanup_in_flight: Arc::new(Mutex::new(HashSet::new())),
         };
         // Persist any restart state normalization before returning.
@@ -1157,6 +1212,62 @@ impl ConfigEntries {
         true
     }
 
+    /// Register a private discovery-key-removal observer.
+    ///
+    /// Registration is pointer-owned: duplicate registration is rejected and
+    /// `unregister_discovery_key_removal_observer` only removes the exact same
+    /// `Arc`.
+    pub fn register_discovery_key_removal_observer(
+        &self,
+        observer: Arc<dyn DiscoveryKeyRemovalObserver>,
+    ) -> Result<()> {
+        let mut observers = self
+            .discovery_key_removal_observers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if observers
+            .iter()
+            .any(|registered| Arc::ptr_eq(registered, &observer))
+        {
+            return Err(Error::InvalidInput(
+                "discovery key removal observer is already registered".into(),
+            ));
+        }
+        observers.push(observer);
+        Ok(())
+    }
+
+    /// Register an observer with an owned guard that unregisters on drop.
+    pub fn observe_discovery_key_removals(
+        &self,
+        observer: Arc<dyn DiscoveryKeyRemovalObserver>,
+    ) -> Result<DiscoveryKeyRemovalObserverGuard> {
+        self.register_discovery_key_removal_observer(Arc::clone(&observer))?;
+        Ok(DiscoveryKeyRemovalObserverGuard {
+            manager: self.clone(),
+            observer,
+        })
+    }
+
+    /// Unregister only this exact discovery-key-removal observer instance.
+    pub fn unregister_discovery_key_removal_observer(
+        &self,
+        expected: &Arc<dyn DiscoveryKeyRemovalObserver>,
+    ) -> bool {
+        let mut observers = self
+            .discovery_key_removal_observers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(index) = observers
+            .iter()
+            .position(|registered| Arc::ptr_eq(registered, expected))
+        else {
+            return false;
+        };
+        observers.remove(index);
+        true
+    }
+
     /// Retry durable parent and child cleanup notifications.
     ///
     /// Hosts call this after installing the cleanup observers that own their
@@ -1275,6 +1386,79 @@ impl ConfigEntries {
         self.notify_flow_progress(flow_id)
     }
 
+    /// Check for an in-progress config discovery flow with the same handler,
+    /// a context superset, source, and original initialization data.
+    pub fn has_matching_discovery_flow(
+        &self,
+        domain: &str,
+        source: &str,
+        match_context: &Map<String, Value>,
+        initial_data: &Map<String, Value>,
+    ) -> bool {
+        self.lock_state().flows.values().any(|flow| {
+            flow.kind == FlowKind::Config
+                && flow.request.domain == domain
+                && flow.request.source == source
+                && match_context
+                    .iter()
+                    .all(|(key, value)| flow.request.context.get(key) == Some(value))
+                && flow.initial_data.as_ref() == Some(initial_data)
+        })
+    }
+
+    /// Dismiss matching config discovery flows for one handler and source.
+    /// User-protected flows, options flows, and subentry flows are left alone.
+    pub fn dismiss_discovery_flows(
+        &self,
+        domain: &str,
+        source: &str,
+        matcher: impl Fn(&Map<String, Value>) -> bool,
+    ) -> Result<usize> {
+        let candidates = {
+            let state = self.lock_state();
+            state
+                .flows
+                .iter()
+                .filter(|(_, flow)| {
+                    flow.kind == FlowKind::Config
+                        && flow.request.domain == domain
+                        && flow.request.source == source
+                        && flow.request.context.get("dismiss_protected") != Some(&Value::Bool(true))
+                })
+                .filter_map(|(flow_id, flow)| {
+                    flow.initial_data
+                        .clone()
+                        .map(|initial_data| (flow_id.clone(), initial_data))
+                })
+                .collect::<Vec<_>>()
+        };
+        let candidates = candidates
+            .into_iter()
+            .filter(|(_, initial_data)| matcher(initial_data))
+            .collect::<Vec<_>>();
+        let removed = self.mutate(|state| {
+            let mut removed = Vec::new();
+            for (flow_id, initial_data) in &candidates {
+                let matching = state.flows.get(flow_id).is_some_and(|flow| {
+                    flow.kind == FlowKind::Config
+                        && flow.request.domain == domain
+                        && flow.request.source == source
+                        && flow.request.context.get("dismiss_protected") != Some(&Value::Bool(true))
+                        && flow.initial_data.as_ref() == Some(initial_data)
+                });
+                if matching {
+                    state.flows.remove(flow_id);
+                    removed.push(flow_id.clone());
+                }
+            }
+            Ok(removed)
+        })?;
+        for flow_id in &removed {
+            self.notify_flow_progress(flow_id)?;
+        }
+        Ok(removed.len())
+    }
+
     fn notify_flow_progress(&self, flow_id: &str) -> Result<()> {
         self.runtime.dispatch_signal(
             "config_flow_progress",
@@ -1306,6 +1490,47 @@ impl ConfigEntries {
     pub fn get_entry(&self, entry_id: &str) -> Option<ConfigEntry> {
         let entry = { self.lock_state().entries.get(entry_id).cloned() };
         entry.map(|entry| self.with_supported_subentry_types(entry))
+    }
+
+    /// Return entries that have already been associated with this discovery key.
+    pub fn entries_for_discovery_key(&self, key: &DiscoveryKey) -> Vec<ConfigEntry> {
+        let entries = self
+            .lock_state()
+            .entries
+            .values()
+            .filter(|entry| {
+                entry
+                    .discovery_keys
+                    .get(&key.domain)
+                    .is_some_and(|keys| keys.contains(key))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        entries
+            .into_iter()
+            .map(|entry| self.with_supported_subentry_types(entry))
+            .collect()
+    }
+
+    /// Persist a discovery-key association once, retaining the latest ten keys
+    /// for the key's discovery domain.
+    pub fn associate_discovery_key(&self, entry_id: &str, key: DiscoveryKey) -> Result<bool> {
+        validate_domain(&key.domain)?;
+        let changed = self.mutate(|state| {
+            let entry = state
+                .entries
+                .get_mut(entry_id)
+                .ok_or_else(|| Error::NotFound(format!("unknown config entry {entry_id}")))?;
+            let changed = record_discovery_key(entry, key);
+            if changed {
+                entry.modified_at = Utc::now();
+            }
+            Ok(changed)
+        })?;
+        if changed {
+            self.emit_current_entry_change("updated", entry_id)?;
+        }
+        Ok(changed)
     }
 
     /// Fetch one trusted subentry by its exact parent and child IDs.
@@ -1457,7 +1682,18 @@ impl ConfigEntries {
 
     /// Create and persist a config entry, checking its identity and source.
     pub fn create_entry(&self, seed: NewConfigEntry) -> Result<ConfigEntry> {
+        self.create_entry_with_discovery_key(seed, None)
+    }
+
+    fn create_entry_with_discovery_key(
+        &self,
+        seed: NewConfigEntry,
+        discovery_key: Option<DiscoveryKey>,
+    ) -> Result<ConfigEntry> {
         validate_new_entry(&seed)?;
+        if let Some(key) = discovery_key.as_ref() {
+            validate_domain(&key.domain)?;
+        }
         let now = Utc::now();
         let driver = self.driver(&seed.domain);
         let integration_type = driver
@@ -1470,6 +1706,7 @@ impl ConfigEntries {
             title: seed.title.trim().to_owned(),
             source: seed.source,
             unique_id: seed.unique_id,
+            discovery_keys: BTreeMap::new(),
             version: seed.version,
             minor_version: seed.minor_version,
             data: seed.data,
@@ -1504,6 +1741,9 @@ impl ConfigEntries {
             modified_at: now,
             integration_type,
         };
+        if let Some(key) = discovery_key {
+            record_discovery_key(&mut entry, key);
+        }
         entry = self.with_supported_subentry_types(entry);
         let entry_id = entry.entry_id.clone();
         self.mutate(|state| {
@@ -1669,7 +1909,7 @@ impl ConfigEntries {
         }
         let entry = self.require_entry(entry_id)?;
         driver.remove(&self.runtime, &entry)?;
-        let pending = self.mutate(|state| {
+        let (pending, removed_entry) = self.mutate(|state| {
             let current = state
                 .entries
                 .get(entry_id)
@@ -1682,20 +1922,31 @@ impl ConfigEntries {
                     domain,
                 },
             );
-            state.entries.remove(entry_id);
+            let removed_entry = state
+                .entries
+                .remove(entry_id)
+                .expect("the entry was present in this mutation");
             state
                 .flows
                 .retain(|_, flow| flow.request.entry_id.as_deref() != Some(entry_id));
             state
                 .subentry_flows
                 .retain(|_, flow| flow.request.entry_id != entry_id);
-            Ok(pending)
+            Ok((pending, removed_entry))
         })?;
         drop(operation);
         // Source removal dispatch follows registry/issue cleanup. Keep both
         // outside manager locks so observers can reenter the committed state.
-        self.dispatch_direct_cleanup(&pending)?;
-        self.emit_entry_change("removed", &entry)
+        let cleanup_result = self.dispatch_direct_cleanup(&pending);
+        let entry_change_result = if cleanup_result.is_ok() {
+            self.emit_entry_change("removed", &removed_entry)
+        } else {
+            Ok(())
+        };
+        // The deletion is already committed. A cleanup error must not lose the
+        // live private notification, whose keys deliberately are not journaled.
+        self.notify_discovery_key_removal(&removed_entry);
+        cleanup_result.and(entry_change_result)
     }
 
     /// Replace the private integration options and reload a loaded entry.
@@ -1786,7 +2037,7 @@ impl ConfigEntries {
             user_input: None,
             context,
         };
-        self.run_flow_step(request, FlowKind::Config, driver)
+        self.run_flow_step(request, FlowKind::Config, driver, None)
     }
 
     /// Begin a user/import/discovery config flow through the registered driver.
@@ -1816,6 +2067,7 @@ impl ConfigEntries {
         })?;
         context.insert("source".into(), json!(source));
         let flow_id = Uuid::new_v4().to_string();
+        let initial_data = user_input.clone();
         let request = ConfigFlowRequest {
             flow_id,
             domain: domain.to_owned(),
@@ -1832,7 +2084,7 @@ impl ConfigEntries {
             user_input,
             context,
         };
-        self.run_flow_step(request, FlowKind::Config, driver)
+        self.run_flow_step(request, FlowKind::Config, driver, initial_data)
     }
 
     /// Begin an entry's registered options flow.
@@ -1867,7 +2119,7 @@ impl ConfigEntries {
             user_input,
             context,
         };
-        self.run_flow_step(request, FlowKind::Options, driver)
+        self.run_flow_step(request, FlowKind::Options, driver, None)
     }
 
     /// Begin a supported native subentry flow. New flows use `source = "user"`
@@ -1980,9 +2232,11 @@ impl ConfigEntries {
                 session.request.domain
             ))
         })?;
+        let initial_data = session.initial_data;
+        let kind = session.kind;
         let mut request = session.request;
         request.user_input = Some(user_input);
-        self.run_flow_step(request, session.kind, driver)
+        self.run_flow_step(request, kind, driver, initial_data)
     }
 
     /// Return the persisted core configuration.
@@ -2301,16 +2555,54 @@ impl ConfigEntries {
         Ok(config.to_json())
     }
 
+    fn associate_flow_discovery_key(&self, request: &ConfigFlowRequest) -> Result<()> {
+        let Some(key) = discovery_key_from_context(&request.context) else {
+            return Ok(());
+        };
+        let Some(unique_id) = request.unique_id.as_deref() else {
+            return Ok(());
+        };
+        let entry_id = self.mutate(|state| {
+            let entry_id = state
+                .entries
+                .values()
+                .find(|entry| {
+                    entry.domain == request.domain && entry.unique_id.as_deref() == Some(unique_id)
+                })
+                .map(|entry| entry.entry_id.clone());
+            let Some(entry_id) = entry_id else {
+                return Ok(None);
+            };
+            let entry = state
+                .entries
+                .get_mut(&entry_id)
+                .expect("discovery key target was found in the same mutation");
+            if !record_discovery_key(entry, key) {
+                return Ok(None);
+            }
+            entry.modified_at = Utc::now();
+            Ok(Some(entry_id))
+        })?;
+        if let Some(entry_id) = entry_id {
+            self.emit_current_entry_change("updated", &entry_id)?;
+        }
+        Ok(())
+    }
+
     fn run_flow_step(
         &self,
         request: ConfigFlowRequest,
         kind: FlowKind,
         driver: Arc<dyn ConfigEntryDriver>,
+        initial_data: Option<Map<String, Value>>,
     ) -> Result<Value> {
         let result = match kind {
             FlowKind::Config => driver.config_flow(&request)?,
             FlowKind::Options => driver.options_flow(&request)?,
         };
+        if kind == FlowKind::Config && !matches!(&result, ConfigFlowResult::CreateEntry { .. }) {
+            self.associate_flow_discovery_key(&request)?;
+        }
         match &result {
             ConfigFlowResult::Form { step_id, .. } => {
                 let mut stored_request = request.clone();
@@ -2324,6 +2616,7 @@ impl ConfigEntries {
                         FlowSession {
                             request: stored_request,
                             kind,
+                            initial_data,
                             result: result_json.clone(),
                         },
                     );
@@ -2622,7 +2915,8 @@ impl ConfigEntries {
                 seed.version = *version;
                 seed.minor_version = *minor_version;
                 seed.options = options.clone();
-                let entry = self.create_entry(seed)?;
+                let discovery_key = discovery_key_from_context(&request.context);
+                let entry = self.create_entry_with_discovery_key(seed, discovery_key)?;
                 // Flow success is independent of setup availability; the entry
                 // remains visible with its honest setup_error/setup_retry state.
                 let _ = self.setup_entry(&entry.entry_id);
@@ -2993,6 +3287,30 @@ impl ConfigEntries {
         Ok(())
     }
 
+    fn notify_discovery_key_removal(&self, entry: &ConfigEntry) {
+        let keys = entry
+            .discovery_keys
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        if keys.is_empty() {
+            return;
+        }
+        let event = DiscoveryKeyRemoval {
+            entry_id: entry.entry_id.clone(),
+            keys,
+        };
+        let observers = self
+            .discovery_key_removal_observers
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for observer in observers {
+            let _ = catch_unwind(AssertUnwindSafe(|| observer.discovery_keys_removed(&event)));
+        }
+    }
+
     fn notify_lifecycle_observers(&self, event: &ConfigLifecycleEvent) -> Result<()> {
         self.notify_lifecycle_observers_with_presence(event)
             .map(|_| ())
@@ -3208,6 +3526,25 @@ fn supported_subentry_types_json(
         .collect()
 }
 
+fn record_discovery_key(entry: &mut ConfigEntry, key: DiscoveryKey) -> bool {
+    let keys = entry.discovery_keys.entry(key.domain.clone()).or_default();
+    if keys.contains(&key) {
+        return false;
+    }
+    keys.push(key);
+    let excess = keys.len().saturating_sub(MAX_DISCOVERY_KEYS_PER_DOMAIN);
+    if excess > 0 {
+        keys.drain(..excess);
+    }
+    true
+}
+
+fn discovery_key_from_context(context: &Map<String, Value>) -> Option<DiscoveryKey> {
+    let key = serde_json::from_value::<DiscoveryKey>(context.get("discovery_key")?.clone()).ok()?;
+    validate_domain(&key.domain).ok()?;
+    Some(key)
+}
+
 fn validate_entry(entry: &ConfigEntry) -> Result<()> {
     validate_domain(&entry.domain)?;
     validate_source(&entry.source)?;
@@ -3218,6 +3555,23 @@ fn validate_entry(entry: &ConfigEntry) -> Result<()> {
     }
     if let Some(unique_id) = entry.unique_id.as_deref() {
         validate_unique_id(unique_id)?;
+    }
+    for (domain, keys) in &entry.discovery_keys {
+        validate_domain(domain)?;
+        if keys.len() > MAX_DISCOVERY_KEYS_PER_DOMAIN {
+            return Err(Error::InvalidInput(
+                "stored config entry has too many discovery keys for one domain".into(),
+            ));
+        }
+        let mut unique_keys = HashSet::new();
+        for key in keys {
+            validate_domain(&key.domain)?;
+            if key.domain != *domain || !unique_keys.insert(key) {
+                return Err(Error::InvalidInput(
+                    "stored config entry has invalid or duplicate discovery keys".into(),
+                ));
+            }
+        }
     }
     if let Some(disabled_by) = entry.disabled_by.as_deref()
         && disabled_by != "user"
@@ -3308,6 +3662,7 @@ fn validate_source(source: &str) -> Result<()> {
         "discovery",
         "integration_discovery",
         "dhcp",
+        "ssdp",
         "usb",
         "zeroconf",
         "mqtt",
@@ -3598,6 +3953,163 @@ mod tests {
 
         fn remove(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<()> {
             self.remove_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct DiscoveryFlowDriver;
+
+    impl ConfigEntryDriver for DiscoveryFlowDriver {
+        fn domain(&self) -> &str {
+            "discovery_fixture"
+        }
+
+        fn supports_options(&self) -> bool {
+            true
+        }
+
+        fn setup(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<SetupOutcome> {
+            Ok(SetupOutcome::Ready)
+        }
+
+        fn unload(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<()> {
+            Ok(())
+        }
+
+        fn config_flow(&self, request: &ConfigFlowRequest) -> Result<ConfigFlowResult> {
+            let complete = request
+                .user_input
+                .as_ref()
+                .and_then(|input| input.get("complete"))
+                .and_then(Value::as_bool)
+                == Some(true);
+            if !complete {
+                return Ok(ConfigFlowResult::form("discovery", None));
+            }
+            let mut data = Map::new();
+            data.insert("token".into(), json!("discovery-flow-token"));
+            Ok(ConfigFlowResult::create_entry(
+                "Discovered fixture",
+                data,
+                Some("flow-created-device".into()),
+            ))
+        }
+
+        fn options_flow(&self, _request: &ConfigFlowRequest) -> Result<ConfigFlowResult> {
+            Ok(ConfigFlowResult::form("options", None))
+        }
+
+        fn supported_subentry_types(
+            &self,
+            _entry: &ConfigEntry,
+        ) -> BTreeMap<String, ConfigSubentryTypeInfo> {
+            BTreeMap::from([(
+                "fixture_child".into(),
+                ConfigSubentryTypeInfo {
+                    supports_reconfigure: false,
+                },
+            )])
+        }
+
+        fn subentry_flow(
+            &self,
+            _request: &ConfigSubentryFlowRequest,
+        ) -> Result<ConfigSubentryFlowResult> {
+            Ok(ConfigSubentryFlowResult::Form {
+                step_id: "user".into(),
+                data_schema: None,
+                errors: None,
+                description_placeholders: None,
+            })
+        }
+    }
+
+    fn discovery_key(key: &str) -> DiscoveryKey {
+        DiscoveryKey {
+            domain: "ssdp".into(),
+            key: DiscoveryKeyValue::String(key.into()),
+            version: 1,
+        }
+    }
+
+    fn discovery_info(st: &str, location: &str) -> Map<String, Value> {
+        Map::from_iter([
+            ("ssdp_st".into(), json!(st)),
+            ("ssdp_location".into(), json!(location)),
+        ])
+    }
+
+    fn discovery_context(key: &DiscoveryKey, unique_id: Option<&str>) -> Map<String, Value> {
+        let mut context = Map::new();
+        context.insert("discovery_key".into(), serde_json::to_value(key).unwrap());
+        if let Some(unique_id) = unique_id {
+            context.insert("unique_id".into(), json!(unique_id));
+        }
+        context
+    }
+
+    struct CleanupSeenObserver(Arc<AtomicBool>);
+
+    impl ConfigLifecycleObserver for CleanupSeenObserver {
+        fn config_lifecycle_changed(&self, event: &ConfigLifecycleEvent) -> Result<()> {
+            if matches!(event, ConfigLifecycleEvent::EntryRemoved { .. }) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        }
+    }
+
+    struct DiscoveryRemovalProbe {
+        manager: Mutex<Option<ConfigEntries>>,
+        cleanup_seen: Arc<AtomicBool>,
+        cleanup_preceded: AtomicBool,
+        entry_was_gone: AtomicBool,
+        events: Mutex<Vec<DiscoveryKeyRemoval>>,
+    }
+
+    impl DiscoveryKeyRemovalObserver for DiscoveryRemovalProbe {
+        fn discovery_keys_removed(&self, event: &DiscoveryKeyRemoval) -> Result<()> {
+            self.cleanup_preceded
+                .store(self.cleanup_seen.load(Ordering::SeqCst), Ordering::SeqCst);
+            let manager = self
+                .manager
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let entry_was_gone = manager.is_some_and(|manager| {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let entry_id = event.entry_id.clone();
+                std::thread::spawn(move || {
+                    let _ = sender.send(manager.get_entry(&entry_id).is_none());
+                });
+                receiver.recv_timeout(StdDuration::from_secs(1)) == Ok(true)
+            });
+            self.entry_was_gone.store(entry_was_gone, Ordering::SeqCst);
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
+            Ok(())
+        }
+    }
+
+    struct PanickingDiscoveryRemovalObserver;
+
+    impl DiscoveryKeyRemovalObserver for PanickingDiscoveryRemovalObserver {
+        fn discovery_keys_removed(&self, _event: &DiscoveryKeyRemoval) -> Result<()> {
+            panic!("injected discovery-key-removal observer panic");
+        }
+    }
+
+    #[derive(Default)]
+    struct CollectDiscoveryRemovalObserver(Mutex<Vec<DiscoveryKeyRemoval>>);
+
+    impl DiscoveryKeyRemovalObserver for CollectDiscoveryRemovalObserver {
+        fn discovery_keys_removed(&self, event: &DiscoveryKeyRemoval) -> Result<()> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
             Ok(())
         }
     }
@@ -5127,5 +5639,473 @@ mod tests {
             1
         );
         assert!(restored.public_json().get("data").is_none());
+    }
+
+    #[test]
+    fn discovery_keys_are_typed_private_deduplicated_and_persisted() {
+        let string_key = discovery_key("uuid:string-device");
+        let string_json = serde_json::to_value(&string_key).unwrap();
+        assert_eq!(string_json["key"], "uuid:string-device");
+        assert_eq!(
+            serde_json::from_value::<DiscoveryKey>(string_json).unwrap(),
+            string_key
+        );
+
+        let tuple_key = DiscoveryKey {
+            domain: "zeroconf".into(),
+            key: DiscoveryKeyValue::Tuple(vec![
+                "_fixture._tcp.local.".into(),
+                "fixture.local.".into(),
+            ]),
+            version: 2,
+        };
+        let tuple_json = serde_json::to_value(&tuple_key).unwrap();
+        assert_eq!(
+            tuple_json["key"],
+            json!(["_fixture._tcp.local.", "fixture.local."])
+        );
+        assert_eq!(
+            serde_json::from_value::<DiscoveryKey>(tuple_json).unwrap(),
+            tuple_key
+        );
+
+        let store = Arc::new(MemoryStore::default());
+        let manager = ConfigEntries::new(runtime(store.clone())).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager.create_entry(seed()).unwrap();
+        let serialized_empty = serde_json::to_value(&entry).unwrap();
+        assert!(serialized_empty.get("discovery_keys").is_none());
+        let mut legacy_entry = serialized_empty;
+        legacy_entry
+            .as_object_mut()
+            .unwrap()
+            .remove("discovery_keys");
+        let restored_legacy: ConfigEntry = serde_json::from_value(legacy_entry).unwrap();
+        assert!(restored_legacy.discovery_keys.is_empty());
+
+        assert!(
+            manager
+                .associate_discovery_key(&entry.entry_id, string_key.clone())
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .associate_discovery_key(&entry.entry_id, string_key.clone())
+                .unwrap()
+        );
+        assert!(
+            manager
+                .associate_discovery_key(&entry.entry_id, tuple_key.clone())
+                .unwrap()
+        );
+        for index in 1..=10 {
+            assert!(
+                manager
+                    .associate_discovery_key(
+                        &entry.entry_id,
+                        discovery_key(&format!("uuid:device-{index}")),
+                    )
+                    .unwrap()
+            );
+        }
+
+        assert!(manager.entries_for_discovery_key(&string_key).is_empty());
+        assert_eq!(
+            manager.entries_for_discovery_key(&tuple_key)[0].entry_id,
+            entry.entry_id
+        );
+        let latest_key = discovery_key("uuid:device-10");
+        assert_eq!(
+            manager.entries_for_discovery_key(&latest_key)[0].entry_id,
+            entry.entry_id
+        );
+        let updated = manager.get_entry(&entry.entry_id).unwrap();
+        assert_eq!(updated.discovery_keys["ssdp"].len(), 10);
+        assert!(updated.public_json().get("discovery_keys").is_none());
+        assert!(updated.public_json().get("data").is_none());
+        let debug = format!("{updated:?}");
+        assert!(!debug.contains("uuid:device-10"));
+        assert!(!debug.contains("secret-value"));
+
+        let restored = ConfigEntries::new(manager.runtime.clone()).unwrap();
+        let restored_entry = restored.get_entry(&entry.entry_id).unwrap();
+        assert_eq!(restored_entry.discovery_keys["ssdp"].len(), 10);
+        assert_eq!(
+            restored.entries_for_discovery_key(&latest_key)[0].entry_id,
+            entry.entry_id
+        );
+    }
+
+    #[test]
+    fn discovery_flows_match_original_data_and_dismiss_only_matching_config_source() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        manager
+            .register_driver(Arc::new(DiscoveryFlowDriver))
+            .unwrap();
+        let mut existing_seed =
+            NewConfigEntry::new("discovery_fixture", "Existing fixture", Map::new());
+        existing_seed.unique_id = Some("known-device".into());
+        let existing = manager.create_entry(existing_seed).unwrap();
+
+        let options = manager.init_options_flow(&existing.entry_id).unwrap();
+        let options_flow_id = options["flow_id"].as_str().unwrap();
+        let subentry = manager
+            .init_subentry_flow(
+                &existing.entry_id,
+                "fixture_child",
+                "user",
+                None,
+                Map::new(),
+                None,
+            )
+            .unwrap();
+        let subentry_flow_id = subentry["flow_id"].as_str().unwrap();
+
+        let key = discovery_key("uuid:known-device");
+        let initial_data = discovery_info("urn:fixture:device", "http://192.0.2.2/device.xml");
+        let context = discovery_context(&key, Some("known-device"));
+        let started = manager
+            .init_config_flow_with_input(
+                "discovery_fixture",
+                "ssdp",
+                context,
+                Some(initial_data.clone()),
+            )
+            .unwrap();
+        assert_eq!(started["type"], "form");
+        let flow_id = started["flow_id"].as_str().unwrap();
+
+        let associated = manager.entries_for_discovery_key(&key);
+        assert_eq!(associated.len(), 1);
+        assert_eq!(associated[0].entry_id, existing.entry_id);
+        let match_context =
+            Map::from_iter([("discovery_key".into(), serde_json::to_value(&key).unwrap())]);
+        assert!(manager.has_matching_discovery_flow(
+            "discovery_fixture",
+            "ssdp",
+            &match_context,
+            &initial_data,
+        ));
+        assert!(!manager.has_matching_discovery_flow(
+            "other_fixture",
+            "ssdp",
+            &match_context,
+            &initial_data,
+        ));
+        assert!(!manager.has_matching_discovery_flow(
+            "discovery_fixture",
+            "zeroconf",
+            &match_context,
+            &initial_data,
+        ));
+        let changed_initial_data =
+            discovery_info("urn:fixture:other", "http://192.0.2.2/other.xml");
+        assert!(!manager.has_matching_discovery_flow(
+            "discovery_fixture",
+            "ssdp",
+            &match_context,
+            &changed_initial_data,
+        ));
+
+        let mut later_input = Map::new();
+        later_input.insert("token".into(), json!("user-entered-token"));
+        assert_eq!(
+            manager.submit_flow(flow_id, later_input.clone()).unwrap()["type"],
+            "form"
+        );
+        assert!(manager.has_matching_discovery_flow(
+            "discovery_fixture",
+            "ssdp",
+            &match_context,
+            &initial_data,
+        ));
+        assert!(!manager.has_matching_discovery_flow(
+            "discovery_fixture",
+            "ssdp",
+            &match_context,
+            &later_input,
+        ));
+
+        let mut protected_context = discovery_context(&key, Some("known-device"));
+        protected_context.insert("dismiss_protected".into(), json!(true));
+        let protected = manager
+            .init_config_flow_with_input(
+                "discovery_fixture",
+                "ssdp",
+                protected_context,
+                Some(initial_data.clone()),
+            )
+            .unwrap();
+        let protected_flow_id = protected["flow_id"].as_str().unwrap();
+
+        let other_source = manager
+            .init_config_flow_with_input(
+                "discovery_fixture",
+                "zeroconf",
+                discovery_context(&key, Some("known-device")),
+                Some(initial_data.clone()),
+            )
+            .unwrap();
+        let other_source_flow_id = other_source["flow_id"].as_str().unwrap();
+
+        let unknown_key = discovery_key("uuid:unknown-device");
+        let unknown_info = discovery_info("urn:fixture:unknown", "http://192.0.2.3/device.xml");
+        let unknown = manager
+            .init_config_flow_with_input(
+                "discovery_fixture",
+                "ssdp",
+                discovery_context(&unknown_key, Some("absent-device")),
+                Some(unknown_info.clone()),
+            )
+            .unwrap();
+        let unknown_flow_id = unknown["flow_id"].as_str().unwrap();
+        assert!(manager.entries_for_discovery_key(&unknown_key).is_empty());
+
+        let dismissed = manager
+            .dismiss_discovery_flows("discovery_fixture", "ssdp", |data| {
+                data.get("ssdp_st").and_then(Value::as_str) == Some("urn:fixture:device")
+                    && data.get("ssdp_location").and_then(Value::as_str)
+                        == Some("http://192.0.2.2/device.xml")
+            })
+            .unwrap();
+        assert_eq!(dismissed, 1);
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::Config, flow_id)
+                .is_err()
+        );
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::Config, protected_flow_id)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::Config, other_source_flow_id)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::Config, unknown_flow_id)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::Options, options_flow_id)
+                .is_ok()
+        );
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::ConfigSubentries, subentry_flow_id)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn removal_notifies_the_keys_present_at_the_deletion_commit() {
+        struct AddKeyDuringRemove(std::sync::Weak<ConfigEntries>);
+        impl ConfigEntryDriver for AddKeyDuringRemove {
+            fn domain(&self) -> &str {
+                "fixture"
+            }
+            fn setup(&self, _: &Runtime, _: &ConfigEntry) -> Result<SetupOutcome> {
+                Ok(SetupOutcome::Ready)
+            }
+            fn unload(&self, _: &Runtime, _: &ConfigEntry) -> Result<()> {
+                Ok(())
+            }
+            fn config_flow(&self, _: &ConfigFlowRequest) -> Result<ConfigFlowResult> {
+                Ok(ConfigFlowResult::Abort {
+                    reason: "unused".into(),
+                })
+            }
+            fn remove(&self, _: &Runtime, entry: &ConfigEntry) -> Result<()> {
+                self.0
+                    .upgrade()
+                    .unwrap()
+                    .associate_discovery_key(&entry.entry_id, discovery_key("uuid:late"))?;
+                Ok(())
+            }
+        }
+        struct Events(Arc<Mutex<Vec<DiscoveryKeyRemoval>>>);
+        impl DiscoveryKeyRemovalObserver for Events {
+            fn discovery_keys_removed(&self, event: &DiscoveryKeyRemoval) -> Result<()> {
+                self.0.lock().unwrap().push(event.clone());
+                Ok(())
+            }
+        }
+        let manager =
+            Arc::new(ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap());
+        manager
+            .register_driver(Arc::new(AddKeyDuringRemove(Arc::downgrade(&manager))))
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _guard = manager
+            .observe_discovery_key_removals(Arc::new(Events(events.clone())))
+            .unwrap();
+        let entry = manager.create_entry(seed()).unwrap();
+        manager
+            .associate_discovery_key(&entry.entry_id, discovery_key("uuid:first"))
+            .unwrap();
+        manager.remove_entry(&entry.entry_id).unwrap();
+        assert_eq!(
+            events.lock().unwrap()[0].keys,
+            vec![discovery_key("uuid:first"), discovery_key("uuid:late")]
+        );
+    }
+
+    #[test]
+    fn committed_removal_notifies_discovery_after_cleanup_failure_without_replay_duplicates() {
+        struct Failure;
+        impl ConfigLifecycleObserver for Failure {
+            fn config_lifecycle_changed(&self, _: &ConfigLifecycleEvent) -> Result<()> {
+                Err(Error::Storage("cleanup fixture failure".into()))
+            }
+        }
+        struct Events(Arc<Mutex<Vec<DiscoveryKeyRemoval>>>);
+        impl DiscoveryKeyRemovalObserver for Events {
+            fn discovery_keys_removed(&self, event: &DiscoveryKeyRemoval) -> Result<()> {
+                self.0.lock().unwrap().push(event.clone());
+                Ok(())
+            }
+        }
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager.create_entry(seed()).unwrap();
+        manager
+            .associate_discovery_key(&entry.entry_id, discovery_key("uuid:removed"))
+            .unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let _discovery = manager
+            .observe_discovery_key_removals(Arc::new(Events(events.clone())))
+            .unwrap();
+        let failure = manager.observe_lifecycle(Arc::new(Failure)).unwrap();
+        assert!(manager.remove_entry(&entry.entry_id).is_err());
+        assert!(manager.get_entry(&entry.entry_id).is_none());
+        assert_eq!(events.lock().unwrap().len(), 1);
+        drop(failure);
+        let _success = manager
+            .observe_lifecycle(Arc::new(CleanupSeenObserver(Arc::new(AtomicBool::new(
+                false,
+            )))))
+            .unwrap();
+        assert_eq!(manager.replay_pending_cleanup().unwrap(), 1);
+        assert_eq!(events.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn discovery_flow_creation_and_removal_notify_after_cleanup_outside_locks() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        manager
+            .register_driver(Arc::new(DiscoveryFlowDriver))
+            .unwrap();
+        let key = discovery_key("uuid:removal-device");
+        let started = manager
+            .init_config_flow_with_input(
+                "discovery_fixture",
+                "ssdp",
+                discovery_context(&key, None),
+                Some(discovery_info(
+                    "urn:fixture:remove",
+                    "http://192.0.2.4/device.xml",
+                )),
+            )
+            .unwrap();
+        let mut completion = Map::new();
+        completion.insert("complete".into(), json!(true));
+        let completed = manager
+            .submit_flow(started["flow_id"].as_str().unwrap(), completion)
+            .unwrap();
+        let entry_id = completed["result"]["entry_id"].as_str().unwrap();
+        assert!(Uuid::parse_str(entry_id).is_ok());
+        let entry = manager.get_entry(entry_id).unwrap();
+        assert_eq!(entry.discovery_keys["ssdp"], vec![key.clone()]);
+        assert!(entry.public_json().get("discovery_keys").is_none());
+        assert!(!format!("{entry:?}").contains("removal-device"));
+
+        let cleanup_seen = Arc::new(AtomicBool::new(false));
+        let cleanup_observer: Arc<dyn ConfigLifecycleObserver> =
+            Arc::new(CleanupSeenObserver(cleanup_seen.clone()));
+        let _cleanup_guard = manager.observe_lifecycle(cleanup_observer).unwrap();
+        let probe = Arc::new(DiscoveryRemovalProbe {
+            manager: Mutex::new(Some(manager.clone())),
+            cleanup_seen: cleanup_seen.clone(),
+            cleanup_preceded: AtomicBool::new(false),
+            entry_was_gone: AtomicBool::new(false),
+            events: Mutex::new(Vec::new()),
+        });
+        let observer: Arc<dyn DiscoveryKeyRemovalObserver> = probe.clone();
+        let observer_guard = manager
+            .observe_discovery_key_removals(observer.clone())
+            .unwrap();
+        assert!(
+            manager
+                .register_discovery_key_removal_observer(observer.clone())
+                .is_err()
+        );
+        let unrelated_observer: Arc<dyn DiscoveryKeyRemovalObserver> =
+            Arc::new(CollectDiscoveryRemovalObserver::default());
+        assert!(!manager.unregister_discovery_key_removal_observer(&unrelated_observer));
+        let _panic_guard = manager
+            .observe_discovery_key_removals(Arc::new(PanickingDiscoveryRemovalObserver))
+            .unwrap();
+
+        manager.remove_entry(entry_id).unwrap();
+        assert!(manager.get_entry(entry_id).is_none());
+        assert!(probe.cleanup_preceded.load(Ordering::SeqCst));
+        assert!(probe.entry_was_gone.load(Ordering::SeqCst));
+        let notifications = probe.events.lock().unwrap();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].entry_id, entry_id);
+        assert_eq!(notifications[0].keys, vec![key]);
+        drop(notifications);
+
+        drop(observer_guard);
+        let mut second_seed =
+            NewConfigEntry::new("discovery_fixture", "Second fixture", Map::new());
+        second_seed.unique_id = Some("second-device".into());
+        let second_entry = manager.create_entry(second_seed).unwrap();
+        manager
+            .associate_discovery_key(&second_entry.entry_id, discovery_key("uuid:second-device"))
+            .unwrap();
+        manager.remove_entry(&second_entry.entry_id).unwrap();
+        assert_eq!(probe.events.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn discovery_removal_replay_keeps_keys_out_of_cleanup_journal() {
+        let store = Arc::new(MemoryStore::default());
+        let manager = ConfigEntries::new(runtime(store.clone())).unwrap();
+        manager
+            .register_driver(Arc::new(DiscoveryFlowDriver))
+            .unwrap();
+        let mut seed = NewConfigEntry::new("discovery_fixture", "Journal fixture", Map::new());
+        seed.unique_id = Some("journal-device".into());
+        let entry = manager.create_entry(seed).unwrap();
+        let key = discovery_key("uuid:journal-device");
+        manager
+            .associate_discovery_key(&entry.entry_id, key.clone())
+            .unwrap();
+        let live_observer = Arc::new(CollectDiscoveryRemovalObserver::default());
+        let _live_guard = manager
+            .observe_discovery_key_removals(live_observer.clone())
+            .unwrap();
+        manager.remove_entry(&entry.entry_id).unwrap();
+        assert_eq!(live_observer.0.lock().unwrap().len(), 1);
+
+        let document = store.get_data(METADATA_KEY).unwrap().unwrap();
+        let removal = &document["pending_cleanup"][0]["event"];
+        assert_eq!(removal["entry_id"], entry.entry_id);
+        assert_eq!(removal["domain"], "discovery_fixture");
+        assert!(removal.get("keys").is_none());
+        assert!(removal.get("discovery_keys").is_none());
+
+        let restored = ConfigEntries::new(manager.runtime.clone()).unwrap();
+        let replay_observer = Arc::new(CollectDiscoveryRemovalObserver::default());
+        let _replay_guard = restored
+            .observe_discovery_key_removals(replay_observer.clone())
+            .unwrap();
+        assert_eq!(restored.replay_pending_cleanup().unwrap(), 0);
+        assert!(replay_observer.0.lock().unwrap().is_empty());
     }
 }

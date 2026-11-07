@@ -913,17 +913,18 @@
     {
       "area": "Startup, configuration, loader and config-entry lifecycle",
       "coverage_status": "partial_or_unported",
-      "gap": "Native config entries execute real registered setup/unload/retry/migration/config/options callbacks with persistent state and HTTP adapters. Typed subentry records now have stable parent-scoped identities, private data, source-compatible migration, registered native flows and post-commit lifecycle observers and a minimal durable removal-cleanup journal with exact-ID acknowledgement/startup replay; focused HTTP/WebSocket fixtures cover the public subset and persisted children. Manifest-aware loading, complete dependency ordering, remaining discovery/platform flows, exhaustive pinned subentry acceptance and rollback/reload contracts remain open.",
+      "gap": "Native config entries execute real registered setup/unload/retry/migration/config/options callbacks with persistent state and HTTP adapters. Typed subentry records now have stable parent-scoped identities, private data, source-compatible migration, registered native flows and post-commit lifecycle observers and a minimal durable removal-cleanup journal with exact-ID acknowledgement/startup replay; focused HTTP/WebSocket fixtures cover the public subset and persisted children. The 31 native hass-config cases also cover private, deduplicated, persisted DiscoveryKey values and deletion notifications for keys present at commit; SSDP observers run after the cleanup attempt, but the minimal subentry journal excludes SSDP keys and does not provide SSDP cleanup replay. Manifest-aware loading, complete dependency ordering, remaining discovery/platform flows, exhaustive pinned subentry acceptance and rollback/reload contracts remain open.",
       "id": "loader_setup_config_entries",
       "local_evidence_paths": [
         "crates/hass/src/config.rs",
+        "crates/hass/src/discovery.rs",
         "crates/hass/src/main.rs",
         "crates/hass-config/src/lib.rs",
         "crates/hass-api/src/config_subentries.rs",
         "crates/hass-api/tests/config_subentries_protocol.rs",
         "crates/hass/src/repairs.rs"
       ],
-      "next_acceptance": "Finish exhaustive pinned subentry migration, flow, lifecycle, privacy, role and error acceptance; then port manifest-aware setup, config-entry/data-flow state machines, deterministic dependency order, rollback, reload/unload, and failure/retry behavior before adding integration waves.",
+      "next_acceptance": "Finish exhaustive pinned subentry migration, flow, lifecycle, privacy, role and error acceptance; then port manifest-aware setup, config-entry/data-flow state machines, deterministic dependency order, rollback, reload/unload, and failure/retry behavior before adding integration waves. Preserve SSDP's cleanup-after-attempt ordering and do not treat the separate minimal subentry journal as SSDP key replay.",
       "pinned_upstream_sources": [
         "homeassistant/config.py",
         "homeassistant/loader.py",
@@ -1048,9 +1049,11 @@
     {
       "area": "WebSocket auth, command channels, subscriptions and payload contracts",
       "coverage_status": "partial_or_unported",
-      "gap": "System Log list/raw commands, Repairs issue/list/data/ignore commands, config-subentry list/update/delete commands, and the System Health system_health/info stream have native adapters and focused transport fixtures. Repairs changes use the ordinary public event path and native event history; subentry responses omit private data. System Health uses strict command fields, authenticated access for admin/ordinary/read-only identities, and joined callback cleanup on unsubscribe, disconnect, and shutdown. Only command subsets are available; remaining command families, per-feature authorization, flow lifecycle, message validation, subscription fan-out, exact event/result envelopes and exhaustive pinned acceptance remain open.",
+      "gap": "System Log list/raw commands, Repairs issue/list/data/ignore commands, config-subentry list/update/delete commands, and the System Health system_health/info stream have native adapters and focused transport fixtures. Repairs changes use the ordinary public event path and native event history; subentry responses omit private data. System Health uses strict command fields, authenticated access for admin/ordinary/read-only identities, and joined callback cleanup on unsubscribe, disconnect, and shutdown. The admin-only SSDP feed adds a bounded callback queue with cached replay, live updates, overflow termination, unsubscribe and server-shutdown coverage. Only command subsets are available; remaining command families, per-feature authorization, flow lifecycle, message validation, subscription fan-out, exact event/result envelopes and exhaustive pinned acceptance remain open.",
       "id": "websocket_api",
       "local_evidence_paths": [
+        "crates/hass-api/src/ssdp.rs",
+        "crates/hass-api/tests/ssdp_protocol.rs",
         "crates/hass-api/src/websocket.rs",
         "crates/hass-api/src/login.rs",
         "crates/hass-system-log/src/lib.rs",
@@ -1412,13 +1415,15 @@
     {
       "area": "Frontend assets, translations, panels and frontend WebSocket workflows",
       "coverage_status": "partial_or_unported",
-      "gap": "The native server has no official frontend/assets or full frontend-facing API and dashboard/panel protocol.",
+      "gap": "The native server has no official frontend/assets or full frontend-facing API and dashboard/panel protocol. The SSDP adapter advertises no icon URLs until native icon assets are served.",
       "id": "frontend_and_dashboard_protocol",
       "local_evidence_paths": [
+        "crates/hass/src/ssdp.rs",
+        "crates/hass-ssdp/src/server.rs",
         "crates/hass-api/src/websocket.rs",
         "crates/hass-api/src/http.rs"
       ],
-      "next_acceptance": "Inventory and port the Core frontend API/asset-serving contract separately; do not count API endpoint coverage as frontend parity.",
+      "next_acceptance": "Inventory and port the Core frontend API/asset-serving contract separately, including native SSDP icon assets and consumers; do not count API endpoint coverage as frontend parity.",
       "pinned_upstream_sources": [
         {
           "path_count": 10,
@@ -1494,13 +1499,23 @@
     {
       "area": "Discovery, protocol managers, device events and transport lifecycles",
       "coverage_status": "partial_or_unported",
-      "gap": "There is no accepted shared Bluetooth, Zigbee, Z-Wave, Matter/Thread, discovery, serial, USB, infrared or generic network transport layer in the current port.",
+      "gap": "A fixture-backed native SSDP protocol, manager, host and API stream now exists. The current port still has no accepted shared Bluetooth, Zigbee, Z-Wave, Matter/Thread, serial, USB, infrared or general discovery/network transport layer; the SSDP catalog's 44 domains and 94 matchers are metadata and do not establish driver ports.",
       "id": "discovery_and_shared_transports",
       "local_evidence_paths": [
+        "crates/hass-ssdp/src/lib.rs",
+        "crates/hass-ssdp/src/manager.rs",
+        "crates/hass-ssdp/src/network.rs",
+        "crates/hass-ssdp/src/server.rs",
+        "crates/hass-ssdp/src/tracker.rs",
+        "crates/hass-ssdp/tests/manager.rs",
+        "crates/hass/src/discovery.rs",
+        "crates/hass/src/ssdp.rs",
+        "crates/hass-api/src/ssdp.rs",
+        "crates/hass-api/tests/ssdp_protocol.rs",
         "crates/hass-mqtt/src/lib.rs",
         "crates/hass-native/src/lib.rs"
       ],
-      "next_acceptance": "Build fixture-backed shared transports and discovery lifecycle first, then use the JSON protocol family membership lists to port all dependent adapters.",
+      "next_acceptance": "Complete SSDP header-parser edge parity, uncommon text codecs, network-adapter preferences, icon asset serving, and pinned source acceptance; separately build fixture-backed shared transports and discovery lifecycle, then use the JSON protocol family membership lists to port all dependent adapters.",
       "pinned_upstream_sources": [
         {
           "path_count": 18,
@@ -12616,6 +12631,11 @@
       "config_flow_classes": [],
       "domain": "api",
       "local_evidence_paths": [
+        "crates/hass-api/src/ssdp.rs",
+        "crates/hass-api/tests/ssdp_protocol.rs#subscription_requires_admin_rejects_extra_fields_and_counts_with_other_streams",
+        "crates/hass-api/tests/ssdp_protocol.rs#acknowledgement_precedes_cached_replay_and_live_add_remove_and_unsubscribe",
+        "crates/hass-api/tests/ssdp_protocol.rs#callback_queue_overflow_reports_error_and_terminates_subscription",
+        "crates/hass-api/tests/ssdp_protocol.rs#weak_manager_reports_failure_after_ack_and_server_shutdown_closes_streams",
         "crates/hass-api/src/system_health.rs",
         "crates/hass-api/tests/system_health_protocol.rs::system_health_is_readable_by_admin_ordinary_and_read_only_identities",
         "crates/hass-api/src/http.rs",
@@ -12642,7 +12662,7 @@
       },
       "manifest_blob_oid": "bdadbef32797d22b4cf39f27846abde8309e7815",
       "manifest_path": "homeassistant/components/api/manifest.json",
-      "outstanding_acceptance": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The config-subentry API test passes through graceful fixture teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, and history semantics require complete acceptance.",
+      "outstanding_acceptance": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The API also exposes an admin-only SSDP callback feed over its bounded WebSocket queue, with cached replay, live add/remove, overflow termination and shutdown coverage. The config-subentry API test passes through graceful fixture teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, and history semantics require complete acceptance.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -26412,6 +26432,14 @@
       "config_flow_classes": [],
       "domain": "config",
       "local_evidence_paths": [
+        "crates/hass-config/src/lib.rs#discovery_keys_are_typed_private_deduplicated_and_persisted",
+        "crates/hass-config/src/lib.rs#removal_notifies_the_keys_present_at_the_deletion_commit",
+        "crates/hass-config/src/lib.rs#committed_removal_notifies_discovery_after_cleanup_failure_without_replay_duplicates",
+        "crates/hass-config/src/lib.rs#discovery_flow_creation_and_removal_notify_after_cleanup_outside_locks",
+        "crates/hass-config/src/lib.rs#discovery_removal_replay_keeps_keys_out_of_cleanup_journal",
+        "crates/hass/src/discovery.rs#native_creation_persists_the_ssdp_key_and_keeps_it_out_of_public_entries",
+        "crates/hass/src/discovery.rs#startup_dedup_active_flow_matching_and_byebye_use_real_callbacks",
+        "crates/hass/src/config.rs#ssdp_yaml_tracks_explicit_enablement_and_ignored_parameter_truthiness",
         "crates/hass-config/src/lib.rs::failed_parent_cleanup_survives_reopen_and_replays_with_domain",
         "crates/hass-config/src/lib.rs::child_cleanup_journal_keeps_exact_identity_and_sibling_unchanged",
         "crates/hass-config/src/lib.rs::parent_cleanup_supersedes_pending_child_records",
@@ -26443,7 +26471,7 @@
       },
       "manifest_blob_oid": "32aacff2c6fc2096829df4a1270b2f8346e28e31",
       "manifest_path": "homeassistant/components/config/manifest.json",
-      "outstanding_acceptance": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation and durable removal-cleanup replay, and a focused HTTP/WebSocket subset now have evidence. The subentry API test passes through graceful fixture teardown. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
+      "outstanding_acceptance": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation and durable removal-cleanup replay, and a focused HTTP/WebSocket subset now have evidence. The 31 native hass-config cases include typed private/deduplicated/persisted DiscoveryKey behavior and removal notifications for keys present at deletion commit. Removal observers run after the cleanup attempt; SSDP discovery keys are deliberately excluded from the minimal subentry cleanup replay journal, so this is not evidence of SSDP key replay. The subentry API test passes through graceful fixture teardown. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -131227,7 +131255,91 @@
       "component_directory": "homeassistant/components/ssdp/",
       "config_flow_classes": [],
       "domain": "ssdp",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-ssdp/src/description.rs",
+        "crates/hass-ssdp/src/headers.rs",
+        "crates/hass-ssdp/src/lib.rs",
+        "crates/hass-ssdp/src/manager.rs",
+        "crates/hass-ssdp/src/matcher.rs",
+        "crates/hass-ssdp/src/network.rs",
+        "crates/hass-ssdp/src/protocol.rs",
+        "crates/hass-ssdp/src/server.rs",
+        "crates/hass-ssdp/src/service_info.rs",
+        "crates/hass-ssdp/src/tracker.rs",
+        "crates/hass-ssdp/tests/manager.rs",
+        "crates/hass/src/discovery.rs",
+        "crates/hass/src/ssdp.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass-api/src/ssdp.rs",
+        "crates/hass-api/tests/ssdp_protocol.rs",
+        "crates/hass-ssdp/src/description.rs#xml_conversion_matches_elementtree_shapes_and_namespace_rules",
+        "crates/hass-ssdp/src/description.rs#xml_conversion_preserves_leaf_and_mixed_content_shapes",
+        "crates/hass-ssdp/src/description.rs#xml_conversion_rejects_dtds_and_deep_input",
+        "crates/hass-ssdp/src/description.rs#non_200_empty_and_malformed_responses_are_negative_cached",
+        "crates/hass-ssdp/src/description.rs#request_errors_are_negative_cached",
+        "crates/hass-ssdp/src/description.rs#invalid_utf8_response_is_negative_cached",
+        "crates/hass-ssdp/src/description.rs#http_content_type_charset_decodes_common_encodings",
+        "crates/hass-ssdp/src/description.rs#utf16_charset_uses_little_and_big_endian_boms",
+        "crates/hass-ssdp/src/description.rs#ascii_and_unknown_charset_decoding_remain_strict",
+        "crates/hass-ssdp/src/description.rs#concurrent_requests_share_one_fetch",
+        "crates/hass-ssdp/src/description.rs#negative_result_stays_cached_until_uncache",
+        "crates/hass-ssdp/src/description.rs#uncache_during_a_fetch_keeps_the_old_result_out_of_the_new_entry",
+        "crates/hass-ssdp/src/description.rs#cache_keys_preserve_the_exact_location_string",
+        "crates/hass-ssdp/src/description.rs#timed_out_request_is_cached_without_a_retry",
+        "crates/hass-ssdp/src/description.rs#cancelling_fetch_leader_wakes_waiters_and_allows_a_later_retry",
+        "crates/hass-ssdp/src/headers.rs#metadata_timestamp_uses_naive_local_python_microsecond_shape",
+        "crates/hass-ssdp/src/matcher.rs#bundled_registry_retains_the_pinned_domains_and_matcher_count",
+        "crates/hass-ssdp/src/matcher.rs#callback_wildcard_means_presence_and_values_are_exact",
+        "crates/hass-ssdp/src/matcher.rs#integration_matchers_need_a_primary_and_exact_case_insensitive_key_subset",
+        "crates/hass-ssdp/src/network.rs#source_filter_keeps_only_non_global_ipv4_and_scoped_link_local_ipv6",
+        "crates/hass-ssdp/src/network.rs#an_empty_source_set_starts_and_shuts_down_cleanly",
+        "crates/hass-ssdp/src/network.rs#ipv6_socket_address_requires_and_retains_scope",
+        "crates/hass-ssdp/src/network.rs#loopback_search_response_is_cached_and_scanner_stops_and_restarts",
+        "crates/hass-ssdp/src/protocol.rs#search_packet_matches_reference_bytes",
+        "crates/hass-ssdp/src/protocol.rs#search_packet_formats_scoped_ipv6_host",
+        "crates/hass-ssdp/src/protocol.rs#decoder_folds_case_and_preserves_usn_and_location_metadata",
+        "crates/hass-ssdp/src/protocol.rs#decoder_adds_remote_scope_to_link_local_location_only",
+        "crates/hass-ssdp/src/protocol.rs#decoder_rejects_unrecognized_or_malformed_datagrams",
+        "crates/hass-ssdp/src/protocol.rs#udn_extraction_is_case_insensitive_and_preserves_spelling",
+        "crates/hass-ssdp/src/server.rs#description_is_escaped_and_has_fixed_empty_containers",
+        "crates/hass-ssdp/src/server.rs#search_matching_keeps_type_spelling_and_checks_versions",
+        "crates/hass-ssdp/src/server.rs#serves_http_description_and_releases_bound_port",
+        "crates/hass-ssdp/src/server.rs#search_responds_to_all_three_records_from_ephemeral_port",
+        "crates/hass-ssdp/src/server.rs#wildcard_search_listener_receives_multicast_on_the_loopback_interface",
+        "crates/hass-ssdp/src/server.rs#rejects_wrong_man_and_unmatched_type_without_reply",
+        "crates/hass-ssdp/src/server.rs#negative_mx_is_rejected_and_unparseable_mx_is_immediate",
+        "crates/hass-ssdp/src/server.rs#sends_periodic_alive_and_three_byebye_records_then_releases_udp_port",
+        "crates/hass-ssdp/src/server.rs#ipv6_device_url_keeps_scope_as_url_zone_identifier",
+        "crates/hass-ssdp/src/service_info.rs#conversion_preserves_udn_fallback_case_null_and_empty_headers",
+        "crates/hass-ssdp/src/service_info.rs#websocket_add_and_remove_use_source_shapes",
+        "crates/hass-ssdp/src/tracker.rs#search_source_changes_only_for_new_device_type_location_or_relevant_header",
+        "crates/hass-ssdp/src/tracker.rs#advertisement_alive_update_and_byebye_have_distinct_transitions",
+        "crates/hass-ssdp/src/tracker.rs#cache_control_default_zero_and_location_expiry_use_injected_time",
+        "crates/hass-ssdp/src/tracker.rs#alternate_address_family_is_tracked_without_marking_location_changed",
+        "crates/hass-ssdp/src/tracker.rs#combined_headers_prefer_advertisement_and_by_type_finds_devices",
+        "crates/hass-ssdp/src/tracker.rs#device_and_service_iteration_follow_first_seen_order",
+        "crates/hass-ssdp/src/tracker.rs#invalid_loopback_location_is_not_accepted_for_search",
+        "crates/hass-ssdp/tests/manager.rs#decoded_observations_share_one_tracker_and_negative_description_cache",
+        "crates/hass-ssdp/tests/manager.rs#callback_replay_keeps_first_seen_device_and_type_order",
+        "crates/hass-ssdp/tests/manager.rs#description_lookup_combines_the_latest_headers_after_a_concurrent_update",
+        "crates/hass-ssdp/tests/manager.rs#live_domains_alive_filtering_byebye_and_getters_keep_their_contracts",
+        "crates/hass-ssdp/tests/manager.rs#dropping_one_callback_guard_keeps_its_peer_registered",
+        "crates/hass-ssdp/tests/manager.rs#rediscovery_only_uses_ready_nonempty_descriptions_without_callbacks",
+        "crates/hass-ssdp/tests/manager.rs#async_callbacks_cancel_owned_futures_and_transferred_spawned_tasks",
+        "crates/hass-ssdp/tests/manager.rs#explicit_shutdown_cancels_pending_flow_work_and_stops_weak_managers",
+        "crates/hass-api/tests/ssdp_protocol.rs#subscription_requires_admin_rejects_extra_fields_and_counts_with_other_streams",
+        "crates/hass-api/tests/ssdp_protocol.rs#acknowledgement_precedes_cached_replay_and_live_add_remove_and_unsubscribe",
+        "crates/hass-api/tests/ssdp_protocol.rs#callback_queue_overflow_reports_error_and_terminates_subscription",
+        "crates/hass-api/tests/ssdp_protocol.rs#weak_manager_reports_failure_after_ack_and_server_shutdown_closes_streams",
+        "crates/hass/src/discovery.rs#startup_dedup_active_flow_matching_and_byebye_use_real_callbacks",
+        "crates/hass/src/discovery.rs#native_creation_persists_the_ssdp_key_and_keeps_it_out_of_public_entries",
+        "crates/hass/src/discovery.rs#byebye_then_alive_preserves_the_new_flow_in_queue_order",
+        "crates/hass/src/discovery.rs#startup_admits_at_most_twenty_and_shutdown_joins_blocking_callbacks",
+        "crates/hass/src/ssdp.rs#stable_identity_round_trips_and_malformed_storage_is_preserved",
+        "crates/hass/src/ssdp.rs#app_owner_without_enabled_interfaces_stops_and_releases_weak_manager",
+        "crates/hass/src/ssdp.rs#sqlite_identity_survives_a_new_host_without_retaining_the_old_writer",
+        "crates/hass/src/config.rs#ssdp_yaml_tracks_explicit_enablement_and_ignored_parameter_truthiness"
+      ],
       "manifest": {
         "codeowners": [],
         "dependencies": [
@@ -131248,10 +131360,10 @@
       },
       "manifest_blob_oid": "3908d7f06d3c2d1b9ef246e971fbcb8d9321b38b",
       "manifest_path": "homeassistant/components/ssdp/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Partial native parity is evidenced by the Rust SSDP SDK, shared manager/cache/scanner/server, native host integration, typed config-entry discovery identity, and an admin-only bounded WebSocket callback stream with cancellable cleanup. The wildcard listener receives multicast M-SEARCH on loopback, and /device.xml HEAD requests preserve the GET content length with an empty body. Description lookup fetches the first observed location and evaluates the latest headers after HTTP; live notifications retain the first location while getters and replay follow the current header location. Tracking uses UTC instants while public timestamp metadata follows the dependency's naive local microsecond shape. Callbacks remain private and do not become Runtime history. Remaining acceptance includes exact pinned fixture parity, header-parser edge behavior, uncommon Python text codecs, network-adapter preference configuration, native frontend icon assets/consumers, and any uncovered pinned source behavior. The bundled 44-domain/94-matcher metadata catalog does not establish those integrations as ported. SERVER/model/version values describe the Rust implementation, and no icon URLs are advertised until native assets are served. Evidence is limited to synthetic datagrams and loopback HTTP/UDP/WebSocket fixtures; no physical device, production-interface activity, or live provider traffic is claimed.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "08_upnp_ssdp",
       "protocol_families": [
         "cloud_http_auth_webhook",
@@ -155149,6 +155261,11 @@
       "config_flow_classes": [],
       "domain": "websocket_api",
       "local_evidence_paths": [
+        "crates/hass-api/src/ssdp.rs",
+        "crates/hass-api/tests/ssdp_protocol.rs#subscription_requires_admin_rejects_extra_fields_and_counts_with_other_streams",
+        "crates/hass-api/tests/ssdp_protocol.rs#acknowledgement_precedes_cached_replay_and_live_add_remove_and_unsubscribe",
+        "crates/hass-api/tests/ssdp_protocol.rs#callback_queue_overflow_reports_error_and_terminates_subscription",
+        "crates/hass-api/tests/ssdp_protocol.rs#weak_manager_reports_failure_after_ack_and_server_shutdown_closes_streams",
         "crates/hass-api/src/system_health.rs",
         "crates/hass-api/tests/system_health_protocol.rs::health_stream_acknowledges_after_collection_and_finishes_deferred_updates",
         "crates/hass-api/tests/system_health_protocol.rs::unsubscribe_socket_close_and_server_shutdown_cancel_deferred_work",
@@ -155176,7 +155293,7 @@
       },
       "manifest_blob_oid": "315411ea4cf88f1fddfc571ccbe3742826cbc63c",
       "manifest_path": "homeassistant/components/websocket_api/manifest.json",
-      "outstanding_acceptance": "Repairs list/get-data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce their typed fields, privacy and role boundaries; focused actual-transport fixtures for both subsets pass. The Tag private subscription feed also has actual-transport evidence. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "Repairs list/get-data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce their typed fields, privacy and role boundaries; focused actual-transport fixtures for both subsets pass. The Tag private subscription feed also has actual-transport evidence. An admin-only SSDP discovery feed uses a bounded callback queue; tests cover cached replay before live updates, overflow termination, unsubscribe and server-shutdown cleanup. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -167908,11 +168025,23 @@
               "strict_command_validation_missing_feature_and_invalid_auth_are_rejected",
               "unsubscribe_socket_close_and_server_shutdown_cancel_deferred_work"
             ]
+          },
+          {
+            "path": "crates/hass-api/src/ssdp.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/ssdp_protocol.rs",
+            "test_functions_present": [
+              "subscription_requires_admin_rejects_extra_fields_and_counts_with_other_streams",
+              "acknowledgement_precedes_cached_replay_and_live_add_remove_and_unsubscribe",
+              "callback_queue_overflow_reports_error_and_terminates_subscription",
+              "weak_manager_reports_failure_after_ack_and_server_shutdown_closes_streams"
+            ]
           }
         ],
-        "remaining": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. System Health adds an authenticated system_health/info feature over the existing WebSocket transport, strict id/type command validation, admin/ordinary/read-only reads, and joined callback cleanup without a new HTTP route or public Runtime listener. The config-subentry protocol fixture passes with graceful teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, and history semantics require complete acceptance.",
+        "remaining": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. System Health adds an authenticated system_health/info feature over the existing WebSocket transport, strict id/type command validation, admin/ordinary/read-only reads, and joined callback cleanup without a new HTTP route or public Runtime listener. The SSDP stream is an admin-only bounded callback subset with cached replay and live add/remove; full pinned API, endpoint, error, authorization, subscription, connection, and history acceptance remains open.",
         "status": "partial",
-        "verification": "Root reports the four focused System Health protocol cases passing in the unpublished 29-crate candidate. The inventory writer inspected source and did not run tests; primary acceptance is tracked separately."
+        "verification": "Root reports the final candidate gate: 717 tests across 82 targets with zero failed or ignored, including the four actual-WebSocket SSDP cases. The inventory writer inspected source and did not run tests. Optimized macOS candidate binary SHA-256: 6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821. Source publication and CI remain pending."
       },
       {
         "domain": "auth",
@@ -168058,7 +168187,13 @@
               "lifecycle_observers_receive_committed_events_outside_manager_locks",
               "failed_persistence_never_notifies_lifecycle_observers",
               "old_config_store_migrates_absent_and_legacy_empty_subentry_fields",
-              "subentries_survive_sqlite_runtime_restart_with_stable_private_data"
+              "subentries_survive_sqlite_runtime_restart_with_stable_private_data",
+              "discovery_keys_are_typed_private_deduplicated_and_persisted",
+              "discovery_flows_match_original_data_and_dismiss_only_matching_config_source",
+              "removal_notifies_the_keys_present_at_the_deletion_commit",
+              "committed_removal_notifies_discovery_after_cleanup_failure_without_replay_duplicates",
+              "discovery_flow_creation_and_removal_notify_after_cleanup_outside_locks",
+              "discovery_removal_replay_keeps_keys_out_of_cleanup_journal"
             ]
           },
           {
@@ -168080,13 +168215,23 @@
           {
             "path": "crates/hass/src/config.rs",
             "test_functions_present": [
-              "system_health_yaml_accepts_ignored_values_and_preserves_source_truthiness"
+              "system_health_yaml_accepts_ignored_values_and_preserves_source_truthiness",
+              "ssdp_yaml_tracks_explicit_enablement_and_ignored_parameter_truthiness"
+            ]
+          },
+          {
+            "path": "crates/hass/src/discovery.rs",
+            "test_functions_present": [
+              "startup_dedup_active_flow_matching_and_byebye_use_real_callbacks",
+              "native_creation_persists_the_ssdp_key_and_keeps_it_out_of_public_entries",
+              "byebye_then_alive_preserves_the_new_flow_in_queue_order",
+              "startup_admits_at_most_twenty_and_shutdown_joins_blocking_callbacks"
             ]
           }
         ],
-        "remaining": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation and durable removal-cleanup replay, and a focused HTTP/WebSocket subset now have evidence. The subentry protocol fixture passes with graceful teardown. Native System Health YAML accepts the pinned empty-schema values and tracks source truthiness for a generic startup/check warning without echoing values. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
+        "remaining": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation and durable removal-cleanup replay, and a focused HTTP/WebSocket subset now have evidence. The subentry protocol fixture passes with graceful teardown. Native System Health YAML accepts the pinned empty-schema values and tracks source truthiness for a generic startup/check warning without echoing values. SSDP discovery keys are notified after the cleanup attempt but are not replayed by the minimal subentry cleanup journal. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
         "status": "partial",
-        "verification": "Primary verified all 25 config cases and three app cleanup cases. The journal covers atomic removal records, exact-ID durable acknowledgement, retry after callback/ack failure, parent-child coalescing and overlapping/reentrant replay. Real SQLite recovery preserves siblings, unrelated parents and foreign current state. Full workspace receipts are tracked in VALIDATION.md."
+        "verification": "Root reports the final candidate gate at 717 tests across 82 targets with zero failed or ignored, including all 31 hass-config cases and three app cleanup cases. The journal covers atomic removal records, exact-ID durable acknowledgement, retry after callback/ack failure, parent-child coalescing and overlapping/reentrant replay; SSDP key removal is attempted after cleanup and the keys remain outside this journal. Real SQLite recovery preserves siblings, unrelated parents and foreign current state. The inventory writer inspected source and did not run tests. Source publication and CI remain pending."
       },
       {
         "domain": "counter",
@@ -168789,6 +168934,155 @@
         "verification": "Root reports 8 current-worktree script cases passing; this inventory writer did not run tests. Full script and Sun feature acceptance remain open."
       },
       {
+        "domain": "ssdp",
+        "local_evidence": [
+          {
+            "path": "crates/hass-ssdp/src/description.rs",
+            "test_functions_present": [
+              "xml_conversion_matches_elementtree_shapes_and_namespace_rules",
+              "xml_conversion_preserves_leaf_and_mixed_content_shapes",
+              "xml_conversion_rejects_dtds_and_deep_input",
+              "non_200_empty_and_malformed_responses_are_negative_cached",
+              "request_errors_are_negative_cached",
+              "invalid_utf8_response_is_negative_cached",
+              "http_content_type_charset_decodes_common_encodings",
+              "utf16_charset_uses_little_and_big_endian_boms",
+              "ascii_and_unknown_charset_decoding_remain_strict",
+              "concurrent_requests_share_one_fetch",
+              "negative_result_stays_cached_until_uncache",
+              "uncache_during_a_fetch_keeps_the_old_result_out_of_the_new_entry",
+              "cache_keys_preserve_the_exact_location_string",
+              "timed_out_request_is_cached_without_a_retry",
+              "cancelling_fetch_leader_wakes_waiters_and_allows_a_later_retry"
+            ]
+          },
+          {
+            "path": "crates/hass-ssdp/src/headers.rs",
+            "test_functions_present": [
+              "metadata_timestamp_uses_naive_local_python_microsecond_shape"
+            ]
+          },
+          {
+            "path": "crates/hass-ssdp/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-ssdp/src/manager.rs"
+          },
+          {
+            "path": "crates/hass-ssdp/src/matcher.rs",
+            "test_functions_present": [
+              "bundled_registry_retains_the_pinned_domains_and_matcher_count",
+              "callback_wildcard_means_presence_and_values_are_exact",
+              "integration_matchers_need_a_primary_and_exact_case_insensitive_key_subset"
+            ]
+          },
+          {
+            "path": "crates/hass-ssdp/src/network.rs",
+            "test_functions_present": [
+              "source_filter_keeps_only_non_global_ipv4_and_scoped_link_local_ipv6",
+              "an_empty_source_set_starts_and_shuts_down_cleanly",
+              "ipv6_socket_address_requires_and_retains_scope",
+              "loopback_search_response_is_cached_and_scanner_stops_and_restarts"
+            ]
+          },
+          {
+            "path": "crates/hass-ssdp/src/protocol.rs",
+            "test_functions_present": [
+              "search_packet_matches_reference_bytes",
+              "search_packet_formats_scoped_ipv6_host",
+              "decoder_folds_case_and_preserves_usn_and_location_metadata",
+              "decoder_adds_remote_scope_to_link_local_location_only",
+              "decoder_rejects_unrecognized_or_malformed_datagrams",
+              "udn_extraction_is_case_insensitive_and_preserves_spelling"
+            ]
+          },
+          {
+            "path": "crates/hass-ssdp/src/server.rs",
+            "test_functions_present": [
+              "description_is_escaped_and_has_fixed_empty_containers",
+              "search_matching_keeps_type_spelling_and_checks_versions",
+              "serves_http_description_and_releases_bound_port",
+              "search_responds_to_all_three_records_from_ephemeral_port",
+              "wildcard_search_listener_receives_multicast_on_the_loopback_interface",
+              "rejects_wrong_man_and_unmatched_type_without_reply",
+              "negative_mx_is_rejected_and_unparseable_mx_is_immediate",
+              "sends_periodic_alive_and_three_byebye_records_then_releases_udp_port",
+              "ipv6_device_url_keeps_scope_as_url_zone_identifier"
+            ]
+          },
+          {
+            "path": "crates/hass-ssdp/src/service_info.rs",
+            "test_functions_present": [
+              "conversion_preserves_udn_fallback_case_null_and_empty_headers",
+              "websocket_add_and_remove_use_source_shapes"
+            ]
+          },
+          {
+            "path": "crates/hass-ssdp/src/tracker.rs",
+            "test_functions_present": [
+              "search_source_changes_only_for_new_device_type_location_or_relevant_header",
+              "advertisement_alive_update_and_byebye_have_distinct_transitions",
+              "cache_control_default_zero_and_location_expiry_use_injected_time",
+              "alternate_address_family_is_tracked_without_marking_location_changed",
+              "combined_headers_prefer_advertisement_and_by_type_finds_devices",
+              "device_and_service_iteration_follow_first_seen_order",
+              "invalid_loopback_location_is_not_accepted_for_search"
+            ]
+          },
+          {
+            "path": "crates/hass-ssdp/tests/manager.rs",
+            "test_functions_present": [
+              "decoded_observations_share_one_tracker_and_negative_description_cache",
+              "callback_replay_keeps_first_seen_device_and_type_order",
+              "description_lookup_combines_the_latest_headers_after_a_concurrent_update",
+              "live_domains_alive_filtering_byebye_and_getters_keep_their_contracts",
+              "dropping_one_callback_guard_keeps_its_peer_registered",
+              "rediscovery_only_uses_ready_nonempty_descriptions_without_callbacks",
+              "async_callbacks_cancel_owned_futures_and_transferred_spawned_tasks",
+              "explicit_shutdown_cancels_pending_flow_work_and_stops_weak_managers"
+            ]
+          },
+          {
+            "path": "crates/hass/src/discovery.rs",
+            "test_functions_present": [
+              "startup_dedup_active_flow_matching_and_byebye_use_real_callbacks",
+              "native_creation_persists_the_ssdp_key_and_keeps_it_out_of_public_entries",
+              "byebye_then_alive_preserves_the_new_flow_in_queue_order",
+              "startup_admits_at_most_twenty_and_shutdown_joins_blocking_callbacks"
+            ]
+          },
+          {
+            "path": "crates/hass/src/ssdp.rs",
+            "test_functions_present": [
+              "stable_identity_round_trips_and_malformed_storage_is_preserved",
+              "app_owner_without_enabled_interfaces_stops_and_releases_weak_manager",
+              "sqlite_identity_survives_a_new_host_without_retaining_the_old_writer"
+            ]
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "ssdp_yaml_tracks_explicit_enablement_and_ignored_parameter_truthiness"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/ssdp.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/ssdp_protocol.rs",
+            "test_functions_present": [
+              "subscription_requires_admin_rejects_extra_fields_and_counts_with_other_streams",
+              "acknowledgement_precedes_cached_replay_and_live_add_remove_and_unsubscribe",
+              "callback_queue_overflow_reports_error_and_terminates_subscription",
+              "weak_manager_reports_failure_after_ack_and_server_shutdown_closes_streams"
+            ]
+          }
+        ],
+        "remaining": "Header-parser edge parity, uncommon Python text codecs, network-adapter preference configuration, frontend icon assets/consumers, and full pinned upstream acceptance remain open. Native SERVER/model/version values intentionally describe Rust, and the 44-domain/94-matcher catalog is metadata only.",
+        "status": "partial",
+        "verification": "Root reports final candidate gates: 717 tests across 82 targets, zero failed or ignored; formatting, strict locked workspace all-target Clippy, locked release build and optimized example/truthy-SSDP CLI checks pass. The optimized macOS candidate binary SHA-256 is 6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821. Source publication and CI remain pending. Focused SSDP evidence comprises 47 SDK unit cases, 8 manager cases, 4 API WebSocket cases, 4 discovery dispatcher cases, 3 host cases, and 1 YAML config case, all synthetic or loopback fixtures; no production interface or provider activity was exercised."
+      },
+      {
         "domain": "sun",
         "local_evidence": [
           {
@@ -169259,15 +169553,27 @@
             ]
           },
           {
+            "path": "crates/hass-api/src/ssdp.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/ssdp_protocol.rs",
+            "test_functions_present": [
+              "subscription_requires_admin_rejects_extra_fields_and_counts_with_other_streams",
+              "acknowledgement_precedes_cached_replay_and_live_add_remove_and_unsubscribe",
+              "callback_queue_overflow_reports_error_and_terminates_subscription",
+              "weak_manager_reports_failure_after_ack_and_server_shutdown_closes_streams"
+            ]
+          },
+          {
             "path": "crates/hass/tests/end_to_end.rs",
             "test_functions_present": [
               "real_process_repairs_sdk_storage_events_confirm_and_restart"
             ]
           }
         ],
-        "remaining": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused transport fixtures cover both subsets. System Health uses the existing authenticated WebSocket dispatcher with strict id/type validation, ordinary/read-only access, generic transport failures, deferred updates, and joined cancellation on unsubscribe, socket close, or server shutdown. The config-subentry fixture now passes with graceful teardown. The Tag private subscription feed also has actual-transport evidence. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
+        "remaining": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused transport fixtures cover both subsets. System Health uses the existing authenticated WebSocket dispatcher with strict id/type validation, ordinary/read-only access, generic transport failures, deferred updates, and joined cancellation on unsubscribe, socket close, or server shutdown. The Tag private subscription feed also has actual-transport evidence. The admin-only SSDP feed adds bounded callback delivery with cached replay, live updates, overflow termination, unsubscribe, and shutdown cleanup. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Root reports the four focused System Health protocol cases passing in the unpublished 29-crate candidate. The inventory writer inspected source and did not run tests; primary acceptance is tracked separately."
+        "verification": "Root reports the final candidate gate: 717 tests across 82 targets with zero failed or ignored, including the four actual-WebSocket SSDP cases. The inventory writer inspected source and did not run tests. Optimized macOS candidate binary SHA-256: 6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821. Source publication and CI remain pending."
       },
       {
         "domain": "zone",
@@ -169296,10 +169602,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 38,
+    "partial": 39,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1527
+    "unported": 1526
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

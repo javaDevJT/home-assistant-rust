@@ -57,6 +57,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | System Log | Deduplicated retained errors, actual write/clear services, admin raw streams and integration filters |
 | System Health | Native provider SDK, cancellable one-shot WebSocket reports, current native version/timezone |
 | Repairs | Persistent issue registry, refresh scopes, visibility/dismissal, native fix flows and independent child-flow continuation |
+| SSDP | Native discovery cache/callbacks, UDP scanning, UPnP XML/advertisements, config-flow bridge and admin WebSocket feed |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -78,6 +79,8 @@ cargo test --workspace --locked
 - [Pinned Sun port contracts and astronomical reference cases](docs/SUN-PORT.md)
 - [System Log source contracts and stream acceptance cases](docs/SYSTEM-LOG-PORT.md)
 - [System Health provider and subscription port contracts](docs/SYSTEM-HEALTH-PORT.md)
+- [SSDP discovery and pinned dependency port contracts](docs/SSDP-PORT.md)
+- [Native SSDP SDK, scanner and UPnP server APIs](crates/hass-ssdp/README.md)
 - [Repairs and issue registry port contracts](docs/REPAIRS-PORT.md)
 - [Config subentries, native flow callbacks and lifecycle contracts](docs/CONFIG-SUBENTRIES-PORT.md)
 - [Exhaustive upstream integration and subsystem parity](docs/PARITY.md)

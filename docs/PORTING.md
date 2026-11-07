@@ -464,4 +464,53 @@ statuses are unchanged at 38 partial, 1,527 unported and zero complete. Eight
 new named evidence references resolve. Policy export/line-count snapshots are
 retained. `difflib` patch generation uses `lineterm=''` and wrapped Base64 so
 native patches retain exact lines without a spurious empty context line.
-Source publication and exact Linux CI follow.
+Published cleanup source `56986ed1fa5176b002b948d2a5e68c2b0c43b5b0` passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42345536763).
+
+## SSDP and discovery lifecycle integration
+
+The 30th native crate is `hass-ssdp`. Root owns shared manifests, the manager,
+pinned matcher registry, app discovery dispatcher/host and durable acceptance
+records. Bounded native Luna/max owners separately implement the protocol,
+description cache/charset handling, UDP transport, UPnP server and API adapter.
+Completed owners release their files; no second writer takes an active scope.
+Backend/tier controls remain unexposed. `docs/SSDP-PORT.md` records the pinned
+adapter and verified async-upnp-client 0.49.0 sdist provenance.
+
+The SDK exposes weak discovery lookup and guarded sync/async callback APIs,
+shared tracking, strict HTTP/XML description conversion, and owned work.
+Native networking uses actual reusable UDP sockets, bounded observations and
+joined shutdown. UPnP serves device XML, responds to search, rotates alive
+records and sends byebye. API subscriptions acknowledge before cached replay,
+require an administrator and use bounded event queues with explicit overflow
+termination. All fixtures use synthetic packets and loopback HTTP/UDP/WS;
+no production/LAN/device probe is authorized by these checks.
+
+Configuration now persists typed discovery keys and preserves original flow
+init data for matching/dismissal. Its removal observer carries only entry ID
+and typed keys. Independent review found stale key snapshots and notification
+loss after cleanup failure. Two red/green cases now use the actual deletion
+commit snapshot and deliver the live private notification after a failed
+cleanup attempt, while returning the cleanup error. The minimal cleanup
+journal is unchanged and never replays discovery notifications. All 31 config
+cases pass. The app queues discovery until the real startup event, limits
+initialization to 20 and joins admitted synchronous callbacks at shutdown.
+
+The candidate remains outside the earlier immutable 29-crate receipt until its
+frozen workspace gate and publication complete. Native SERVER/model/version
+fields describe the real Rust runtime. Frontend icons are not advertised until
+their assets exist. Parser/codec edges, network preference configuration,
+frontend consumers and exhaustive pinned acceptance remain open. The entire
+rewrite continues after acceptance of this component.
+
+The frozen SSDP candidate passes 717 tests across 82 targets, zero failed or
+ignored, formatting, strict locked workspace all-target Clippy, optimized build
+and optimized CLI validation. Its macOS binary SHA-256 is
+`6eb8e640cca3e3b7315bfc2ac22e26ed84afd50e7315b257a06d238615b9c821`.
+The optimized truthy-SSDP check prints a generic warning with no parameter echo
+or database. Root reproduced/fixed latest-header selection after concurrent
+HTTP and a full-run queue-idle accounting race. The ledger's earlier receipt
+remains immutable. Inventory owner `ssdp_inventory_v46` writes only PARITY.md
+and upstream-parity.json; only SSDP may gain partial status. The next source
+owner writes only NETWORK-PORT.md, outside this publication. No deployment,
+LAN/device or external provider activity occurred.

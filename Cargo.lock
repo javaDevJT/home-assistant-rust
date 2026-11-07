@@ -822,6 +822,7 @@ dependencies = [
  "hass-repairs",
  "hass-rest",
  "hass-script",
+ "hass-ssdp",
  "hass-storage",
  "hass-sun",
  "hass-system-health",
@@ -833,6 +834,7 @@ dependencies = [
  "hass-webhook",
  "hass-zone",
  "image",
+ "indexmap",
  "reqwest",
  "serde",
  "serde_json",
@@ -863,6 +865,7 @@ dependencies = [
  "hass-person",
  "hass-registry",
  "hass-repairs",
+ "hass-ssdp",
  "hass-system-health",
  "hass-system-log",
  "hass-tag",
@@ -1169,6 +1172,27 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "hass-ssdp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "encoding_rs",
+ "futures-util",
+ "hass-core",
+ "if-addrs",
+ "indexmap",
+ "regex",
+ "reqwest",
+ "roxmltree",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1581,6 +1605,16 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2301,6 +2335,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "roxmltree"
+version = "0.21.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9da7f59328b09405b181fee1018925fad50f157afb43c0c0f5c522c256dd5907"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

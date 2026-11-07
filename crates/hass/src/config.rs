@@ -50,6 +50,10 @@ pub struct Config {
     pub system_log: Option<hass_system_log::SystemLogConfig>,
     #[serde(default)]
     pub system_health: serde_yaml::Value,
+    #[serde(default)]
+    pub ssdp: serde_yaml::Value,
+    #[serde(skip)]
+    pub ssdp_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_sun")]
     pub sun: bool,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
@@ -244,6 +248,7 @@ impl Config {
                 "logger",
                 "system_log",
                 "system_health",
+                "ssdp",
                 "sun",
                 "sensor",
                 "timer",
@@ -257,6 +262,7 @@ impl Config {
                 bail!("unsupported configuration key: {key}");
             }
         }
+        let ssdp_enabled = mapping.contains_key(serde_yaml::Value::String("ssdp".into()));
         let mut config: Self = serde_path_to_error::deserialize(value).map_err(|error| {
             // A typed decoding error can quote an invalid scalar. Preserve
             // its configuration path without printing resolved secret values.
@@ -266,6 +272,7 @@ impl Config {
             )
         })?;
         config.group_order = group_order;
+        config.ssdp_enabled = ssdp_enabled;
         config.validate()?;
         Ok(config)
     }
@@ -349,18 +356,11 @@ impl Config {
     /// The source empty-config validator accepts any value and warns only for
     /// truthy parameters; it does not reject them or configure a provider.
     pub fn system_health_has_parameters(&self) -> bool {
-        fn truthy(value: &serde_yaml::Value) -> bool {
-            match value {
-                serde_yaml::Value::Null => false,
-                serde_yaml::Value::Bool(value) => *value,
-                serde_yaml::Value::Number(value) => value.as_f64().is_none_or(|value| value != 0.0),
-                serde_yaml::Value::String(value) => !value.is_empty(),
-                serde_yaml::Value::Sequence(value) => !value.is_empty(),
-                serde_yaml::Value::Mapping(value) => !value.is_empty(),
-                serde_yaml::Value::Tagged(value) => truthy(&value.value),
-            }
-        }
-        truthy(&self.system_health)
+        yaml_truthy(&self.system_health)
+    }
+
+    pub fn ssdp_has_parameters(&self) -> bool {
+        yaml_truthy(&self.ssdp)
     }
 
     pub fn native_config(&self) -> hass_native::NativeConfig {
@@ -402,6 +402,9 @@ impl Config {
             "time_date",
             "uptime",
         ];
+        if self.ssdp_enabled {
+            components.push("ssdp");
+        }
         if !self.script.is_empty() {
             components.push("script");
         }
@@ -463,6 +466,18 @@ impl Config {
             "safe_mode": false,
             "recovery_mode": false,
         })
+    }
+}
+
+fn yaml_truthy(value: &serde_yaml::Value) -> bool {
+    match value {
+        serde_yaml::Value::Null => false,
+        serde_yaml::Value::Bool(value) => *value,
+        serde_yaml::Value::Number(value) => value.as_f64().is_none_or(|value| value != 0.0),
+        serde_yaml::Value::String(value) => !value.is_empty(),
+        serde_yaml::Value::Sequence(value) => !value.is_empty(),
+        serde_yaml::Value::Mapping(value) => !value.is_empty(),
+        serde_yaml::Value::Tagged(value) => yaml_truthy(&value.value),
     }
 }
 
@@ -576,6 +591,41 @@ mod tests {
                     .system_health_has_parameters(),
                 warns,
                 "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn ssdp_yaml_tracks_explicit_enablement_and_ignored_parameter_truthiness() {
+        let absent = Config::parse("{}\n").unwrap();
+        assert!(!absent.ssdp_enabled);
+        assert!(
+            !absent.api_config()["components"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("ssdp"))
+        );
+        for (source, warns) in [
+            ("ssdp:\n", false),
+            ("ssdp: {}\n", false),
+            ("ssdp: []\n", false),
+            ("ssdp: false\n", false),
+            ("ssdp: 0\n", false),
+            ("ssdp: ''\n", false),
+            ("ssdp: {ignored: value}\n", true),
+            ("ssdp: [ignored]\n", true),
+            ("ssdp: value\n", true),
+            ("ssdp: true\n", true),
+            ("ssdp: -1\n", true),
+        ] {
+            let config = Config::parse(source).unwrap();
+            assert!(config.ssdp_enabled, "{source}");
+            assert_eq!(config.ssdp_has_parameters(), warns, "{source}");
+            assert!(
+                config.api_config()["components"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("ssdp"))
             );
         }
     }

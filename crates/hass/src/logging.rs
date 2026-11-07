@@ -44,6 +44,15 @@ pub fn catalog() -> IntegrationCatalog {
         ("tag", &["hass_tag"]),
         ("sun", &["hass_sun"]),
         (
+            "ssdp",
+            &[
+                "hass_ssdp",
+                "hass_api::ssdp",
+                "hass::ssdp",
+                "hass::discovery",
+            ],
+        ),
+        (
             "system_health",
             &[
                 "hass_system_health",

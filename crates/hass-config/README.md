@@ -5,6 +5,26 @@ lifecycle calls, config and options flows, and the core location/unit/URL
 settings used by API adapters. It requires registered native driver code for
 integration setup; an absent driver is stored as `setup_error`, never `loaded`.
 
+## Discovery keys and flows
+
+`DiscoveryKey` stores one discovery provider's domain, string or string-tuple
+key, and version on each config entry. `entries_for_discovery_key` looks up
+associated entries; `associate_discovery_key` persists and deduplicates keys,
+retaining the latest ten per discovery domain. Keys default to empty for older
+stored entries and are omitted from public JSON and debug output.
+
+Discovery adapters can suppress duplicate starts with
+`has_matching_discovery_flow` and dismiss unreachable devices with
+`dismiss_discovery_flows`. Both are scoped to config flows by integration
+domain and source; matching and dismissal use the original init data even after
+the user submits later form data, and dismissal leaves `dismiss_protected`
+flows alone. `observe_discovery_key_removals` returns a pointer-owned guard for
+private removal callbacks. They receive only the removed entry ID and typed
+keys from the deletion commit after the cleanup attempt. Even when cleanup
+fails, the live private callback runs once; cleanup replay does not duplicate
+it or persist discovery keys in the minimal journal. Callback errors and panics
+do not fail the committed removal.
+
 ## Driver contract
 
 Create one cloneable manager from the shared Runtime and register drivers before
