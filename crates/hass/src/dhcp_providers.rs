@@ -206,7 +206,7 @@ fn selected_capture_interfaces(adapters: &[NetworkAdapter]) -> Vec<InterfaceSele
         .collect()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn selected_local_ipv4(adapters: &[NetworkAdapter]) -> Option<Ipv4Addr> {
     let eligible = |adapter: &&NetworkAdapter| {
         adapter.enabled
@@ -218,7 +218,7 @@ fn selected_local_ipv4(adapters: &[NetworkAdapter]) -> Option<Ipv4Addr> {
         .iter()
         .filter(eligible)
         .find(|adapter| adapter.default)
-        .or_else(|| adapters.iter().filter(eligible).next())
+        .or_else(|| adapters.iter().find(eligible))
         .and_then(|adapter| {
             adapter
                 .ipv4
@@ -575,6 +575,23 @@ mod tests {
             selected_capture_interfaces(&adapters),
             vec![InterfaceSelector::Index(2)]
         );
+        assert_eq!(
+            selected_local_ipv4(&adapters),
+            Some(Ipv4Addr::new(10, 0, 0, 2))
+        );
+        let mut with_default = adapters;
+        with_default.push(adapter(
+            "preferred",
+            Some(6),
+            true,
+            true,
+            &[Ipv4Addr::new(192, 168, 20, 2)],
+        ));
+        assert_eq!(
+            selected_local_ipv4(&with_default),
+            Some(Ipv4Addr::new(192, 168, 20, 2))
+        );
+        assert_eq!(selected_local_ipv4(&[]), None);
     }
 
     #[tokio::test]
