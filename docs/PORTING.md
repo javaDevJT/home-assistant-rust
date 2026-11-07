@@ -8,6 +8,29 @@ The primary owns the workspace manifest/dependencies, app configuration and inte
 
 ## Current wave contracts
 
+### Native media players and asynchronous services (2026-11-07)
+
+The OAuth foundation below is published and Linux-accepted. Next, v134 owns
+only the isolated future `crates/hass-media-player/**` SDK, typed commands,
+projection and asynchronous provider dispatcher; its build hold has ended.
+Core owner v136 owns only `crates/hass-core/src/**` and its tests, implementing
+unified sync/async service registrations, response capabilities, request-aware
+target preflight and cancellation-safe owned service jobs. API owner v137 owns
+only `hass-api/src/http.rs`, `websocket.rs` and `tests/async_services_protocol.rs`;
+it preserves envelopes/roles and releases blocked HTTP/WS waiters on shutdown.
+Script owner v138 owns only `hass-script/src/**` and tests, awaiting the shared
+async dispatcher for action and ordered scene calls. All use explicit native
+Luna/max selection, no children, Git or real provider/device activity.
+
+Root owns manifests/lock, app/provider integration, all shared docs and final
+checks. Root has migrated `schedule.get_schedule` to typed response-only
+registration and wired the future global service-task drain after provider
+shutdown; these depend on v136's additive API and are not yet compiled. The
+released Spotify wire client is isolated and reviewed; runtime/provider
+registration, polling, entities, service/browse wiring and full acceptance are
+still required. Current inventory remains 45 partial / 1,520 unported / zero
+complete, and no Spotify runtime activity is claimed.
+
 ### OAuth external-flow implementation (2026-11-07)
 
 Current primary checkpoint: all 42 workspace source scopes are released to root.
@@ -27,7 +50,9 @@ formatting, the optimized build and seven isolated optimized CLI checks pass.
 The unchanged auth target passed after two request timeouts during concurrent
 LTO; the final full run passed with heavy builds held. Optimized macOS SHA-256
 is `3f812bd98da78ad8d115a6f44e8ab6a96d03d654f7fc7311da3c078acddb9747`.
-Publication and exact-source Linux CI remain pending. Inventory remains 45
+Published source `eefd57e453c74229ad6f53fb02ab9f9734f424a0` passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42415440469)
+(formatting, strict all-target Clippy, full tests and CLI). Inventory remains 45
 partial / 1,520 unported / zero complete, with all 780 partial-row paths and
 476 Rust symbols resolved; other source snapshots/domain records are unchanged.
 

@@ -7,7 +7,9 @@ or ignored cases, including 148 app-bin and 20 compiled-process cases.
 Formatting, strict locked offline workspace all-target Clippy and the optimized
 workspace build pass. The optimized macOS `hass` SHA-256 is
 `3f812bd98da78ad8d115a6f44e8ab6a96d03d654f7fc7311da3c078acddb9747`.
-Publication and exact-source Linux CI remain pending for this receipt.
+Source `eefd57e453c74229ad6f53fb02ab9f9734f424a0` is published and passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42415440469):
+formatting, strict all-target Clippy, all workspace tests and CLI validation.
 
 New evidence includes 30 external-client cases, 39 Core library plus four public
 lifecycle cases, one host unit plus 18 integration cases, eight actual HTTP
