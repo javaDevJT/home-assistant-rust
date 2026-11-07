@@ -1,5 +1,58 @@
 # External OAuth 2.0 Client Port
 
+## Native implementation contracts under construction
+
+The corrected client is workspace member 41. Its 30 focused cases pass, and
+the earlier owner/permit implementation passed an independent lifecycle review.
+This next wave is separate from the published, Linux-accepted member-40
+Credentials receipt. The host bridge and production providers are not accepted
+by the client tests alone.
+
+The host's strong `OAuthFlowHost` owns provider registrations and resolver jobs;
+`OAuthFlowManager` is weak and supplies API routing. Main retains the shared
+client factory separately and explicitly joins it after provider/host teardown.
+The private `ConfigEntryTokenStore` uses the existing entry's token map and
+atomic data patches. Loaded providers supply real entry drivers, their actual
+Application Credentials platform and a post-authorization hook. Custom opaque
+implementations remain an explicit unsupported boundary.
+
+Core's external-flow lease pins the exact flow generation, step, domain and
+driver. Callback admission claims an external step, stages the verified proof
+privately and publishes `external_done`; it makes no token request. Later GET
+claims the done step once, resolves the provider response outside config locks,
+and commits only if that lease is still active. Abort or driver replacement
+invalidates stale results. Public flow context carries no code, proof, token,
+client secret or PKCE verifier.
+
+`OAuthSession::commit_authorization(token, persist)` validates issuer, account
+and revision under the shared account mutex, executes the host's single atomic
+private transaction and advances the revision only on success. Core returns an
+opaque deferred completion so setup, reload and integration callbacks run after
+that mutex is released. Reauth merges into the current entry and preserves
+unrelated data, options, preferences and identity; it does not replace a stale
+snapshot after a newer refresh.
+
+The first transport bridge uses a root-validated callback URL from host options.
+An arbitrary `HA-Frontend-Base` header cannot override it. Per-request frontend
+origin selection remains a source-parity boundary. The callback is a public
+signed-state GET; flow administration keeps the native administrator policy.
+Accepted callbacks return fixed close-window HTML. Shutdown releases HTTP
+waiters promptly while the strong host retains and then joins resolver/commit
+ownership. Explicit factory shutdown preserves commits; last-owner Drop is an
+abort fallback.
+
+Core's corrected package passes 39 library and four public-API integration
+cases. The new cases exercise canceled config initialization, options submission
+and subentry initialization, blocking-callback joins, concurrent/canceled shutdown
+waiters, closed admission, private progress context and persistent event-delivery
+failure after entry commit. Options callbacks and completion retain their exact
+flow kind. The synchronous continuation path also closes admission: a gated
+post-create hook cannot create a child flow after shutdown has begun. Callback
+completion includes synchronous activation hooks on an owned blocking task.
+Persistence failures still stop lifecycle transitions; notification
+failures are returned after the driver and its final persisted state complete.
+These focused checks do not constitute workspace or provider acceptance.
+
 ## Scope and boundaries
 
 This is a source contract for a Rust external OAuth 2.0 client/flow engine,

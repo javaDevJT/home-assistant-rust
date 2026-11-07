@@ -23,6 +23,8 @@ members = [
     "crates/hass-hardware",
     "crates/hass-hardware-metrics",
     "crates/hass-application-credentials",
+    "crates/hass-oauth2-client",
+    "crates/hass-oauth2-flow",
 ]
 
 [workspace.package]
@@ -34,6 +36,7 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 anyhow = "1"
+base64 = "=0.22.1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["ws", "json", "multipart"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -80,6 +83,8 @@ hass-usb-backend = { path = "crates/hass-usb-backend" }
 hass-hardware = { path = "crates/hass-hardware" }
 hass-hardware-metrics = { path = "crates/hass-hardware-metrics" }
 hass-application-credentials = { path = "crates/hass-application-credentials" }
+hass-oauth2-client = { path = "crates/hass-oauth2-client" }
+hass-oauth2-flow = { path = "crates/hass-oauth2-flow" }
 idna = "=1.1.0"
 pnet_datalink = "=0.35.0"
 stringprep = "=0.1.5"

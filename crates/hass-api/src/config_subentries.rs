@@ -29,6 +29,15 @@ impl From<ApiError> for FlowApiError {
     }
 }
 
+impl From<Error> for FlowApiError {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::InvalidData { schema_errors } => Self::InvalidData(schema_errors),
+            error => Self::Api(ApiError::from(error)),
+        }
+    }
+}
+
 impl IntoResponse for FlowApiError {
     fn into_response(self) -> Response {
         match self {
@@ -53,46 +62,21 @@ fn require_admin(identity: &Identity) -> ApiResult<()> {
     }
 }
 
-fn manager_unavailable() -> ApiError {
-    ApiError {
-        status: axum::http::StatusCode::NOT_IMPLEMENTED,
-        message: "Config-entry support is not enabled.".into(),
-    }
+async fn run_manager<T, F, Fut>(state: &AppState, operation: F) -> ApiResult<T>
+where
+    F: FnOnce(ConfigEntries) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    crate::config_entries::run_async_manager(state, operation).await
 }
 
-async fn run_manager<T, F>(state: &AppState, operation: F) -> ApiResult<T>
+async fn run_flow_manager<T, F, Fut>(state: &AppState, operation: F) -> FlowApiResult<T>
 where
-    T: Send + 'static,
-    F: FnOnce(ConfigEntries) -> Result<T> + Send + 'static,
+    F: FnOnce(ConfigEntries) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
 {
-    let manager = state
-        .features
-        .config_entries
-        .clone()
-        .ok_or_else(manager_unavailable)?;
-    tokio::task::spawn_blocking(move || operation(manager))
+    crate::config_entries::run_async_manager_with_error_map(state, operation, FlowApiError::from)
         .await
-        .map_err(|_| ApiError::internal())?
-        .map_err(ApiError::from)
-}
-
-async fn run_flow_manager<T, F>(state: &AppState, operation: F) -> FlowApiResult<T>
-where
-    T: Send + 'static,
-    F: FnOnce(ConfigEntries) -> Result<T> + Send + 'static,
-{
-    let manager = state
-        .features
-        .config_entries
-        .clone()
-        .ok_or_else(|| FlowApiError::Api(manager_unavailable()))?;
-    let result = tokio::task::spawn_blocking(move || operation(manager))
-        .await
-        .map_err(|_| FlowApiError::Api(ApiError::internal()))?;
-    result.map_err(|error| match error {
-        Error::InvalidData { schema_errors } => FlowApiError::InvalidData(schema_errors),
-        error => FlowApiError::Api(ApiError::from(error)),
-    })
 }
 
 fn parse_object(body: &Bytes, allow_empty: bool) -> ApiResult<Map<String, Value>> {
@@ -189,9 +173,9 @@ pub(crate) async fn post_flow(
     } else {
         "user"
     };
-    let result = run_manager(&state, move |manager| {
+    let result = run_manager(&state, move |manager| async move {
         manager
-            .init_subentry_flow(
+            .init_subentry_flow_async(
                 &entry_id,
                 &subentry_type,
                 source,
@@ -199,6 +183,7 @@ pub(crate) async fn post_flow(
                 Map::new(),
                 None,
             )
+            .await
             .map_err(invalid_handler)
     })
     .await?;
@@ -212,11 +197,12 @@ pub(crate) async fn get_flow(
     Extension(identity): Extension<Identity>,
 ) -> ApiResult<Json<Value>> {
     require_admin(&identity)?;
-    let result = run_manager(&state, move |manager| {
+    let result = run_manager(&state, move |manager| async move {
         manager
             .active_flow(ConfigFlowType::ConfigSubentries, &flow_id)
-            .map(|flow| flow.result)
             .map_err(invalid_flow)
+            .map(|_| ())?;
+        manager.refresh_flow_async(&flow_id).await
     })
     .await?;
     Ok(Json(source_flow_result(result)))
@@ -231,11 +217,11 @@ pub(crate) async fn submit_flow(
 ) -> FlowApiResult<Json<Value>> {
     require_admin(&identity)?;
     let user_input = parse_object(&body, true)?;
-    let result = run_flow_manager(&state, move |manager| {
+    let result = run_flow_manager(&state, move |manager| async move {
         manager
             .active_flow(ConfigFlowType::ConfigSubentries, &flow_id)
             .map_err(invalid_flow)?;
-        manager.submit_flow(&flow_id, user_input)
+        manager.submit_flow_async(&flow_id, user_input).await
     })
     .await?;
     Ok(Json(source_flow_result(result)))
@@ -249,11 +235,11 @@ pub(crate) async fn delete_flow(
     State(state): State<Arc<AppState>>,
     Path(flow_id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    run_manager(&state, move |manager| {
+    run_manager(&state, move |manager| async move {
         manager
             .active_flow(ConfigFlowType::ConfigSubentries, &flow_id)
             .map_err(invalid_flow)?;
-        manager.abort_flow(&flow_id)
+        manager.abort_flow_async(&flow_id).await
     })
     .await?;
     Ok(Json(json!({ "message": "Flow aborted" })))

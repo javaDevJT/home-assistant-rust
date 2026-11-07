@@ -1,5 +1,47 @@
 # Validation evidence
 
+## Accepted local external OAuth foundation (42 crates)
+
+The final workspace passes **1,070 tests across 121 targets**, with zero failed
+or ignored cases, including 148 app-bin and 20 compiled-process cases.
+Formatting, strict locked offline workspace all-target Clippy and the optimized
+workspace build pass. The optimized macOS `hass` SHA-256 is
+`3f812bd98da78ad8d115a6f44e8ab6a96d03d654f7fc7311da3c078acddb9747`.
+Publication and exact-source Linux CI remain pending for this receipt.
+
+New evidence includes 30 external-client cases, 39 Core library plus four public
+lifecycle cases, one host unit plus 18 integration cases, eight actual HTTP
+callback cases and three callback-origin cases. The compiled credentials fixture
+also proves public callback errors do not echo query/secret values, other API
+routes still require authentication, private SQLite records survive restart,
+and SIGTERM joins owners with a subscribed socket open. Both existing config
+and subentry HTTP protocols and the MQTT-backed process flow pass unchanged.
+
+The external client separates provider tokens from Home Assistant login tokens,
+binds signed state/PKCE and account revisions, coalesces refreshes, rejects
+redirects, persists before publication and owns admitted jobs through shutdown.
+The host stages callback proof without exchanging a code, resolves one exchange
+on authenticated GET, and atomically commits private entry data before deferred
+activation. Reauthentication preserves identity/options and unrelated fields.
+Cancellation, shutdown, provider replacement, TTL and event-delivery failures
+have gated regressions; completed host cleanup receipts are reclaimed. Legacy
+synchronous child flows obey shutdown admission, and synchronous activation
+callbacks run in retained blocking tasks.
+
+Two auth request timeouts occurred during concurrent optimized compilation;
+the unchanged auth target subsequently passed in 0.98 seconds, and the final
+complete workspace run passed with heavy builds held. No authentication policy
+or test timeout was weakened. Seven optimized CLI cases accept the example,
+empty and Credentials null/empty/false/ignored configurations and reject an
+unknown root key, without extra files, database creation or ignored-secret echo.
+
+The inventory remains 45 partial / 1,520 unported / zero complete. Root resolved
+all 780 partial-row evidence paths and 476 Rust symbols and verified unchanged
+pinned source snapshots and other domain records. This generic foundation adds
+no production OAuth provider, provider autoload, static catalog, Spotify runtime
+or real-provider acceptance. The isolated Spotify wire and media-player work
+remain outside the 42-crate acceptance.
+
 ## Accepted local Application Credentials source (40 crates)
 
 The final exact-source workspace passes **998 tests across 114 targets**, with

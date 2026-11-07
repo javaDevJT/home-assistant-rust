@@ -835,6 +835,8 @@ dependencies = [
  "hass-native",
  "hass-network",
  "hass-notifications",
+ "hass-oauth2-client",
+ "hass-oauth2-flow",
  "hass-person",
  "hass-registry",
  "hass-repairs",
@@ -867,6 +869,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
@@ -888,6 +891,8 @@ dependencies = [
  "hass-logger",
  "hass-network",
  "hass-notifications",
+ "hass-oauth2-client",
+ "hass-oauth2-flow",
  "hass-person",
  "hass-registry",
  "hass-repairs",
@@ -1199,6 +1204,45 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "hass-oauth2-client"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "futures-util",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "hass-oauth2-flow"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "futures-util",
+ "hass-application-credentials",
+ "hass-config",
+ "hass-core",
+ "hass-oauth2-client",
+ "hass-storage",
+ "reqwest",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
  "uuid",
 ]
 

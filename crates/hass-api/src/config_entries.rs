@@ -56,6 +56,50 @@ where
         .map_err(ApiError::from)
 }
 
+pub(crate) async fn run_async_manager<T, F, Fut>(
+    state: &AppState,
+    operation: F,
+) -> Result<T, ApiError>
+where
+    F: FnOnce(ConfigEntries) -> Fut,
+    Fut: std::future::Future<Output = hass_core::Result<T>>,
+{
+    run_async_manager_with_error_map(state, operation, ApiError::from).await
+}
+
+pub(crate) async fn run_async_manager_with_error_map<T, E, F, Fut, M>(
+    state: &AppState,
+    operation: F,
+    map_error: M,
+) -> Result<T, E>
+where
+    F: FnOnce(ConfigEntries) -> Fut,
+    Fut: std::future::Future<Output = hass_core::Result<T>>,
+    E: From<ApiError>,
+    M: FnOnce(hass_core::Error) -> E,
+{
+    let manager = state
+        .features
+        .config_entries
+        .clone()
+        .ok_or_else(|| E::from(manager_unavailable()))?;
+    let operation = operation(manager);
+    let operation = async move { operation.await.map_err(map_error) };
+    let Some(mut shutdown) = state.shutdown.clone() else {
+        return operation.await;
+    };
+    tokio::select! {
+        biased;
+        _ = crate::oauth2::wait_for_shutdown(&mut shutdown) => {
+            Err(E::from(ApiError {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                message: "Config flows are shutting down.".into(),
+            }))
+        },
+        result = operation => result,
+    }
+}
+
 fn parse_object(body: &Bytes, allow_empty: bool) -> Result<Map<String, Value>, ApiError> {
     if body.is_empty() && allow_empty {
         return Ok(Map::new());
@@ -179,19 +223,36 @@ pub(crate) async fn init_flow(
         context.insert("entry_id".into(), json!(entry_id));
     }
 
-    let flow = run_manager(&state, move |manager| {
-        let Some(domain) = domains
-            .iter()
-            .find(|domain| manager.driver(domain).is_some())
-        else {
-            return Err(hass_core::Error::InvalidInput(format!(
+    let manager = state
+        .features
+        .config_entries
+        .clone()
+        .ok_or_else(manager_unavailable)?;
+    let domain = domains
+        .iter()
+        .find(|domain| manager.driver(domain).is_some())
+        .cloned()
+        .ok_or_else(|| {
+            ApiError::from(hass_core::Error::InvalidInput(format!(
                 "Failed dependencies {}",
                 domains.join(", ")
-            )));
-        };
-        manager.init_config_flow_with_input(domain, &source, context, None)
-    })
-    .await?;
+            )))
+        })?;
+    let flow = if let Some(oauth) = state
+        .features
+        .oauth2_flows
+        .as_ref()
+        .filter(|host| host.handles_domain(&domain))
+    {
+        crate::oauth2::run_operation(&state, oauth.begin(&domain, &source, context)).await?
+    } else {
+        run_async_manager(&state, move |manager| async move {
+            manager
+                .init_config_flow_with_input_async(&domain, &source, context, None)
+                .await
+        })
+        .await?
+    };
     Ok(Json(flow))
 }
 
@@ -202,9 +263,21 @@ pub(crate) async fn get_flow(
     Extension(identity): Extension<Identity>,
 ) -> Result<Json<Value>, ApiError> {
     require_admin(&identity)?;
-    run_manager(&state, move |manager| manager.flow_result(&flow_id))
-        .await
-        .map(Json)
+    if let Some(oauth) = state
+        .features
+        .oauth2_flows
+        .as_ref()
+        .filter(|host| host.owns_flow(&flow_id))
+    {
+        return crate::oauth2::run_operation(&state, oauth.get(&flow_id))
+            .await
+            .map(Json);
+    }
+    run_async_manager(&state, move |manager| async move {
+        manager.refresh_flow_async(&flow_id).await
+    })
+    .await
+    .map(Json)
 }
 
 /// POST `/api/config/config_entries/flow/{flow_id}` and options-flow equivalent.
@@ -216,8 +289,18 @@ pub(crate) async fn submit_flow(
 ) -> Result<Json<Value>, ApiError> {
     require_admin(&identity)?;
     let user_input = parse_object(&body, true)?;
-    run_manager(&state, move |manager| {
-        manager.submit_flow(&flow_id, user_input)
+    if let Some(oauth) = state
+        .features
+        .oauth2_flows
+        .as_ref()
+        .filter(|host| host.owns_flow(&flow_id))
+    {
+        return crate::oauth2::run_operation(&state, oauth.submit(&flow_id, user_input))
+            .await
+            .map(Json);
+    }
+    run_async_manager(&state, move |manager| async move {
+        manager.submit_flow_async(&flow_id, user_input).await
     })
     .await
     .map(Json)
@@ -230,12 +313,20 @@ pub(crate) async fn abort_flow(
     Extension(identity): Extension<Identity>,
 ) -> Result<Json<Value>, ApiError> {
     require_admin(&identity)?;
-    run_manager(&state, move |manager| {
-        manager.abort_flow(&flow_id)?;
-        Ok(json!({"message": "Flow aborted"}))
-    })
-    .await
-    .map(Json)
+    if let Some(oauth) = state
+        .features
+        .oauth2_flows
+        .as_ref()
+        .filter(|host| host.owns_flow(&flow_id))
+    {
+        crate::oauth2::run_operation(&state, oauth.abort(&flow_id)).await?;
+    } else {
+        run_async_manager(&state, move |manager| async move {
+            manager.abort_flow_async(&flow_id).await
+        })
+        .await?;
+    }
+    Ok(Json(json!({"message": "Flow aborted"})))
 }
 
 /// GET `/api/config/config_entries/flow_handlers`
@@ -273,7 +364,9 @@ pub(crate) async fn init_options_flow(
         Some(Value::String(entry_id)) => entry_id.clone(),
         _ => required_string(&data, "entry_id")?,
     };
-    run_manager(&state, move |manager| manager.init_options_flow(&entry_id))
-        .await
-        .map(Json)
+    run_async_manager(&state, move |manager| async move {
+        manager.init_options_flow_async(&entry_id).await
+    })
+    .await
+    .map(Json)
 }

@@ -8,6 +8,158 @@ The primary owns the workspace manifest/dependencies, app configuration and inte
 
 ## Current wave contracts
 
+### OAuth external-flow implementation (2026-11-07)
+
+Current primary checkpoint: all 42 workspace source scopes are released to root.
+Core passes 39 library plus four public-API lifecycle cases. Independent review
+v130 found a late synchronous child-flow admission during shutdown; the shared
+admission barrier and gated post-create regression close it. Synchronous
+activation/continuation now runs in retained blocking tasks, preserving the
+existing HTTP callback-thread and MQTT-backed process tests. Host v127 passes
+one unit plus 18 integration cases. Review v132 found completed cleanup-receipt
+retention; identity-checked removal, a 2,048-record unit case and repeated expiry
+cycles cover the correction. No cancellation orphan or HostInner cycle was
+confirmed. The eight HTTP OAuth cases, both legacy flow protocols, three app
+callback-origin cases and credentials restart/public-callback/SIGTERM case pass.
+The final workspace passes 1,070 tests across 121 targets, zero failed or ignored,
+including 148 app-bin and 20 process cases. Strict all-target workspace Clippy,
+formatting, the optimized build and seven isolated optimized CLI checks pass.
+The unchanged auth target passed after two request timeouts during concurrent
+LTO; the final full run passed with heavy builds held. Optimized macOS SHA-256
+is `3f812bd98da78ad8d115a6f44e8ab6a96d03d654f7fc7311da3c078acddb9747`.
+Publication and exact-source Linux CI remain pending. Inventory remains 45
+partial / 1,520 unported / zero complete, with all 780 partial-row paths and
+476 Rust symbols resolved; other source snapshots/domain records are unchanged.
+
+Future work is isolated from the 42-crate receipt: v126 released the Spotify
+wire crate (15 tests, strict Clippy and formatting); independent v133 found no
+default-path wire mismatch. Root must use the default trusted API origin,
+enforce queue media types and preserve account identity on integration. v134
+owns only the future hass-media-player SDK and async dispatcher. Its Cargo
+build hold ended after the final workspace pass. v135 released the additive
+Runtime async service/response-capability contract in ASYNC-SERVICES-PORT.md.
+Root owns manifests, all live
+integration and index updates. The chronological records below preserve
+superseded assignments.
+
+Host review v125 is released with two substantive corrections: canceled
+unregister/shutdown waiters can orphan Core driver cleanup, and get/submit do not
+enforce idle host TTL. `oauth_host_cleanup_v127` owns only the host lifecycle
+source/tests/README for cancellation-safe retained teardown and consistent
+expiry. Root keeps manifests and all integration files. The host must affect
+only its own registrations/flows; main retains and drains the shared OAuth
+factory separately after provider/host shutdown. Same explicit Luna/max native
+selection, no children or Git; concise gated regressions and lifecycle handoff
+release the worker. Root remains the only Core correction writer.
+
+Root has taken over all `crates/hass-config/**` corrections after v120's
+repeated context resets. That worker is released, reported no active build,
+and must not be a second writer. Its last useful checkpoint said Core check
+passed with owned options/subentry APIs; the five v124 findings still require
+primary inspection and completion. The later generic handoff described API
+artifacts rather than its Core scope and is not new Core acceptance evidence.
+
+Queued `spotify_wire_v126` owns only the isolated future
+`crates/hass-spotify/**` typed HTTP client/models and loopback fixtures, using
+the indexed pinned contract and official current protocol facts. Root consumes
+it for the first provider, keeping runtime/media-player/OAuth registration
+wiring primary-owned. No real account, provider requests, playback/device
+commands, shared manifests, Git or children. Same explicit native Luna/max
+selection; release after focused source/protocol checks and handoff.
+
+Host v121 and API v122 are released; root now owns their activation and fixes.
+The host's first nine SDK cases, Clippy and formatting passed. Its later 502
+reason-mapping case is pending because Core is mid-correction. Root activated
+the eight HTTP cases and proved the first complete callback/deferred-exchange/
+private-entry path. Other fixtures needed source-compatible abort expectations,
+shared-result concurrency and cancellation-safe test-server completion. Further
+builds wait for Core's clean checkpoint. The pure client now passes 30 cases,
+including immediate pending-flow cancellation and capacity recovery.
+
+Queued `oauth_host_review_v125` reads only the frozen host source/tests to
+challenge commit-admission cancellation, deferred activation ownership, scoped
+cleanup, provider registration identity and private proof/session binding.
+Core may remain temporarily unbuildable; the reviewer must not touch it or
+claim an unrun probe. Same explicit Luna/max native policy, no children or Git.
+Root consumes the evidence and verifies integration; completion releases review.
+
+Review v124 is released and found unfinished boundaries in v120: options and
+subentry submissions escaped task ownership; subentries could commit after
+abort, shutdown did not close admission, Running progress could expose reserved
+private context keys, and event failures could skip deferred activation or abort
+joining. The reported 36-case pass is not full acceptance. Core owner v120 is
+intentionally resumed in correction for those concrete races; public host APIs
+stay frozen. Root owns all other integration and will review the corrected
+source and targeted failures before the next gate.
+
+Core owner v120 is released with 36 tests, strict Clippy and formatting passing.
+Its awaited drain includes actual legacy blocking callback completion. Queued
+`oauth_config_review_v124` reads that frozen Core change (SHA-256
+`c92de680a04ec06e12f36ab455861896c0938573c43c8355c1c9512165a800d4`)
+to challenge atomic lease/entry commits, private event redaction, deferred
+callbacks and cancellation/drain races. Read-only Core scope and optional owned
+synthetic probes; no edits, real providers, Git or children. Same explicit
+native Luna/max selection. Root integrates findings and verifies the result;
+completion releases the reviewer.
+
+Running `/root/spotify_contract_v123` owns only `docs/SPOTIFY-PORT.md`, the next
+production-provider source contract for the primary. Audit the pinned adapter,
+its exact package/wire behavior and focused tests, with primary public protocol
+documentation as needed. Define native OAuth/account identity, playback/device
+state, services, polling and unload falsifiers. Read/download source only;
+no package execution, provider API/account access, playback commands, Git or
+children. Root indexes and consumes the result for implementation after the
+generic host contract. Same explicit native `gpt-6-luna`/`max` selection and base;
+completion releases the source auditor.
+
+Running `/root/oauth_flow_api_v122` owns only the new API OAuth helper module and draft
+loopback protocol fixture. It consumes the host's weak manager, adds a public
+signed-state callback with fixed close-window HTML and bounded/strict callback
+parameter parsing, sanitized error mapping, and shutdown-aware flow waits.
+Root wires existing routes and keeps their administrator boundary. Callback
+origins come from root-validated host options; arbitrary frontend headers do not
+override them. Fixtures exercise the actual HTTP flow/callback/token/store path,
+duplicate and invalid callbacks, reauth, abort and shutdown without real OAuth
+providers. Same explicit native Luna/max policy and base; no children, shared
+manifests, existing route edits or Git. Release after API contract and focused
+handoff; root activates and verifies the draft.
+
+Running `/root/oauth_flow_host_v121` owns only the isolated future
+`crates/hass-oauth2-flow/**`. It consumes v120's frozen exact-flow leases,
+atomic completion and deferred activation, plus the client's generic
+`commit_authorization` hook. Deliver a real SDK path from loaded credential
+selection through external URL, verified public callback, external_done,
+one-time async resolve, private entry/token commit and reauth/refresh. Keep all
+proofs/codes/tokens out of public flow context. Weak manager/registration handles,
+bounded owned resolver tasks and joined abort/shutdown are mandatory. Root owns
+the API's callback-origin trust checks and all shared enrollment/wiring. No
+production providers, real credentials, Git or children. Same base and explicit
+native `gpt-6-luna`/`max` policy; backend/tier unexposed. Send frozen public APIs
+early for the API adapter, then concise checks/lifecycle handoff and release.
+
+The accepted Credentials source is d9025ac2 with exact Linux CI green; its
+immutable receipt is separate from this next wave. Root owns OAuth client
+enrollment, shared manifests/lock, app/API wiring, documentation, checks and Git.
+The corrected isolated client passes 27 tests and strict Clippy; review v119
+is released with no confirmed lifecycle defect. Successful shutdown joins
+admitted commits; last-owner Drop is an abort fallback.
+
+Running `/root/oauth_config_flows_v120` owns only `crates/hass-config/**`: native
+external/external_done values, asynchronous flow dispatch compatible with
+existing synchronous drivers, and narrow trusted private-data transactions.
+The host must perform provider I/O outside config locks and blocking adapters.
+Abort/owner removal must defeat stale completion; concurrent refresh advances
+an external_done step once. Refresh patches only token data atomically. Reauth
+commits preserve unrelated entry data/options and complete the exact flow, with
+setup/reload callbacks deferred until after the token account lock is released.
+Root supplies the generic OAuth authorization commit callback in the client.
+Worker proposes frozen public signatures promptly for the next host owner,
+then implements and verifies focused fixtures. No shared manifests, API/app,
+real providers, Git or children. Base is the published Credentials receipt plus
+its documentation commit. The current native catalog has one Luna model;
+dispatch explicitly uses `gpt-6-luna`/`max`, no history fork, backend/tier
+unexposed. Completion releases the worker after concise evidence-backed handoff.
+
 ### Credentials integration and OAuth client corrections (2026-11-07)
 
 Root owns the enrolled member-40 Credentials SDK, API, app wiring and shared

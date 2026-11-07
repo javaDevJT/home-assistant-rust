@@ -5,13 +5,17 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError, RwLock, Weak};
+use std::task::{Context as TaskContext, Poll};
 
 use chrono::{DateTime, Duration, Utc};
 use hass_core::{Context, Error, HomeContext, Result, Runtime};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
 use uuid::Uuid;
 
 const METADATA_KEY: &str = "hass.config_entries.v1";
@@ -544,6 +548,14 @@ pub enum ConfigFlowResult {
         errors: Option<Map<String, Value>>,
         description_placeholders: Option<Map<String, Value>>,
     },
+    /// Redirect the client to an external authorization or confirmation URL.
+    ExternalStep {
+        step_id: String,
+        url: String,
+        description_placeholders: Option<Map<String, Value>>,
+    },
+    /// Wait for the client to refresh the flow and run the named completion step.
+    ExternalDone { step_id: String },
     /// Complete a config-entry creation, reconfigure, reauth, or options flow.
     CreateEntry {
         title: String,
@@ -564,6 +576,15 @@ impl fmt::Debug for ConfigFlowResult {
                 .debug_struct("Form")
                 .field("step_id", step_id)
                 .finish_non_exhaustive(),
+            Self::ExternalStep { step_id, .. } => f
+                .debug_struct("ExternalStep")
+                .field("step_id", step_id)
+                .field("url", &"[REDACTED]")
+                .finish_non_exhaustive(),
+            Self::ExternalDone { step_id } => f
+                .debug_struct("ExternalDone")
+                .field("step_id", step_id)
+                .finish(),
             Self::CreateEntry {
                 title,
                 unique_id,
@@ -612,6 +633,79 @@ impl ConfigFlowResult {
     }
 }
 
+/// Opaque, single-use capability for one external-flow transition.
+///
+/// A lease is bound to the exact registered driver instance, flow ID, step,
+/// and in-memory flow generation. It intentionally contains no provider code,
+/// state proof, or token data and cannot be serialized by consumers.
+pub struct ExternalFlowLease {
+    flow_id: String,
+    domain: String,
+    step_id: String,
+    revision: u64,
+    driver_generation: u64,
+    driver: Weak<dyn ConfigEntryDriver>,
+}
+
+impl Clone for ExternalFlowLease {
+    fn clone(&self) -> Self {
+        Self {
+            flow_id: self.flow_id.clone(),
+            domain: self.domain.clone(),
+            step_id: self.step_id.clone(),
+            revision: self.revision,
+            driver_generation: self.driver_generation,
+            driver: self.driver.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for ExternalFlowLease {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExternalFlowLease")
+            .field("flow_id", &self.flow_id)
+            .field("domain", &self.domain)
+            .field("step_id", &self.step_id)
+            .field("revision", &self.revision)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Opaque, already-persisted flow completion whose callbacks must be deferred.
+///
+/// `commit_external_flow` returns this value so OAuth callers can release
+/// their account lock before `finish_external_flow` runs setup, reload, or
+/// `on_create_entry` callbacks. Its Debug output never includes entry data.
+pub struct DeferredExternalFlowCompletion {
+    request: ConfigFlowRequest,
+    kind: FlowKind,
+    result: ConfigFlowResult,
+    entry: Option<ConfigEntry>,
+    driver: Arc<dyn ConfigEntryDriver>,
+    action: DeferredFlowAction,
+}
+
+impl fmt::Debug for DeferredExternalFlowCompletion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeferredExternalFlowCompletion")
+            .field("flow_id", &self.request.flow_id)
+            .field("domain", &self.request.domain)
+            .field("source", &self.request.source)
+            .field("action", &self.action)
+            .field("entry", &self.entry.as_ref().map(|entry| &entry.entry_id))
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DeferredFlowAction {
+    Create,
+    Reconfigure,
+    Reauth,
+    Options,
+    Abort,
+}
+
 /// Synchronous native integration callbacks.
 ///
 /// Callbacks run outside config-entry locks. Async integrations can capture a
@@ -658,6 +752,19 @@ pub trait ConfigEntryDriver: Send + Sync {
 
     /// Execute one config-flow step.
     fn config_flow(&self, request: &ConfigFlowRequest) -> Result<ConfigFlowResult>;
+
+    /// Optionally execute one config-flow step asynchronously.
+    ///
+    /// The returned future must own everything it needs and be `'static` so
+    /// the manager can retain the work after an HTTP caller disconnects. A
+    /// driver returning `None` keeps the existing synchronous callback, which
+    /// the asynchronous manager wrappers run on Tokio's blocking pool.
+    fn config_flow_async(
+        &self,
+        _request: ConfigFlowRequest,
+    ) -> Option<Pin<Box<dyn Future<Output = Result<ConfigFlowResult>> + Send + 'static>>> {
+        None
+    }
 
     /// Run after a new entry has been persisted and setup attempted. A driver
     /// can use the manager to begin a related config, options, or subentry flow
@@ -876,12 +983,366 @@ struct FlowSession {
     initial_data: Option<Map<String, Value>>,
     data_kind: Option<DiscoveryDataKind>,
     result: Value,
+    phase: FlowPhase,
+    revision: u64,
+    driver_generation: u64,
+    driver: Weak<dyn ConfigEntryDriver>,
+}
+
+struct FlowStepGuard {
+    lease: Option<ExternalFlowLease>,
+    backup: Option<FlowSession>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FlowPhase {
+    Ready,
+    Running,
+    AwaitingExternalCallback,
+    ResolvingExternalCallback,
+    ExternalDone,
+    ResolvingExternalDone,
+}
+
+#[derive(Clone)]
+struct AsyncFlowTask {
+    revision: u64,
+    result: watch::Receiver<Option<Result<Value>>>,
+    cancel: watch::Sender<bool>,
+    join: Arc<OwnedFlowTaskJoin>,
+}
+
+struct OwnedFlowTaskJoin {
+    handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
+    result: Mutex<Option<std::result::Result<(), String>>>,
+}
+
+impl OwnedFlowTaskJoin {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: AsyncMutex::new(Some(handle)),
+            result: Mutex::new(None),
+        }
+    }
+
+    async fn join(&self) -> std::result::Result<(), String> {
+        let mut handle = self.handle.lock().await;
+        if let Some(task) = handle.as_mut() {
+            let result = task.await.map_err(|error| error.to_string());
+            *self.result.lock().unwrap_or_else(PoisonError::into_inner) = Some(result.clone());
+            *handle = None;
+            result
+        } else {
+            self.result
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+                .unwrap_or(Ok(()))
+        }
+    }
+}
+
+type FlowTaskShutdownResult = std::result::Result<usize, String>;
+
+#[derive(Clone)]
+struct FlowTaskShutdown {
+    result: watch::Receiver<Option<FlowTaskShutdownResult>>,
+    join: Arc<OwnedFlowTaskJoin>,
+}
+
+struct FlowTaskControlState {
+    closed: bool,
+    admissions: usize,
+    tasks: HashMap<String, AsyncFlowTask>,
+    shutdown_result: Option<FlowTaskShutdown>,
+}
+
+struct FlowTaskControl {
+    state: Mutex<FlowTaskControlState>,
+    changed: Notify,
+}
+
+impl FlowTaskControl {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(FlowTaskControlState {
+                closed: false,
+                admissions: 0,
+                tasks: HashMap::new(),
+                shutdown_result: None,
+            }),
+            changed: Notify::new(),
+        }
+    }
+}
+
+struct FlowAdmissionGuard {
+    control: Arc<FlowTaskControl>,
+}
+
+impl Drop for FlowAdmissionGuard {
+    fn drop(&mut self) {
+        let mut state = self
+            .control
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.admissions = state.admissions.saturating_sub(1);
+        drop(state);
+        self.control.changed.notify_one();
+    }
+}
+
+#[derive(Clone)]
+struct SubentryFlowLease {
+    flow_id: String,
+    domain: String,
+    step_id: String,
+    revision: u64,
+    driver_generation: u64,
+    driver: Weak<dyn ConfigEntryDriver>,
+}
+
+struct AbortOnDropJoin<T>(tokio::task::JoinHandle<T>);
+
+impl<T> AbortOnDropJoin<T> {
+    fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self(handle)
+    }
+}
+
+impl<T> Unpin for AbortOnDropJoin<T> {}
+
+impl<T> Future for AbortOnDropJoin<T> {
+    type Output = std::result::Result<T, tokio::task::JoinError>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        Pin::new(&mut self.0).poll(context)
+    }
+}
+
+impl<T> Drop for AbortOnDropJoin<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+#[derive(Default)]
+struct RegisteredDrivers {
+    drivers: HashMap<String, RegisteredDriver>,
+    next_generation: u64,
+}
+
+#[derive(Clone)]
+struct RegisteredDriver {
+    driver: Arc<dyn ConfigEntryDriver>,
+    generation: u64,
+}
+
+fn external_lease(flow: &FlowSession) -> ExternalFlowLease {
+    ExternalFlowLease {
+        flow_id: flow.request.flow_id.clone(),
+        domain: flow.request.domain.clone(),
+        step_id: flow.request.step_id.clone(),
+        revision: flow.revision,
+        driver_generation: flow.driver_generation,
+        driver: flow.driver.clone(),
+    }
+}
+
+fn subentry_flow_lease(flow: &ConfigSubentryFlowSession) -> SubentryFlowLease {
+    SubentryFlowLease {
+        flow_id: flow.request.flow_id.clone(),
+        domain: flow.request.domain.clone(),
+        step_id: flow.request.step_id.clone(),
+        revision: flow.revision,
+        driver_generation: flow.driver_generation,
+        driver: flow.driver.clone(),
+    }
+}
+
+fn ensure_subentry_flow_matches_lease(
+    flow: &ConfigSubentryFlowSession,
+    lease: &SubentryFlowLease,
+    phase: FlowPhase,
+) -> Result<()> {
+    let same_driver = flow
+        .driver
+        .upgrade()
+        .zip(lease.driver.upgrade())
+        .is_some_and(|(flow_driver, lease_driver)| Arc::ptr_eq(&flow_driver, &lease_driver));
+    if flow.request.flow_id != lease.flow_id
+        || flow.request.domain != lease.domain
+        || flow.request.step_id != lease.step_id
+        || flow.revision != lease.revision
+        || flow.driver_generation != lease.driver_generation
+        || flow.phase != phase
+        || !same_driver
+    {
+        return Err(Error::NotFound(
+            "config subentry flow lease is stale".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_flow_driver(
+    flow: &FlowSession,
+    registration: &RegisteredDriver,
+    expected_domain: &str,
+) -> Result<()> {
+    let same_driver = flow
+        .driver
+        .upgrade()
+        .is_some_and(|driver| Arc::ptr_eq(&driver, &registration.driver));
+    if flow.request.domain != expected_domain
+        || flow.driver_generation != registration.generation
+        || !same_driver
+    {
+        return Err(Error::NotFound(
+            "external flow driver registration changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_lease_driver(registrations: &RegisteredDrivers, lease: &ExternalFlowLease) -> Result<()> {
+    let registration = registrations
+        .drivers
+        .get(&lease.domain)
+        .ok_or_else(|| Error::NotFound("external flow driver is not registered".into()))?;
+    let same_driver = lease
+        .driver
+        .upgrade()
+        .is_some_and(|driver| Arc::ptr_eq(&driver, &registration.driver));
+    if registration.generation != lease.driver_generation || !same_driver {
+        return Err(Error::NotFound(
+            "external flow driver registration changed".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_flow_matches_lease(
+    flow: &FlowSession,
+    lease: &ExternalFlowLease,
+    phase: FlowPhase,
+) -> Result<()> {
+    let same_driver = flow
+        .driver
+        .upgrade()
+        .zip(lease.driver.upgrade())
+        .is_some_and(|(flow_driver, lease_driver)| Arc::ptr_eq(&flow_driver, &lease_driver));
+    if flow.request.flow_id != lease.flow_id
+        || flow.request.domain != lease.domain
+        || flow.request.step_id != lease.step_id
+        || flow.revision != lease.revision
+        || flow.driver_generation != lease.driver_generation
+        || flow.phase != phase
+        || !same_driver
+    {
+        return Err(Error::NotFound("external flow lease is stale".into()));
+    }
+    Ok(())
+}
+
+fn validate_flow_step(step_id: &str) -> Result<()> {
+    if step_id.is_empty()
+        || step_id.len() > 128
+        || !step_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(Error::InvalidInput("invalid config flow step ID".into()));
+    }
+    Ok(())
+}
+
+fn new_entry_from_seed(
+    seed: NewConfigEntry,
+    entry_id: String,
+    _driver: &Arc<dyn ConfigEntryDriver>,
+    discovery_key: Option<DiscoveryKey>,
+) -> ConfigEntry {
+    let now = Utc::now();
+    let mut entry = ConfigEntry {
+        entry_id,
+        domain: seed.domain,
+        title: seed.title.trim().to_owned(),
+        source: seed.source,
+        unique_id: seed.unique_id,
+        discovery_keys: BTreeMap::new(),
+        version: seed.version,
+        minor_version: seed.minor_version,
+        data: seed.data,
+        options: seed.options,
+        subentries: Vec::new(),
+        state: ConfigEntryState::NotLoaded,
+        reason: None,
+        retry_attempts: 0,
+        retry_at: None,
+        disabled_by: None,
+        needs_reauth: false,
+        require_reload: false,
+        pref_disable_new_entities: false,
+        pref_disable_polling: false,
+        error_reason_translation_domain: None,
+        error_reason_translation_key: None,
+        error_reason_translation_placeholders: None,
+        supports_options: false,
+        supports_remove_device: false,
+        supports_unload: false,
+        supports_reconfigure: false,
+        supported_subentry_types: Map::new(),
+        created_at: now,
+        modified_at: now,
+        integration_type: default_integration_type(),
+    };
+    if let Some(key) = discovery_key {
+        record_discovery_key(&mut entry, key);
+    }
+    entry
+}
+
+fn refresh_entry_capabilities(
+    manager: &ConfigEntries,
+    entry_id: &str,
+    driver: &Arc<dyn ConfigEntryDriver>,
+) -> Result<ConfigEntry> {
+    let snapshot = manager.require_entry(entry_id)?;
+    let integration_type = driver.integration_type().to_owned();
+    let supports_options = driver.supports_options();
+    let supports_remove_device = driver.supports_remove_device();
+    let supports_unload = driver.supports_unload();
+    let supports_reconfigure = driver.supports_reconfigure();
+    let supported_subentry_types =
+        supported_subentry_types_json(driver.supported_subentry_types(&snapshot));
+    manager.mutate(|state| {
+        let entry = state
+            .entries
+            .get_mut(entry_id)
+            .ok_or_else(|| Error::NotFound("Config entry not found".into()))?;
+        if entry.domain != snapshot.domain {
+            return Err(Error::InvalidInput("config entry domain changed".into()));
+        }
+        entry.integration_type = integration_type;
+        entry.supports_options = supports_options;
+        entry.supports_remove_device = supports_remove_device;
+        entry.supports_unload = supports_unload;
+        entry.supports_reconfigure = supports_reconfigure;
+        entry.supported_subentry_types = supported_subentry_types;
+        Ok(entry.clone())
+    })
 }
 
 #[derive(Clone)]
 struct ConfigSubentryFlowSession {
     request: ConfigSubentryFlowRequest,
     result: Value,
+    phase: FlowPhase,
+    revision: u64,
+    driver_generation: u64,
+    driver: Weak<dyn ConfigEntryDriver>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1000,7 +1461,9 @@ struct PersistedDocument {
 pub struct ConfigEntries {
     runtime: Runtime,
     state: Arc<Mutex<PersistedState>>,
-    drivers: Arc<RwLock<HashMap<String, Arc<dyn ConfigEntryDriver>>>>,
+    drivers: Arc<RwLock<RegisteredDrivers>>,
+    flow_tasks: Arc<FlowTaskControl>,
+    flow_transitions: Arc<Mutex<()>>,
     operation_lock: Arc<Mutex<()>>,
     lifecycle_observers: Arc<RwLock<Vec<Arc<dyn ConfigLifecycleObserver>>>>,
     discovery_key_removal_observers: Arc<RwLock<Vec<Arc<dyn DiscoveryKeyRemovalObserver>>>>,
@@ -1094,7 +1557,9 @@ impl ConfigEntries {
                 flows: BTreeMap::new(),
                 subentry_flows: BTreeMap::new(),
             })),
-            drivers: Arc::new(RwLock::new(HashMap::new())),
+            drivers: Arc::new(RwLock::new(RegisteredDrivers::default())),
+            flow_tasks: Arc::new(FlowTaskControl::new()),
+            flow_transitions: Arc::new(Mutex::new(())),
             operation_lock: Arc::new(Mutex::new(())),
             lifecycle_observers: Arc::new(RwLock::new(Vec::new())),
             discovery_key_removal_observers: Arc::new(RwLock::new(Vec::new())),
@@ -1119,12 +1584,23 @@ impl ConfigEntries {
         }
         let domain = driver.domain().to_owned();
         let mut drivers = self.drivers.write().unwrap_or_else(PoisonError::into_inner);
-        if drivers.contains_key(&domain) {
+        if drivers.drivers.contains_key(&domain) {
             return Err(Error::InvalidInput(format!(
                 "integration driver already registered for {domain}"
             )));
         }
-        drivers.insert(domain.clone(), Arc::clone(&driver));
+        drivers.next_generation = drivers
+            .next_generation
+            .checked_add(1)
+            .ok_or_else(|| Error::Service("driver registration generation exhausted".into()))?;
+        let generation = drivers.next_generation;
+        drivers.drivers.insert(
+            domain.clone(),
+            RegisteredDriver {
+                driver: Arc::clone(&driver),
+                generation,
+            },
+        );
         drop(drivers);
         let supported_by_entry = self
             .list_entries(Some(&domain))
@@ -1152,6 +1628,7 @@ impl ConfigEntries {
             self.drivers
                 .write()
                 .unwrap_or_else(PoisonError::into_inner)
+                .drivers
                 .remove(&domain);
             return Err(error);
         }
@@ -1165,10 +1642,11 @@ impl ConfigEntries {
         let domain = expected.domain().to_owned();
         let mut drivers = self.drivers.write().unwrap_or_else(PoisonError::into_inner);
         if drivers
+            .drivers
             .get(&domain)
-            .is_some_and(|driver| Arc::ptr_eq(driver, expected))
+            .is_some_and(|registered| Arc::ptr_eq(&registered.driver, expected))
         {
-            drivers.remove(&domain);
+            drivers.drivers.remove(&domain);
             true
         } else {
             false
@@ -1318,8 +1796,18 @@ impl ConfigEntries {
         self.drivers
             .read()
             .unwrap_or_else(PoisonError::into_inner)
+            .drivers
             .get(domain)
-            .cloned()
+            .map(|registration| Arc::clone(&registration.driver))
+    }
+
+    fn driver_registration(&self, domain: &str) -> Option<(Arc<dyn ConfigEntryDriver>, u64)> {
+        self.drivers
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .drivers
+            .get(domain)
+            .map(|registration| (Arc::clone(&registration.driver), registration.generation))
     }
 
     fn with_supported_subentry_types(&self, mut entry: ConfigEntry) -> ConfigEntry {
@@ -1336,6 +1824,7 @@ impl ConfigEntries {
             .drivers
             .read()
             .unwrap_or_else(PoisonError::into_inner)
+            .drivers
             .keys()
             .cloned()
             .collect::<Vec<_>>();
@@ -1346,16 +1835,16 @@ impl ConfigEntries {
     /// Return the current public form without executing its driver again.
     pub fn flow_result(&self, flow_id: &str) -> Result<Value> {
         let state = self.lock_state();
+        if let Some(flow) = state.flows.get(flow_id) {
+            if flow.result.is_null() {
+                return Err(Error::Service("config flow is still initializing".into()));
+            }
+            return Ok(flow.result.clone());
+        }
         state
-            .flows
+            .subentry_flows
             .get(flow_id)
             .map(|flow| flow.result.clone())
-            .or_else(|| {
-                state
-                    .subentry_flows
-                    .get(flow_id)
-                    .map(|flow| flow.result.clone())
-            })
             .ok_or_else(|| Error::NotFound("unknown config flow".into()))
     }
 
@@ -1393,15 +1882,392 @@ impl ConfigEntries {
     }
 
     pub fn abort_flow(&self, flow_id: &str) -> Result<()> {
-        self.mutate(|state| {
-            let removed_entry_flow = state.flows.remove(flow_id).is_some();
-            let removed_subentry_flow = state.subentry_flows.remove(flow_id).is_some();
-            if !removed_entry_flow && !removed_subentry_flow {
-                return Err(Error::NotFound("unknown config flow".into()));
-            }
-            Ok(())
-        })?;
+        {
+            let _transition = self
+                .flow_transitions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            self.mutate(|state| {
+                let removed_entry_flow = state.flows.remove(flow_id).is_some();
+                let removed_subentry_flow = state.subentry_flows.remove(flow_id).is_some();
+                if !removed_entry_flow && !removed_subentry_flow {
+                    return Err(Error::NotFound("unknown config flow".into()));
+                }
+                Ok(())
+            })?;
+        }
+        self.cancel_flow_task(flow_id);
         self.notify_flow_progress(flow_id)
+    }
+
+    /// Claim the callback transition from an active `external` result.
+    ///
+    /// Only the expected domain and exact current external step can claim it.
+    /// Concurrent callbacks receive an error after the first claim changes the
+    /// flow phase; callbacks must verify their OAuth proof before calling this.
+    pub fn claim_external_callback(
+        &self,
+        flow_id: &str,
+        expected_domain: &str,
+        expected_step: &str,
+    ) -> Result<ExternalFlowLease> {
+        validate_domain(expected_domain)?;
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        let registration = registrations
+            .drivers
+            .get(expected_domain)
+            .ok_or_else(|| Error::NotFound("external flow driver is not registered".into()))?;
+        let lease = self.mutate(|state| {
+            let flow = state
+                .flows
+                .get_mut(flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            ensure_flow_driver(flow, registration, expected_domain)?;
+            if flow.kind != FlowKind::Config
+                || flow.phase != FlowPhase::AwaitingExternalCallback
+                || flow.request.step_id != expected_step
+                || flow.result.get("type").and_then(Value::as_str) != Some("external")
+            {
+                return Err(Error::InvalidInput(
+                    "external callback does not match the active flow step".into(),
+                ));
+            }
+            flow.phase = FlowPhase::ResolvingExternalCallback;
+            flow.revision = flow
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::Service("config flow revision exhausted".into()))?;
+            Ok(external_lease(flow))
+        })?;
+        Ok(lease)
+    }
+
+    /// Publish the public `external_done` transition after a trusted callback
+    /// has been privately stored by its OAuth owner.
+    pub fn publish_external_done(
+        &self,
+        lease: ExternalFlowLease,
+        step_id: impl Into<String>,
+    ) -> Result<Value> {
+        let step_id = step_id.into();
+        validate_flow_step(&step_id)?;
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        ensure_lease_driver(&registrations, &lease)?;
+        let result = self.mutate(|state| {
+            let flow = state
+                .flows
+                .get_mut(&lease.flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            ensure_flow_matches_lease(flow, &lease, FlowPhase::ResolvingExternalCallback)?;
+            let mut request = flow.request.clone();
+            request.step_id = step_id.clone();
+            request.user_input = None;
+            let result = flow_result_json(
+                &request,
+                FlowKind::Config,
+                &ConfigFlowResult::ExternalDone {
+                    step_id: step_id.clone(),
+                },
+                None,
+                None,
+            );
+            flow.request = request;
+            flow.result = result.clone();
+            flow.phase = FlowPhase::ExternalDone;
+            flow.revision = flow
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::Service("config flow revision exhausted".into()))?;
+            Ok(result)
+        })?;
+        drop(registrations);
+        self.notify_flow_progress(&lease.flow_id)?;
+        Ok(result)
+    }
+
+    /// Claim an `external_done` creation/rejection step once. `None` means
+    /// another concurrent GET already owns the transition.
+    pub fn claim_external_done(
+        &self,
+        flow_id: &str,
+        expected_domain: &str,
+        expected_step: &str,
+    ) -> Result<Option<ExternalFlowLease>> {
+        validate_domain(expected_domain)?;
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        let registration = registrations
+            .drivers
+            .get(expected_domain)
+            .ok_or_else(|| Error::NotFound("external flow driver is not registered".into()))?;
+        self.mutate(|state| {
+            let flow = state
+                .flows
+                .get_mut(flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            ensure_flow_driver(flow, registration, expected_domain)?;
+            if flow.kind != FlowKind::Config {
+                return Err(Error::InvalidInput("external flow type mismatch".into()));
+            }
+            if flow.phase == FlowPhase::ResolvingExternalDone {
+                return Ok(None);
+            }
+            if flow.phase != FlowPhase::ExternalDone
+                || flow.request.step_id != expected_step
+                || flow.result.get("type").and_then(Value::as_str) != Some("external_done")
+            {
+                return Err(Error::InvalidInput(
+                    "external completion does not match the active flow step".into(),
+                ));
+            }
+            flow.phase = FlowPhase::ResolvingExternalDone;
+            flow.revision = flow
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::Service("config flow revision exhausted".into()))?;
+            Ok(Some(external_lease(flow)))
+        })
+    }
+
+    /// Release a failed resolver claim so an owned host task can retry it.
+    /// The lease must still be current; abort or removal makes release stale.
+    pub fn release_external_flow(&self, lease: ExternalFlowLease) -> Result<()> {
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        ensure_lease_driver(&registrations, &lease)?;
+        self.mutate(|state| {
+            let flow = state
+                .flows
+                .get_mut(&lease.flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            let next_phase = match flow.phase {
+                FlowPhase::ResolvingExternalCallback => FlowPhase::AwaitingExternalCallback,
+                FlowPhase::ResolvingExternalDone => FlowPhase::ExternalDone,
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "external flow lease is no longer resolving".into(),
+                    ));
+                }
+            };
+            ensure_flow_matches_lease(flow, &lease, flow.phase)?;
+            flow.phase = next_phase;
+            flow.revision = flow
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::Service("config flow revision exhausted".into()))?;
+            Ok(())
+        })
+    }
+
+    /// Atomically commit a trusted external-flow `CreateEntry` or `Abort`.
+    ///
+    /// For reauth and reconfigure, `CreateEntry.data` is merged into the
+    /// existing private data map while the original entry ID, identity,
+    /// options, and preferences are retained. Runtime callbacks are returned
+    /// as a deferred plan and run only after the caller releases its SDK lock.
+    pub fn commit_external_flow(
+        &self,
+        lease: ExternalFlowLease,
+        mut result: ConfigFlowResult,
+    ) -> Result<DeferredExternalFlowCompletion> {
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        ensure_lease_driver(&registrations, &lease)?;
+        let registration = registrations
+            .drivers
+            .get(&lease.domain)
+            .ok_or_else(|| Error::NotFound("external flow driver is not registered".into()))?;
+        let driver = Arc::clone(&registration.driver);
+        let (request, entry, action) = self.mutate(|state| {
+            let flow = state
+                .flows
+                .get(&lease.flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            ensure_flow_matches_lease(flow, &lease, FlowPhase::ResolvingExternalDone)?;
+            if flow.kind != FlowKind::Config {
+                return Err(Error::InvalidInput("external flow type mismatch".into()));
+            }
+            let request = flow.request.clone();
+            let (entry, action) = match &result {
+                ConfigFlowResult::Abort { .. } => (None, DeferredFlowAction::Abort),
+                ConfigFlowResult::CreateEntry {
+                    title,
+                    data,
+                    options,
+                    unique_id,
+                    version,
+                    minor_version,
+                } => match request.source.as_str() {
+                    "reauth" | "reconfigure" => {
+                        let entry_id = request.entry_id.as_deref().ok_or_else(|| {
+                            Error::InvalidInput(format!(
+                                "{} flow is missing entry_id",
+                                request.source
+                            ))
+                        })?;
+                        let original = state
+                            .entries
+                            .get_mut(entry_id)
+                            .ok_or_else(|| Error::NotFound("Config entry not found".into()))?;
+                        if original.domain != request.domain {
+                            return Err(Error::InvalidInput(
+                                "external flow entry domain mismatch".into(),
+                            ));
+                        }
+                        if request.source == "reauth" && !original.needs_reauth {
+                            return Err(Error::InvalidInput(
+                                "config entry is no longer awaiting reauthentication".into(),
+                            ));
+                        }
+                        let _ = (title, options, unique_id, version, minor_version);
+                        original.data.extend(data.clone());
+                        original.needs_reauth = false;
+                        original.modified_at = Utc::now();
+                        let committed = original.clone();
+                        (
+                            Some(committed),
+                            if request.source == "reauth" {
+                                DeferredFlowAction::Reauth
+                            } else {
+                                DeferredFlowAction::Reconfigure
+                            },
+                        )
+                    }
+                    _ => {
+                        let mut seed = NewConfigEntry::new(&request.domain, title, data.clone());
+                        seed.source = request.source.clone();
+                        seed.unique_id = unique_id.clone().or_else(|| request.unique_id.clone());
+                        seed.version = *version;
+                        seed.minor_version = *minor_version;
+                        seed.options = options.clone();
+                        validate_new_entry(&seed)?;
+                        let entry = new_entry_from_seed(
+                            seed,
+                            Uuid::new_v4().to_string(),
+                            &driver,
+                            discovery_key_from_context(&request.context),
+                        );
+                        ensure_unique_id(
+                            &state.entries,
+                            &entry.domain,
+                            entry.unique_id.as_deref(),
+                            None,
+                        )?;
+                        state.entries.insert(entry.entry_id.clone(), entry.clone());
+                        (Some(entry), DeferredFlowAction::Create)
+                    }
+                },
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "external flow commit accepts only CreateEntry or Abort".into(),
+                    ));
+                }
+            };
+            state.flows.remove(&lease.flow_id);
+            Ok((request, entry, action))
+        })?;
+        drop(registrations);
+        if matches!(
+            action,
+            DeferredFlowAction::Reauth | DeferredFlowAction::Reconfigure
+        ) && let Some(entry) = entry.as_ref()
+            && let ConfigFlowResult::CreateEntry {
+                title,
+                options,
+                unique_id,
+                version,
+                minor_version,
+                ..
+            } = &mut result
+        {
+            *title = entry.title.clone();
+            *options = entry.options.clone();
+            *unique_id = entry.unique_id.clone();
+            *version = entry.version;
+            *minor_version = entry.minor_version;
+        }
+        Ok(DeferredExternalFlowCompletion {
+            request,
+            kind: FlowKind::Config,
+            result,
+            entry,
+            driver,
+            action,
+        })
+    }
+
+    /// Run the setup/reload and entry-created callbacks deferred by
+    /// `commit_external_flow`. Call this only after OAuth account locks have
+    /// been released.
+    pub fn finish_external_flow(
+        &self,
+        completion: DeferredExternalFlowCompletion,
+    ) -> Result<Value> {
+        let DeferredExternalFlowCompletion {
+            request,
+            kind,
+            result,
+            mut entry,
+            driver,
+            action,
+        } = completion;
+        let mut next_flow = None;
+        // Entry/token persistence already committed. Observer delivery must not
+        // consume this one-shot plan before its activation callbacks run.
+        let mut notification_error = None;
+        match action {
+            DeferredFlowAction::Create => {
+                let entry_id = entry
+                    .as_ref()
+                    .ok_or_else(|| Error::Service("created flow entry is missing".into()))?
+                    .entry_id
+                    .clone();
+                let refreshed = refresh_entry_capabilities(self, &entry_id, &driver)?;
+                notification_error = self.emit_public_entry_change("added", &refreshed).err();
+                {
+                    let _operation = self.lock_operation();
+                    let _ = self.setup_entry_with_notifications(&entry_id, &mut notification_error);
+                }
+                let current = self.require_entry(&entry_id)?;
+                next_flow = driver.on_create_entry(self, &request, &current, &result)?;
+                if let Some(continuation) = next_flow.as_ref() {
+                    self.validate_flow_continuation(continuation)?;
+                }
+                entry = Some(current);
+            }
+            DeferredFlowAction::Reauth | DeferredFlowAction::Reconfigure => {
+                let entry_id = request.entry_id.as_deref().ok_or_else(|| {
+                    Error::InvalidInput("external flow is missing entry_id".into())
+                })?;
+                let current = entry
+                    .as_ref()
+                    .ok_or_else(|| Error::Service("updated flow entry is missing".into()))?;
+                notification_error = self.emit_public_entry_change("updated", current).err();
+                {
+                    let _operation = self.lock_operation();
+                    self.reload_entry_with_notifications(entry_id, &mut notification_error)?;
+                }
+                entry = Some(self.require_entry(entry_id)?);
+            }
+            DeferredFlowAction::Options => {
+                let entry_id = request.entry_id.as_deref().ok_or_else(|| {
+                    Error::InvalidInput("options flow is missing entry_id".into())
+                })?;
+                let current = entry
+                    .as_ref()
+                    .ok_or_else(|| Error::Service("updated options entry is missing".into()))?;
+                notification_error = self.emit_public_entry_change("updated", current).err();
+                if current.state.is_loaded() {
+                    let _operation = self.lock_operation();
+                    self.reload_entry_with_notifications(entry_id, &mut notification_error)?;
+                }
+                entry = Some(self.require_entry(entry_id)?);
+            }
+            DeferredFlowAction::Abort => {}
+        }
+        let progress_result = self.notify_flow_progress(&request.flow_id);
+        if let Some(error) = notification_error {
+            return Err(error);
+        }
+        progress_result?;
+        Ok(flow_result_json(&request, kind, &result, entry, next_flow))
     }
 
     /// Check for an in-progress config discovery flow with the same handler,
@@ -1563,6 +2429,233 @@ impl ConfigEntries {
             hass_core::Context::default(),
         )?;
         Ok(())
+    }
+
+    fn cancel_flow_task(&self, flow_id: &str) {
+        if let Some(task) = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tasks
+            .get(flow_id)
+        {
+            let _ = task.cancel.send(true);
+        }
+    }
+
+    fn begin_flow_admission(&self) -> Result<FlowAdmissionGuard> {
+        let mut state = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if state.closed {
+            return Err(Error::Service(
+                "config flow manager is shutting down".into(),
+            ));
+        }
+        state.admissions = state
+            .admissions
+            .checked_add(1)
+            .ok_or_else(|| Error::Service("config flow admission counter exhausted".into()))?;
+        Ok(FlowAdmissionGuard {
+            control: Arc::clone(&self.flow_tasks),
+        })
+    }
+
+    fn flow_task(&self, flow_id: &str, revision: u64) -> Option<AsyncFlowTask> {
+        self.flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tasks
+            .get(flow_id)
+            .filter(|task| task.revision == revision)
+            .cloned()
+    }
+
+    fn flow_task_any(&self, flow_id: &str) -> Option<AsyncFlowTask> {
+        self.flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tasks
+            .get(flow_id)
+            .cloned()
+    }
+
+    async fn wait_for_flow_task(&self, flow_id: &str, task: AsyncFlowTask) -> Result<Value> {
+        let revision = task.revision;
+        let result = Self::receive_flow_task_result(task.result.clone()).await;
+        let join_result = task.join.join().await;
+        self.drain_completed_flow_task(flow_id, revision, &task)
+            .await;
+        match (result, join_result) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(Error::Service(format!(
+                "config flow task join failed: {error}"
+            ))),
+        }
+    }
+
+    async fn receive_flow_task_result(
+        mut receiver: watch::Receiver<Option<Result<Value>>>,
+    ) -> Result<Value> {
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                break result;
+            }
+            if receiver.changed().await.is_err() {
+                break Err(Error::Service(
+                    "owned config-flow task ended without a result".into(),
+                ));
+            }
+        }
+    }
+
+    async fn drain_completed_flow_task(
+        &self,
+        flow_id: &str,
+        revision: u64,
+        expected: &AsyncFlowTask,
+    ) {
+        let task = {
+            let state = self
+                .flow_tasks
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.tasks.get(flow_id).is_some_and(|task| {
+                task.revision == revision && Arc::ptr_eq(&task.join, &expected.join)
+            }) {
+                state.tasks.get(flow_id).cloned()
+            } else {
+                None
+            }
+        };
+        if let Some(task) = task {
+            let _ = task.join.join().await;
+            let mut state = self
+                .flow_tasks
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if state.tasks.get(flow_id).is_some_and(|current| {
+                current.revision == revision && Arc::ptr_eq(&current.join, &expected.join)
+            }) {
+                state.tasks.remove(flow_id);
+            }
+        }
+    }
+
+    fn begin_flow_task_shutdown(&self) -> FlowTaskShutdown {
+        let mut state = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(task) = state.shutdown_result.as_ref() {
+            return task.clone();
+        }
+        state.closed = true;
+        for task in state.tasks.values() {
+            let _ = task.cancel.send(true);
+        }
+        let (sender, receiver) = watch::channel(None);
+        let manager = self.clone();
+        let handle = tokio::spawn(async move {
+            let result = manager.drain_flow_tasks_after_close().await;
+            let _ = sender.send(Some(result));
+        });
+        let task = FlowTaskShutdown {
+            result: receiver,
+            join: Arc::new(OwnedFlowTaskJoin::new(handle)),
+        };
+        state.shutdown_result = Some(task.clone());
+        task
+    }
+
+    async fn drain_flow_tasks_after_close(&self) -> FlowTaskShutdownResult {
+        loop {
+            let notified = self.flow_tasks.changed.notified();
+            if self
+                .flow_tasks
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .admissions
+                == 0
+            {
+                break;
+            }
+            notified.await;
+        }
+
+        let flow_ids = {
+            let _transition = self
+                .flow_transitions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut state = self.lock_state();
+            let mut ids = state.flows.keys().cloned().collect::<Vec<_>>();
+            ids.extend(state.subentry_flows.keys().cloned());
+            state.flows.clear();
+            state.subentry_flows.clear();
+            ids
+        };
+        for flow_id in &flow_ids {
+            let _ = self.notify_flow_progress(flow_id);
+        }
+        let tasks = {
+            let mut state = self
+                .flow_tasks
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            for task in state.tasks.values() {
+                let _ = task.cancel.send(true);
+            }
+            std::mem::take(&mut state.tasks)
+                .into_values()
+                .collect::<Vec<_>>()
+        };
+        let mut errors = Vec::new();
+        for task in tasks {
+            let _ = Self::receive_flow_task_result(task.result.clone()).await;
+            if let Err(error) = task.join.join().await {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            Ok(flow_ids.len())
+        } else {
+            Err(format!(
+                "config flow task shutdown failed: {}",
+                errors.join("; ")
+            ))
+        }
+    }
+
+    async fn wait_for_flow_task_shutdown(task: FlowTaskShutdown) -> Result<usize> {
+        let mut receiver = task.result;
+        let result = loop {
+            if let Some(result) = receiver.borrow().clone() {
+                break result.map_err(Error::Service);
+            }
+            if receiver.changed().await.is_err() {
+                break Err(Error::Service(
+                    "config flow shutdown ended without a result".into(),
+                ));
+            }
+        };
+        let join_result = task.join.join().await;
+        let count = result?;
+        join_result.map_err(|error| {
+            Error::Service(format!("config flow shutdown join failed: {error}"))
+        })?;
+        Ok(count)
     }
 
     /// List entries, optionally scoped to an integration domain.
@@ -1900,17 +2993,27 @@ impl ConfigEntries {
     /// Unload then set up an entry again.
     pub fn reload_entry(&self, entry_id: &str) -> Result<ConfigEntry> {
         let _operation = self.lock_operation();
+        let mut notification_error = None;
+        let result = self.reload_entry_with_notifications(entry_id, &mut notification_error);
+        finish_lifecycle_notifications(result, notification_error)
+    }
+
+    fn reload_entry_with_notifications(
+        &self,
+        entry_id: &str,
+        notification_error: &mut Option<Error>,
+    ) -> Result<ConfigEntry> {
         let entry = self.require_entry(entry_id)?;
         if entry.state.is_loaded() {
-            self.unload_entry_locked(entry_id)?;
+            self.unload_entry_with_notifications(entry_id, notification_error)?;
         }
-        self.update_entry_metadata(entry_id, |current| {
+        self.update_lifecycle_metadata(notification_error, entry_id, |current| {
             current.require_reload = false;
             current.state = ConfigEntryState::NotLoaded;
             current.reason = None;
             current.modified_at = Utc::now();
         })?;
-        self.setup_entry_locked(entry_id)
+        self.setup_entry_with_notifications(entry_id, notification_error)
     }
 
     /// Disable or re-enable an entry. Returns false when unloading failed and
@@ -2003,7 +3106,7 @@ impl ConfigEntries {
         }
         let entry = self.require_entry(entry_id)?;
         driver.remove(&self.runtime, &entry)?;
-        let (pending, removed_entry) = self.mutate(|state| {
+        let (pending, removed_entry, removed_flow_ids) = self.mutate(|state| {
             let current = state
                 .entries
                 .get(entry_id)
@@ -2020,15 +3123,31 @@ impl ConfigEntries {
                 .entries
                 .remove(entry_id)
                 .expect("the entry was present in this mutation");
+            let removed_flow_ids = state
+                .flows
+                .iter()
+                .filter(|(_, flow)| flow.request.entry_id.as_deref() == Some(entry_id))
+                .map(|(flow_id, _)| flow_id.clone())
+                .chain(
+                    state
+                        .subentry_flows
+                        .iter()
+                        .filter(|(_, flow)| flow.request.entry_id == entry_id)
+                        .map(|(flow_id, _)| flow_id.clone()),
+                )
+                .collect::<Vec<_>>();
             state
                 .flows
                 .retain(|_, flow| flow.request.entry_id.as_deref() != Some(entry_id));
             state
                 .subentry_flows
                 .retain(|_, flow| flow.request.entry_id != entry_id);
-            Ok((pending, removed_entry))
+            Ok((pending, removed_entry, removed_flow_ids))
         })?;
         drop(operation);
+        for flow_id in removed_flow_ids {
+            self.cancel_flow_task(&flow_id);
+        }
         // Source removal dispatch follows registry/issue cleanup. Keep both
         // outside manager locks so observers can reenter the committed state.
         let cleanup_result = self.dispatch_direct_cleanup(&pending);
@@ -2059,6 +3178,35 @@ impl ConfigEntries {
             self.reload_entry_locked(entry_id)?;
         }
         self.require_entry(entry_id)
+    }
+
+    /// Atomically merge trusted provider-owned fields into an entry's private
+    /// data map. The domain guard prevents an adapter from applying a token
+    /// patch to another integration's entry. This operation never reloads the
+    /// entry or calls its driver.
+    pub fn patch_entry_data(
+        &self,
+        entry_id: &str,
+        expected_domain: &str,
+        patch: Map<String, Value>,
+    ) -> Result<ConfigEntry> {
+        validate_domain(expected_domain)?;
+        let committed = self.mutate(|state| {
+            let entry = state
+                .entries
+                .get_mut(entry_id)
+                .ok_or_else(|| Error::NotFound("Config entry not found".into()))?;
+            if entry.domain != expected_domain {
+                return Err(Error::InvalidInput(
+                    "config entry domain does not match the expected domain".into(),
+                ));
+            }
+            entry.data.extend(patch);
+            entry.modified_at = Utc::now();
+            Ok(entry.clone())
+        })?;
+        self.emit_public_entry_change("updated", &committed)?;
+        Ok(committed)
     }
 
     /// Update the entry's title and polling/entity preferences.
@@ -2134,6 +3282,46 @@ impl ConfigEntries {
         self.run_flow_step(request, FlowKind::Config, driver, None, None)
     }
 
+    /// Begin an entry's reauthentication flow using its optional asynchronous
+    /// driver callback. Existing synchronous callbacks run on the blocking
+    /// pool, and the owned flow task survives cancellation of this caller.
+    pub async fn begin_reauth_flow_async(&self, entry_id: &str) -> Result<Value> {
+        let admission = self.begin_flow_admission()?;
+        let entry = self.require_entry(entry_id)?;
+        let driver = self.driver(&entry.domain).ok_or_else(|| {
+            Error::NotFound(format!(
+                "no native integration driver registered for {}",
+                entry.domain
+            ))
+        })?;
+        self.update_entry_metadata(entry_id, |current| {
+            current.needs_reauth = true;
+            current.modified_at = Utc::now();
+        })?;
+        let mut context = Map::new();
+        context.insert("entry_id".into(), json!(entry_id));
+        context.insert("source".into(), json!("reauth"));
+        let request = ConfigFlowRequest {
+            flow_id: Uuid::new_v4().to_string(),
+            domain: entry.domain.clone(),
+            step_id: "reauth".into(),
+            source: "reauth".into(),
+            entry_id: Some(entry_id.to_owned()),
+            unique_id: entry.unique_id,
+            user_input: None,
+            context,
+        };
+        let lease = self.reserve_initial_async_flow(
+            request.clone(),
+            FlowKind::Config,
+            Arc::clone(&driver),
+            None,
+            None,
+        )?;
+        self.run_owned_flow_task(request, driver, lease, None, admission)
+            .await
+    }
+
     /// Begin a user/import/discovery config flow through the registered driver.
     pub fn init_config_flow(
         &self,
@@ -2194,6 +3382,76 @@ impl ConfigEntries {
         self.run_flow_step(request, FlowKind::Config, driver, initial_data, data_kind)
     }
 
+    /// Begin a config flow with an optional asynchronous driver callback.
+    pub async fn init_config_flow_async(
+        &self,
+        domain: &str,
+        source: &str,
+        context: Map<String, Value>,
+    ) -> Result<Value> {
+        self.init_config_flow_with_typed_input_async(domain, source, context, None, None)
+            .await
+    }
+
+    /// Begin a config flow and pass initial request data to the driver.
+    pub async fn init_config_flow_with_input_async(
+        &self,
+        domain: &str,
+        source: &str,
+        context: Map<String, Value>,
+        user_input: Option<Map<String, Value>>,
+    ) -> Result<Value> {
+        self.init_config_flow_with_typed_input_async(domain, source, context, user_input, None)
+            .await
+    }
+
+    /// Trusted typed-provenance async config-flow entrypoint.
+    pub async fn init_config_flow_with_typed_input_async(
+        &self,
+        domain: &str,
+        source: &str,
+        mut context: Map<String, Value>,
+        user_input: Option<Map<String, Value>>,
+        data_kind: Option<DiscoveryDataKind>,
+    ) -> Result<Value> {
+        validate_domain(domain)?;
+        validate_source(source)?;
+        let admission = self.begin_flow_admission()?;
+        let driver = self.driver(domain).ok_or_else(|| {
+            Error::NotFound(format!(
+                "no native integration driver registered for {domain}"
+            ))
+        })?;
+        context.insert("source".into(), json!(source));
+        let flow_id = Uuid::new_v4().to_string();
+        let initial_data = user_input.clone();
+        let request = ConfigFlowRequest {
+            flow_id,
+            domain: domain.to_owned(),
+            step_id: "user".into(),
+            source: source.to_owned(),
+            entry_id: context
+                .get("entry_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            unique_id: context
+                .get("unique_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            user_input,
+            context,
+        };
+        let lease = self.reserve_initial_async_flow(
+            request.clone(),
+            FlowKind::Config,
+            Arc::clone(&driver),
+            initial_data,
+            data_kind,
+        )?;
+        self.run_owned_flow_task(request, driver, lease, None, admission)
+            .await
+    }
+
     /// Begin an entry's registered options flow.
     pub fn init_options_flow(&self, entry_id: &str) -> Result<Value> {
         self.init_options_flow_with_input(entry_id, None)
@@ -2229,6 +3487,51 @@ impl ConfigEntries {
         self.run_flow_step(request, FlowKind::Options, driver, None, None)
     }
 
+    /// Begin an entry's registered options flow with manager-owned callback work.
+    pub async fn init_options_flow_async(&self, entry_id: &str) -> Result<Value> {
+        self.init_options_flow_with_input_async(entry_id, None)
+            .await
+    }
+
+    /// Begin an options flow and pass optional initial request data.
+    pub async fn init_options_flow_with_input_async(
+        &self,
+        entry_id: &str,
+        user_input: Option<Map<String, Value>>,
+    ) -> Result<Value> {
+        let admission = self.begin_flow_admission()?;
+        let entry = self.require_entry(entry_id)?;
+        let driver = self.driver(&entry.domain).ok_or_else(|| {
+            Error::NotFound(format!(
+                "no native integration driver registered for {}",
+                entry.domain
+            ))
+        })?;
+        let flow_id = Uuid::new_v4().to_string();
+        let mut context = Map::new();
+        context.insert("source".into(), json!("options"));
+        context.insert("entry_id".into(), json!(entry_id));
+        let request = ConfigFlowRequest {
+            flow_id,
+            domain: entry.domain.clone(),
+            step_id: "init".into(),
+            source: "options".into(),
+            entry_id: Some(entry_id.to_owned()),
+            unique_id: entry.unique_id,
+            user_input: user_input.clone(),
+            context,
+        };
+        let lease = self.reserve_initial_async_flow(
+            request.clone(),
+            FlowKind::Options,
+            Arc::clone(&driver),
+            user_input,
+            None,
+        )?;
+        self.run_owned_flow_task(request, driver, lease, None, admission)
+            .await
+    }
+
     /// Begin a supported native subentry flow. New flows use `source = "user"`
     /// with no subentry ID; reconfigure flows require the existing exact child
     /// ID and a type that advertises `supports_reconfigure`.
@@ -2238,9 +3541,54 @@ impl ConfigEntries {
         subentry_type: &str,
         source: &str,
         subentry_id: Option<&str>,
-        mut context: Map<String, Value>,
+        context: Map<String, Value>,
         user_input: Option<Map<String, Value>>,
     ) -> Result<Value> {
+        let (request, driver) = self.prepare_subentry_flow_request(
+            entry_id,
+            subentry_type,
+            source,
+            subentry_id,
+            context,
+            user_input,
+        )?;
+        self.run_subentry_flow_step(request, driver)
+    }
+
+    /// Start a subentry flow with manager-owned callback work.
+    pub async fn init_subentry_flow_async(
+        &self,
+        entry_id: &str,
+        subentry_type: &str,
+        source: &str,
+        subentry_id: Option<&str>,
+        context: Map<String, Value>,
+        user_input: Option<Map<String, Value>>,
+    ) -> Result<Value> {
+        let admission = self.begin_flow_admission()?;
+        let (request, driver) = self.prepare_subentry_flow_request(
+            entry_id,
+            subentry_type,
+            source,
+            subentry_id,
+            context,
+            user_input,
+        )?;
+        let lease =
+            self.reserve_initial_async_subentry_flow(request.clone(), Arc::clone(&driver))?;
+        self.run_owned_subentry_flow_task(request, driver, lease, None, admission)
+            .await
+    }
+
+    fn prepare_subentry_flow_request(
+        &self,
+        entry_id: &str,
+        subentry_type: &str,
+        source: &str,
+        subentry_id: Option<&str>,
+        mut context: Map<String, Value>,
+        user_input: Option<Map<String, Value>>,
+    ) -> Result<(ConfigSubentryFlowRequest, Arc<dyn ConfigEntryDriver>)> {
         validate_source(source)?;
         match (source, subentry_id) {
             ("user", None) | ("reconfigure", Some(_)) => {}
@@ -2308,7 +3656,7 @@ impl ConfigEntries {
             user_input,
             context,
         };
-        self.run_subentry_flow_step(request, driver)
+        Ok((request, driver))
     }
 
     /// Submit user input to an in-progress config/options flow.
@@ -2333,18 +3681,279 @@ impl ConfigEntries {
         }
         let session = entry_session
             .ok_or_else(|| Error::NotFound(format!("unknown config flow {flow_id}")))?;
-        let driver = self.driver(&session.request.domain).ok_or_else(|| {
-            Error::NotFound(format!(
-                "no native integration driver registered for {}",
-                session.request.domain
-            ))
-        })?;
+        if session.phase != FlowPhase::Ready {
+            return Err(Error::InvalidInput(
+                "external flow transitions cannot be submitted as user input".into(),
+            ));
+        }
+        let (driver, driver_generation) = self
+            .driver_registration(&session.request.domain)
+            .ok_or_else(|| Error::NotFound("config flow driver is no longer registered".into()))?;
         let initial_data = session.initial_data;
         let data_kind = session.data_kind;
         let kind = session.kind;
-        let mut request = session.request;
-        request.user_input = Some(user_input);
-        self.run_flow_step(request, kind, driver, initial_data, data_kind)
+        let (request, lease, backup) = self.mutate(|state| {
+            let flow = state
+                .flows
+                .get_mut(flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            if flow.phase != FlowPhase::Ready
+                || flow.revision != session.revision
+                || flow.driver_generation != driver_generation
+                || flow
+                    .driver
+                    .upgrade()
+                    .is_none_or(|registered| !Arc::ptr_eq(&registered, &driver))
+            {
+                return Err(Error::InvalidInput(
+                    "config flow changed before submit".into(),
+                ));
+            }
+            let backup = flow.clone();
+            flow.phase = FlowPhase::Running;
+            flow.revision = flow
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Error::Service("config flow revision exhausted".into()))?;
+            flow.request.user_input = Some(user_input);
+            Ok((flow.request.clone(), external_lease(flow), backup))
+        })?;
+        self.run_flow_step_with_lease(
+            request,
+            kind,
+            driver,
+            initial_data,
+            data_kind,
+            FlowStepGuard {
+                lease: Some(lease),
+                backup: Some(backup),
+            },
+        )
+    }
+
+    /// Submit flow input using the optional asynchronous config-flow callback.
+    /// A single task owns each transition; concurrent callers await the same
+    /// outcome, and dropping one caller does not cancel the owned work.
+    pub async fn submit_flow_async(
+        &self,
+        flow_id: &str,
+        user_input: Map<String, Value>,
+    ) -> Result<Value> {
+        let (session, subentry_session) = {
+            let state = self.lock_state();
+            (
+                state.flows.get(flow_id).cloned(),
+                state.subentry_flows.get(flow_id).cloned(),
+            )
+        };
+        if let Some(session) = subentry_session {
+            if session.phase == FlowPhase::Running {
+                let task = self
+                    .flow_task(flow_id, session.revision)
+                    .ok_or_else(|| Error::Service("subentry flow is already advancing".into()))?;
+                return self.wait_for_flow_task(flow_id, task).await;
+            }
+            if session.phase != FlowPhase::Ready {
+                return Err(Error::InvalidInput("subentry flow is not ready".into()));
+            }
+            if let Some(task) = self.flow_task_any(flow_id) {
+                let _ = self.wait_for_flow_task(flow_id, task).await;
+            }
+            let admission = self.begin_flow_admission()?;
+            let (driver, driver_generation) = self
+                .driver_registration(&session.request.domain)
+                .ok_or_else(|| {
+                    Error::NotFound("subentry flow driver is no longer registered".into())
+                })?;
+            let (request, lease, backup) =
+                {
+                    let control = self
+                        .flow_tasks
+                        .state
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if control.closed {
+                        return Err(Error::Service(
+                            "config flow manager is shutting down".into(),
+                        ));
+                    }
+                    self.mutate(|state| {
+                        let flow = state.subentry_flows.get_mut(flow_id).ok_or_else(|| {
+                            Error::NotFound("unknown config subentry flow".into())
+                        })?;
+                        if flow.phase != FlowPhase::Ready
+                            || flow.revision != session.revision
+                            || flow.driver_generation != driver_generation
+                            || flow
+                                .driver
+                                .upgrade()
+                                .is_none_or(|registered| !Arc::ptr_eq(&registered, &driver))
+                        {
+                            return Err(Error::InvalidInput(
+                                "config subentry flow changed before submit".into(),
+                            ));
+                        }
+                        let backup = flow.clone();
+                        flow.phase = FlowPhase::Running;
+                        flow.revision = flow.revision.checked_add(1).ok_or_else(|| {
+                            Error::Service("subentry flow revision exhausted".into())
+                        })?;
+                        flow.request.user_input = Some(user_input);
+                        Ok((flow.request.clone(), subentry_flow_lease(flow), backup))
+                    })?
+                };
+            return self
+                .run_owned_subentry_flow_task(request, driver, lease, Some(backup), admission)
+                .await;
+        }
+        let session =
+            session.ok_or_else(|| Error::NotFound(format!("unknown config flow {flow_id}")))?;
+        if session.phase == FlowPhase::Running {
+            let task = self
+                .flow_task(flow_id, session.revision)
+                .ok_or_else(|| Error::Service("config flow is already advancing".into()))?;
+            return self.wait_for_flow_task(flow_id, task).await;
+        }
+        if session.phase != FlowPhase::Ready {
+            return Err(Error::InvalidInput(
+                "external flow transitions cannot be submitted as user input".into(),
+            ));
+        }
+        if let Some(task) = self
+            .flow_task_any(flow_id)
+            .filter(|task| task.revision != session.revision)
+        {
+            let _ = self.wait_for_flow_task(flow_id, task).await;
+        }
+        let admission = self.begin_flow_admission()?;
+        let (driver, driver_generation) = self
+            .driver_registration(&session.request.domain)
+            .ok_or_else(|| Error::NotFound("config flow driver is no longer registered".into()))?;
+        let (request, lease, backup) = {
+            let control = self
+                .flow_tasks
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if control.closed {
+                return Err(Error::Service(
+                    "config flow manager is shutting down".into(),
+                ));
+            }
+            self.mutate(|state| {
+                let flow = state
+                    .flows
+                    .get_mut(flow_id)
+                    .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+                if flow.phase != FlowPhase::Ready
+                    || flow.revision != session.revision
+                    || flow.driver_generation != driver_generation
+                    || flow
+                        .driver
+                        .upgrade()
+                        .is_none_or(|registered| !Arc::ptr_eq(&registered, &driver))
+                {
+                    return Err(Error::InvalidInput(
+                        "config flow changed before submit".into(),
+                    ));
+                }
+                let backup = flow.clone();
+                flow.phase = FlowPhase::Running;
+                flow.revision = flow
+                    .revision
+                    .checked_add(1)
+                    .ok_or_else(|| Error::Service("config flow revision exhausted".into()))?;
+                flow.request.user_input = Some(user_input);
+                Ok((flow.request.clone(), external_lease(flow), backup))
+            })?
+        };
+        self.run_owned_flow_task(request, driver, lease, Some(backup), admission)
+            .await
+    }
+
+    /// Refresh the current cached flow result. External-flow hosts claim and
+    /// advance `external_done` through the explicit lease methods first.
+    pub async fn refresh_flow_async(&self, flow_id: &str) -> Result<Value> {
+        let receiver = {
+            let state = self.lock_state();
+            state
+                .flows
+                .get(flow_id)
+                .filter(|flow| flow.phase == FlowPhase::Running)
+                .map(|flow| flow.revision)
+                .or_else(|| {
+                    state
+                        .subentry_flows
+                        .get(flow_id)
+                        .filter(|flow| flow.phase == FlowPhase::Running)
+                        .map(|flow| flow.revision)
+                })
+        };
+        if let Some(revision) = receiver
+            && let Some(task) = self.flow_task(flow_id, revision)
+        {
+            return self.wait_for_flow_task(flow_id, task).await;
+        }
+        self.flow_result(flow_id)
+    }
+
+    /// Abort a flow and cancel any manager-owned async callback task.
+    pub async fn abort_flow_async(&self, flow_id: &str) -> Result<()> {
+        let task = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .tasks
+            .get(flow_id)
+            .cloned();
+        // Even when removing the flow cannot persist, its callback must stop
+        // and its blocking work must be joined before the abort error returns.
+        self.cancel_flow_task(flow_id);
+        let abort_result = self.abort_flow(flow_id);
+        if let Some(task) = task {
+            let _ = self.wait_for_flow_task(flow_id, task).await;
+        }
+        abort_result
+    }
+
+    /// Request cancellation for all in-memory flows without waiting for their
+    /// callbacks. Hosts should call `shutdown_flow_tasks_async` to drain them.
+    pub fn shutdown_flow_tasks(&self) -> usize {
+        {
+            let mut task_state = self
+                .flow_tasks
+                .state
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            task_state.closed = true;
+            for task in task_state.tasks.values() {
+                let _ = task.cancel.send(true);
+            }
+        }
+        let flow_ids = {
+            let _transition = self
+                .flow_transitions
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let mut state = self.lock_state();
+            let mut ids = state.flows.keys().cloned().collect::<Vec<_>>();
+            ids.extend(state.subentry_flows.keys().cloned());
+            state.flows.clear();
+            state.subentry_flows.clear();
+            ids
+        };
+        for flow_id in &flow_ids {
+            let _ = self.notify_flow_progress(flow_id);
+        }
+        flow_ids.len()
+    }
+
+    /// Cancel all in-memory flows and join their owned callbacks during host
+    /// shutdown. Synchronous legacy callbacks already running on the blocking
+    /// pool are allowed to finish, then their stale flow leases are rejected.
+    pub async fn shutdown_flow_tasks_async(&self) -> Result<usize> {
+        Self::wait_for_flow_task_shutdown(self.begin_flow_task_shutdown()).await
     }
 
     /// Return the persisted core configuration.
@@ -2697,6 +4306,844 @@ impl ConfigEntries {
         Ok(())
     }
 
+    fn reserve_initial_async_flow(
+        &self,
+        request: ConfigFlowRequest,
+        kind: FlowKind,
+        driver: Arc<dyn ConfigEntryDriver>,
+        initial_data: Option<Map<String, Value>>,
+        data_kind: Option<DiscoveryDataKind>,
+    ) -> Result<ExternalFlowLease> {
+        let task_control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if task_control.closed {
+            return Err(Error::Service(
+                "config flow manager is shutting down".into(),
+            ));
+        }
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        let registration = registrations
+            .drivers
+            .get(&request.domain)
+            .filter(|registration| Arc::ptr_eq(&registration.driver, &driver))
+            .ok_or_else(|| Error::NotFound("config flow driver registration changed".into()))?;
+        let lease = self.mutate(|state| {
+            if state.flows.contains_key(&request.flow_id)
+                || state.subentry_flows.contains_key(&request.flow_id)
+            {
+                return Err(Error::InvalidInput("config flow ID collision".into()));
+            }
+            let flow = FlowSession {
+                request,
+                kind,
+                initial_data,
+                data_kind,
+                result: Value::Null,
+                phase: FlowPhase::Running,
+                revision: 1,
+                driver_generation: registration.generation,
+                driver: Arc::downgrade(&driver),
+            };
+            let lease = external_lease(&flow);
+            state.flows.insert(flow.request.flow_id.clone(), flow);
+            Ok(lease)
+        })?;
+        drop(registrations);
+        drop(task_control);
+        Ok(lease)
+    }
+
+    async fn run_owned_flow_task(
+        &self,
+        request: ConfigFlowRequest,
+        driver: Arc<dyn ConfigEntryDriver>,
+        lease: ExternalFlowLease,
+        backup: Option<FlowSession>,
+        admission: FlowAdmissionGuard,
+    ) -> Result<Value> {
+        let flow_id = lease.flow_id.clone();
+        let task = match self.ensure_owned_flow_task(request, driver, lease.clone(), backup.clone())
+        {
+            Ok(task) => task,
+            Err(error) => {
+                self.restore_async_flow_after_error(&lease, backup);
+                drop(admission);
+                return Err(error);
+            }
+        };
+        drop(admission);
+        self.wait_for_flow_task(&flow_id, task).await
+    }
+
+    fn ensure_owned_flow_task(
+        &self,
+        request: ConfigFlowRequest,
+        driver: Arc<dyn ConfigEntryDriver>,
+        lease: ExternalFlowLease,
+        backup: Option<FlowSession>,
+    ) -> Result<AsyncFlowTask> {
+        let (sender, receiver) = watch::channel(None);
+        let (start_sender, start_receiver) = tokio::sync::oneshot::channel();
+        let (cancel_sender, mut cancel_receiver) = watch::channel(false);
+        let mut control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if control.closed {
+            return Err(Error::Service(
+                "config flow manager is shutting down".into(),
+            ));
+        }
+        if let Some(existing) = control.tasks.get(&lease.flow_id)
+            && existing.revision == lease.revision
+        {
+            return Ok(existing.clone());
+        }
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        ensure_lease_driver(&registrations, &lease)?;
+        let kind = {
+            let state = self.lock_state();
+            let flow = state
+                .flows
+                .get(&lease.flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            ensure_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+            flow.kind
+        };
+        let manager = self.clone();
+        let callback_lease = lease.clone();
+        let task_driver = Arc::clone(&driver);
+        let task_request = request.clone();
+        let handle = tokio::spawn(async move {
+            if start_receiver.await.is_err() {
+                return;
+            }
+            let callback_result = if *cancel_receiver.borrow() {
+                Err(Error::Service("config flow was aborted".into()))
+            } else if let Some(callback) = match kind {
+                FlowKind::Config => task_driver.config_flow_async(task_request.clone()),
+                FlowKind::Options => None,
+            } {
+                let mut callback = AbortOnDropJoin::new(tokio::spawn(callback));
+                tokio::select! {
+                    result = &mut callback => match result {
+                        Ok(result) => result,
+                        Err(error) => Err(Error::Service(format!(
+                            "async config-flow driver failed: {error}"
+                        ))),
+                    },
+                    changed = cancel_receiver.changed() => {
+                        let _ = changed;
+                        callback.0.abort();
+                        let _ = callback.await;
+                        Err(Error::Service("config flow was aborted".into()))
+                    }
+                }
+            } else {
+                let sync_driver = Arc::clone(&task_driver);
+                let sync_request = task_request.clone();
+                let worker = tokio::task::spawn_blocking(move || match kind {
+                    FlowKind::Config => sync_driver.config_flow(&sync_request),
+                    FlowKind::Options => sync_driver.options_flow(&sync_request),
+                });
+                let result = match worker.await {
+                    Ok(result) => result,
+                    Err(error) => Err(Error::Service(format!(
+                        "config-flow worker failed: {error}"
+                    ))),
+                };
+                if *cancel_receiver.borrow() {
+                    Err(Error::Service("config flow was aborted".into()))
+                } else {
+                    result
+                }
+            };
+            // Capability/setup/continuation callbacks are synchronous too.
+            // Keep their real completion owned without blocking a Tokio worker.
+            let outcome = tokio::task::spawn_blocking(move || match callback_result {
+                Ok(result) => manager.commit_async_flow_result(
+                    callback_lease.clone(),
+                    task_request.clone(),
+                    kind,
+                    result,
+                ),
+                Err(error) => {
+                    manager.restore_async_flow_after_error(&callback_lease, backup);
+                    Err(error)
+                }
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Err(Error::Service(format!(
+                    "config flow completion failed: {error}"
+                )))
+            });
+            let _ = sender.send(Some(outcome));
+        });
+        let task = AsyncFlowTask {
+            revision: lease.revision,
+            result: receiver.clone(),
+            cancel: cancel_sender,
+            join: Arc::new(OwnedFlowTaskJoin::new(handle)),
+        };
+        control.tasks.insert(lease.flow_id.clone(), task.clone());
+        drop(registrations);
+        drop(control);
+        let _ = start_sender.send(());
+        Ok(task)
+    }
+
+    fn reserve_initial_async_subentry_flow(
+        &self,
+        request: ConfigSubentryFlowRequest,
+        driver: Arc<dyn ConfigEntryDriver>,
+    ) -> Result<SubentryFlowLease> {
+        let control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if control.closed {
+            return Err(Error::Service(
+                "config flow manager is shutting down".into(),
+            ));
+        }
+        let (registered, driver_generation) =
+            self.driver_registration(&request.domain).ok_or_else(|| {
+                Error::NotFound("subentry flow driver is no longer registered".into())
+            })?;
+        if !Arc::ptr_eq(&registered, &driver) {
+            return Err(Error::NotFound(
+                "subentry flow driver registration changed".into(),
+            ));
+        }
+        let lease = self.mutate(|state| {
+            if state.flows.contains_key(&request.flow_id)
+                || state.subentry_flows.contains_key(&request.flow_id)
+            {
+                return Err(Error::InvalidInput("config flow ID collision".into()));
+            }
+            let flow = ConfigSubentryFlowSession {
+                request,
+                result: Value::Null,
+                phase: FlowPhase::Running,
+                revision: 1,
+                driver_generation,
+                driver: Arc::downgrade(&driver),
+            };
+            let lease = subentry_flow_lease(&flow);
+            state
+                .subentry_flows
+                .insert(flow.request.flow_id.clone(), flow);
+            Ok(lease)
+        })?;
+        drop(control);
+        Ok(lease)
+    }
+
+    async fn run_owned_subentry_flow_task(
+        &self,
+        request: ConfigSubentryFlowRequest,
+        driver: Arc<dyn ConfigEntryDriver>,
+        lease: SubentryFlowLease,
+        backup: Option<ConfigSubentryFlowSession>,
+        admission: FlowAdmissionGuard,
+    ) -> Result<Value> {
+        let flow_id = lease.flow_id.clone();
+        let task = match self.ensure_owned_subentry_flow_task(
+            request,
+            driver,
+            lease.clone(),
+            backup.clone(),
+        ) {
+            Ok(task) => task,
+            Err(error) => {
+                self.restore_async_subentry_flow_after_error(&lease, backup);
+                drop(admission);
+                return Err(error);
+            }
+        };
+        drop(admission);
+        self.wait_for_flow_task(&flow_id, task).await
+    }
+
+    fn ensure_owned_subentry_flow_task(
+        &self,
+        request: ConfigSubentryFlowRequest,
+        driver: Arc<dyn ConfigEntryDriver>,
+        lease: SubentryFlowLease,
+        backup: Option<ConfigSubentryFlowSession>,
+    ) -> Result<AsyncFlowTask> {
+        let (sender, receiver) = watch::channel(None);
+        let (start_sender, start_receiver) = tokio::sync::oneshot::channel();
+        let (cancel_sender, cancel_receiver) = watch::channel(false);
+        let mut control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if control.closed {
+            return Err(Error::Service(
+                "config flow manager is shutting down".into(),
+            ));
+        }
+        if let Some(existing) = control.tasks.get(&lease.flow_id)
+            && existing.revision == lease.revision
+        {
+            return Ok(existing.clone());
+        }
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        let registration = registrations
+            .drivers
+            .get(&lease.domain)
+            .ok_or_else(|| Error::NotFound("subentry flow driver is not registered".into()))?;
+        let same_driver = lease
+            .driver
+            .upgrade()
+            .is_some_and(|registered| Arc::ptr_eq(&registered, &registration.driver));
+        if registration.generation != lease.driver_generation || !same_driver {
+            return Err(Error::NotFound(
+                "subentry flow driver registration changed".into(),
+            ));
+        }
+        {
+            let state = self.lock_state();
+            let flow = state
+                .subentry_flows
+                .get(&lease.flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config subentry flow".into()))?;
+            ensure_subentry_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+        }
+        let manager = self.clone();
+        let callback_lease = lease.clone();
+        let task_driver = Arc::clone(&driver);
+        let task_request = request.clone();
+        let handle = tokio::spawn(async move {
+            if start_receiver.await.is_err() {
+                return;
+            }
+            let callback_result = if *cancel_receiver.borrow() {
+                Err(Error::Service("config subentry flow was aborted".into()))
+            } else {
+                let callback_driver = Arc::clone(&task_driver);
+                let callback_request = task_request.clone();
+                match tokio::task::spawn_blocking(move || {
+                    callback_driver.subentry_flow(&callback_request)
+                })
+                .await
+                {
+                    Ok(result) if !*cancel_receiver.borrow() => result,
+                    Ok(_) => Err(Error::Service("config subentry flow was aborted".into())),
+                    Err(error) => Err(Error::Service(format!(
+                        "subentry config-flow worker failed: {error}"
+                    ))),
+                }
+            };
+            let outcome = tokio::task::spawn_blocking(move || match callback_result {
+                Ok(result) => manager.commit_async_subentry_flow_result(
+                    callback_lease.clone(),
+                    task_request.clone(),
+                    result,
+                ),
+                Err(error) => {
+                    manager.restore_async_subentry_flow_after_error(&callback_lease, backup);
+                    Err(error)
+                }
+            })
+            .await
+            .unwrap_or_else(|error| {
+                Err(Error::Service(format!(
+                    "subentry flow completion failed: {error}"
+                )))
+            });
+            let _ = sender.send(Some(outcome));
+        });
+        let task = AsyncFlowTask {
+            revision: lease.revision,
+            result: receiver,
+            cancel: cancel_sender,
+            join: Arc::new(OwnedFlowTaskJoin::new(handle)),
+        };
+        control.tasks.insert(lease.flow_id.clone(), task.clone());
+        drop(registrations);
+        drop(control);
+        let _ = start_sender.send(());
+        Ok(task)
+    }
+
+    fn restore_async_subentry_flow_after_error(
+        &self,
+        lease: &SubentryFlowLease,
+        backup: Option<ConfigSubentryFlowSession>,
+    ) {
+        let control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if control.closed {
+            return;
+        }
+        let _ = self.mutate(|state| {
+            let Some(current) = state.subentry_flows.get(&lease.flow_id) else {
+                return Ok(());
+            };
+            if ensure_subentry_flow_matches_lease(current, lease, FlowPhase::Running).is_err() {
+                return Ok(());
+            }
+            if let Some(mut backup) = backup {
+                backup.phase = FlowPhase::Ready;
+                backup.revision = current.revision.saturating_add(1);
+                backup.request.user_input = None;
+                state.subentry_flows.insert(lease.flow_id.clone(), backup);
+            } else {
+                state.subentry_flows.remove(&lease.flow_id);
+            }
+            Ok(())
+        });
+    }
+
+    fn commit_async_subentry_flow_result(
+        &self,
+        lease: SubentryFlowLease,
+        request: ConfigSubentryFlowRequest,
+        result: ConfigSubentryFlowResult,
+    ) -> Result<Value> {
+        let control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if control.closed {
+            return Err(Error::Service(
+                "config flow manager is shutting down".into(),
+            ));
+        }
+        match result {
+            result @ ConfigSubentryFlowResult::Form { .. } => {
+                let ConfigSubentryFlowResult::Form { step_id, .. } = &result else {
+                    unreachable!("form result matched above")
+                };
+                let mut stored_request = request.clone();
+                stored_request.step_id = step_id.clone();
+                stored_request.user_input = None;
+                let result_json = subentry_flow_result_json(&request, &result, None);
+                let _transition = self
+                    .flow_transitions
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                self.mutate(|state| {
+                    let flow = state
+                        .subentry_flows
+                        .get_mut(&lease.flow_id)
+                        .ok_or_else(|| Error::NotFound("unknown config subentry flow".into()))?;
+                    ensure_subentry_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+                    flow.request = stored_request;
+                    flow.result = result_json.clone();
+                    flow.phase = FlowPhase::Ready;
+                    flow.revision = flow
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Service("subentry flow revision exhausted".into()))?;
+                    Ok(())
+                })?;
+                drop(_transition);
+                drop(control);
+                self.notify_flow_progress(&request.flow_id)?;
+                Ok(result_json)
+            }
+            result @ ConfigSubentryFlowResult::Abort { .. } => {
+                let result_json = subentry_flow_result_json(&request, &result, None);
+                let _transition = self
+                    .flow_transitions
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                self.mutate(|state| {
+                    let flow = state
+                        .subentry_flows
+                        .get(&lease.flow_id)
+                        .ok_or_else(|| Error::NotFound("unknown config subentry flow".into()))?;
+                    ensure_subentry_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+                    state.subentry_flows.remove(&lease.flow_id);
+                    Ok(())
+                })?;
+                drop(_transition);
+                drop(control);
+                self.notify_flow_progress(&request.flow_id)?;
+                Ok(result_json)
+            }
+            result @ ConfigSubentryFlowResult::CreateEntry { .. } => {
+                let _transition = self
+                    .flow_transitions
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                {
+                    let state = self.lock_state();
+                    let flow = state
+                        .subentry_flows
+                        .get(&lease.flow_id)
+                        .ok_or_else(|| Error::NotFound("unknown config subentry flow".into()))?;
+                    ensure_subentry_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+                }
+                let result_json = match self.finish_subentry_flow(&request, &result) {
+                    Ok(subentry) => subentry_flow_result_json(&request, &result, Some(subentry)),
+                    Err(Error::InvalidInput(message)) if message == SUBENTRY_ALREADY_CONFIGURED => {
+                        let duplicate = ConfigSubentryFlowResult::Abort {
+                            reason: "already_configured".into(),
+                        };
+                        subentry_flow_result_json(&request, &duplicate, None)
+                    }
+                    Err(error) => return Err(error),
+                };
+                self.mutate(|state| {
+                    let flow = state
+                        .subentry_flows
+                        .get(&lease.flow_id)
+                        .ok_or_else(|| Error::NotFound("unknown config subentry flow".into()))?;
+                    ensure_subentry_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+                    state.subentry_flows.remove(&lease.flow_id);
+                    Ok(())
+                })?;
+                drop(_transition);
+                drop(control);
+                self.notify_flow_progress(&request.flow_id)?;
+                Ok(result_json)
+            }
+            result @ ConfigSubentryFlowResult::UpdateAndAbort { .. } => {
+                let _transition = self
+                    .flow_transitions
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                {
+                    let state = self.lock_state();
+                    let flow = state
+                        .subentry_flows
+                        .get(&lease.flow_id)
+                        .ok_or_else(|| Error::NotFound("unknown config subentry flow".into()))?;
+                    ensure_subentry_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+                }
+                let (reason, reload) = match self
+                    .finish_subentry_reconfigure_without_reload(&request, &result)
+                {
+                    Ok(value) => value,
+                    Err(Error::InvalidInput(message)) if message == SUBENTRY_ALREADY_CONFIGURED => {
+                        ("already_configured".into(), false)
+                    }
+                    Err(error) => return Err(error),
+                };
+                let abort = ConfigSubentryFlowResult::Abort { reason };
+                let result_json = subentry_flow_result_json(&request, &abort, None);
+                self.mutate(|state| {
+                    let flow = state
+                        .subentry_flows
+                        .get(&lease.flow_id)
+                        .ok_or_else(|| Error::NotFound("unknown config subentry flow".into()))?;
+                    ensure_subentry_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+                    state.subentry_flows.remove(&lease.flow_id);
+                    Ok(())
+                })?;
+                drop(_transition);
+                drop(control);
+                if reload {
+                    let _ = self.reload_entry(&request.entry_id);
+                }
+                self.notify_flow_progress(&request.flow_id)?;
+                Ok(result_json)
+            }
+        }
+    }
+
+    fn restore_async_flow_after_error(
+        &self,
+        lease: &ExternalFlowLease,
+        backup: Option<FlowSession>,
+    ) {
+        let control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if control.closed {
+            return;
+        }
+        let _ = self.mutate(|state| {
+            let Some(current) = state.flows.get(&lease.flow_id) else {
+                return Ok(());
+            };
+            if ensure_flow_matches_lease(current, lease, FlowPhase::Running).is_err() {
+                return Ok(());
+            }
+            if let Some(mut backup) = backup {
+                backup.phase = FlowPhase::Ready;
+                backup.revision = current.revision.saturating_add(1);
+                backup.request.user_input = None;
+                state.flows.insert(lease.flow_id.clone(), backup);
+            } else {
+                state.flows.remove(&lease.flow_id);
+            }
+            Ok(())
+        });
+    }
+
+    fn commit_async_flow_result(
+        &self,
+        lease: ExternalFlowLease,
+        request: ConfigFlowRequest,
+        kind: FlowKind,
+        result: ConfigFlowResult,
+    ) -> Result<Value> {
+        let control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if control.closed {
+            return Err(Error::Service(
+                "config flow manager is shutting down".into(),
+            ));
+        }
+        match result {
+            result @ (ConfigFlowResult::Form { .. }
+            | ConfigFlowResult::ExternalStep { .. }
+            | ConfigFlowResult::ExternalDone { .. }) => {
+                let (step_id, phase) = match &result {
+                    ConfigFlowResult::Form { step_id, .. } => (step_id.clone(), FlowPhase::Ready),
+                    ConfigFlowResult::ExternalStep { step_id, .. } => {
+                        (step_id.clone(), FlowPhase::AwaitingExternalCallback)
+                    }
+                    ConfigFlowResult::ExternalDone { step_id } => {
+                        (step_id.clone(), FlowPhase::ExternalDone)
+                    }
+                    _ => unreachable!(),
+                };
+                validate_flow_step(&step_id)?;
+                let mut stored_request = request.clone();
+                stored_request.step_id = step_id;
+                stored_request.user_input = None;
+                let result_json = flow_result_json(&request, kind, &result, None, None);
+                let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+                ensure_lease_driver(&registrations, &lease)?;
+                let discovery_entry = self.mutate(|state| {
+                    let flow = state
+                        .flows
+                        .get_mut(&lease.flow_id)
+                        .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+                    ensure_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+                    if flow.kind != kind {
+                        return Err(Error::InvalidInput(
+                            "async config flow type mismatch".into(),
+                        ));
+                    }
+                    flow.request = stored_request;
+                    flow.result = result_json.clone();
+                    flow.phase = phase;
+                    flow.revision = flow
+                        .revision
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Service("config flow revision exhausted".into()))?;
+                    if kind != FlowKind::Config {
+                        return Ok(None);
+                    }
+                    let Some(key) = discovery_key_from_context(&request.context) else {
+                        return Ok(None);
+                    };
+                    let Some(unique_id) = request.unique_id.as_deref() else {
+                        return Ok(None);
+                    };
+                    let Some(entry_id) = state
+                        .entries
+                        .values()
+                        .find(|entry| {
+                            entry.domain == request.domain
+                                && entry.unique_id.as_deref() == Some(unique_id)
+                        })
+                        .map(|entry| entry.entry_id.clone())
+                    else {
+                        return Ok(None);
+                    };
+                    let entry = state
+                        .entries
+                        .get_mut(&entry_id)
+                        .expect("discovery entry was found in the same mutation");
+                    if record_discovery_key(entry, key) {
+                        entry.modified_at = Utc::now();
+                        Ok(Some(entry.clone()))
+                    } else {
+                        Ok(None)
+                    }
+                })?;
+                drop(control);
+                drop(registrations);
+                if let Some(entry) = discovery_entry {
+                    self.emit_public_entry_change("updated", &entry)?;
+                }
+                self.notify_flow_progress(&lease.flow_id)?;
+                Ok(result_json)
+            }
+            ConfigFlowResult::Abort { .. } | ConfigFlowResult::CreateEntry { .. } => {
+                drop(control);
+                let plan = self.commit_running_flow_completion(lease, result)?;
+                self.finish_external_flow(plan)
+            }
+        }
+    }
+
+    fn commit_running_flow_completion(
+        &self,
+        lease: ExternalFlowLease,
+        result: ConfigFlowResult,
+    ) -> Result<DeferredExternalFlowCompletion> {
+        let control = self
+            .flow_tasks
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if control.closed {
+            return Err(Error::Service(
+                "config flow manager is shutting down".into(),
+            ));
+        }
+        let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+        ensure_lease_driver(&registrations, &lease)?;
+        let registration = registrations
+            .drivers
+            .get(&lease.domain)
+            .ok_or_else(|| Error::NotFound("config flow driver is not registered".into()))?;
+        let driver = Arc::clone(&registration.driver);
+        let (request, kind, entry, action) = self.mutate(|state| {
+            let flow = state
+                .flows
+                .get(&lease.flow_id)
+                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            ensure_flow_matches_lease(flow, &lease, FlowPhase::Running)?;
+            let kind = flow.kind;
+            let request = flow.request.clone();
+            let (entry, action) = match &result {
+                ConfigFlowResult::Abort { .. } => (None, DeferredFlowAction::Abort),
+                ConfigFlowResult::CreateEntry {
+                    title,
+                    data,
+                    options,
+                    unique_id,
+                    version,
+                    minor_version,
+                } if kind == FlowKind::Options => {
+                    let entry_id = request.entry_id.as_deref().ok_or_else(|| {
+                        Error::InvalidInput("options flow is missing entry_id".into())
+                    })?;
+                    let current = state
+                        .entries
+                        .get_mut(entry_id)
+                        .ok_or_else(|| Error::NotFound("Config entry not found".into()))?;
+                    if current.domain != request.domain {
+                        return Err(Error::InvalidInput("options flow domain mismatch".into()));
+                    }
+                    let _ = (title, data, unique_id, version, minor_version);
+                    current.options = options.clone();
+                    current.modified_at = Utc::now();
+                    (Some(current.clone()), DeferredFlowAction::Options)
+                }
+                ConfigFlowResult::CreateEntry {
+                    title,
+                    data,
+                    options,
+                    unique_id,
+                    version,
+                    minor_version,
+                } => match request.source.as_str() {
+                    "reauth" | "reconfigure" => {
+                        let entry_id = request.entry_id.as_deref().ok_or_else(|| {
+                            Error::InvalidInput(format!(
+                                "{} flow is missing entry_id",
+                                request.source
+                            ))
+                        })?;
+                        let snapshot = state
+                            .entries
+                            .get(entry_id)
+                            .cloned()
+                            .ok_or_else(|| Error::NotFound("Config entry not found".into()))?;
+                        if snapshot.domain != request.domain {
+                            return Err(Error::InvalidInput("config flow domain mismatch".into()));
+                        }
+                        let next_unique = unique_id.as_deref().or(snapshot.unique_id.as_deref());
+                        ensure_unique_id(
+                            &state.entries,
+                            &snapshot.domain,
+                            next_unique,
+                            Some(entry_id),
+                        )?;
+                        let current = state
+                            .entries
+                            .get_mut(entry_id)
+                            .expect("the existing config entry was read from this mutation");
+                        current.title = title.trim().to_owned();
+                        current.data = data.clone();
+                        current.options = options.clone();
+                        current.unique_id = next_unique.map(str::to_owned);
+                        current.version = *version;
+                        current.minor_version = *minor_version;
+                        current.needs_reauth = false;
+                        current.modified_at = Utc::now();
+                        let committed = current.clone();
+                        (
+                            Some(committed),
+                            if request.source == "reauth" {
+                                DeferredFlowAction::Reauth
+                            } else {
+                                DeferredFlowAction::Reconfigure
+                            },
+                        )
+                    }
+                    _ => {
+                        let mut seed = NewConfigEntry::new(&request.domain, title, data.clone());
+                        seed.source = request.source.clone();
+                        seed.unique_id = unique_id.clone().or_else(|| request.unique_id.clone());
+                        seed.version = *version;
+                        seed.minor_version = *minor_version;
+                        seed.options = options.clone();
+                        validate_new_entry(&seed)?;
+                        let entry = new_entry_from_seed(
+                            seed,
+                            Uuid::new_v4().to_string(),
+                            &driver,
+                            discovery_key_from_context(&request.context),
+                        );
+                        ensure_unique_id(
+                            &state.entries,
+                            &entry.domain,
+                            entry.unique_id.as_deref(),
+                            None,
+                        )?;
+                        state.entries.insert(entry.entry_id.clone(), entry.clone());
+                        (Some(entry), DeferredFlowAction::Create)
+                    }
+                },
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "async flow completion accepts only CreateEntry or Abort".into(),
+                    ));
+                }
+            };
+            state.flows.remove(&lease.flow_id);
+            Ok((request, kind, entry, action))
+        })?;
+        drop(control);
+        drop(registrations);
+        Ok(DeferredExternalFlowCompletion {
+            request,
+            kind,
+            result,
+            entry,
+            driver,
+            action,
+        })
+    }
+
     fn run_flow_step(
         &self,
         request: ConfigFlowRequest,
@@ -2705,37 +5152,120 @@ impl ConfigEntries {
         initial_data: Option<Map<String, Value>>,
         data_kind: Option<DiscoveryDataKind>,
     ) -> Result<Value> {
+        self.run_flow_step_with_lease(
+            request,
+            kind,
+            driver,
+            initial_data,
+            data_kind,
+            FlowStepGuard {
+                lease: None,
+                backup: None,
+            },
+        )
+    }
+
+    fn run_flow_step_with_lease(
+        &self,
+        request: ConfigFlowRequest,
+        kind: FlowKind,
+        driver: Arc<dyn ConfigEntryDriver>,
+        initial_data: Option<Map<String, Value>>,
+        data_kind: Option<DiscoveryDataKind>,
+        guard: FlowStepGuard,
+    ) -> Result<Value> {
+        let _admission = self.begin_flow_admission()?;
+        let FlowStepGuard { lease, backup } = guard;
+        let (registered_driver, driver_generation) = self
+            .driver_registration(&request.domain)
+            .ok_or_else(|| Error::NotFound("config flow driver is no longer registered".into()))?;
+        if !Arc::ptr_eq(&registered_driver, &driver) {
+            return Err(Error::NotFound(
+                "config flow driver registration changed".into(),
+            ));
+        }
         let result = match kind {
-            FlowKind::Config => driver.config_flow(&request)?,
-            FlowKind::Options => driver.options_flow(&request)?,
+            FlowKind::Config => driver.config_flow(&request),
+            FlowKind::Options => driver.options_flow(&request),
         };
-        if kind == FlowKind::Config && !matches!(&result, ConfigFlowResult::CreateEntry { .. }) {
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(lease) = lease.as_ref() {
+                    self.restore_async_flow_after_error(lease, backup);
+                }
+                return Err(error);
+            }
+        };
+        if lease.is_none()
+            && kind == FlowKind::Config
+            && !matches!(&result, ConfigFlowResult::CreateEntry { .. })
+        {
             self.associate_flow_discovery_key(&request)?;
         }
         match &result {
-            ConfigFlowResult::Form { step_id, .. } => {
+            ConfigFlowResult::Form { step_id, .. }
+            | ConfigFlowResult::ExternalStep { step_id, .. }
+            | ConfigFlowResult::ExternalDone { step_id } => {
                 let mut stored_request = request.clone();
                 stored_request.step_id = step_id.clone();
                 stored_request.user_input = None;
                 let flow_id = request.flow_id.clone();
                 let result_json = flow_result_json(&request, kind, &result, None, None);
+                let phase = match result {
+                    ConfigFlowResult::ExternalStep { .. } => FlowPhase::AwaitingExternalCallback,
+                    ConfigFlowResult::ExternalDone { .. } => FlowPhase::ExternalDone,
+                    _ => FlowPhase::Ready,
+                };
+                let _registered = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+                let current = _registered.drivers.get(&request.domain).ok_or_else(|| {
+                    Error::NotFound("config flow driver registration changed".into())
+                })?;
+                if current.generation != driver_generation || !Arc::ptr_eq(&current.driver, &driver)
+                {
+                    return Err(Error::NotFound(
+                        "config flow driver registration changed".into(),
+                    ));
+                }
                 self.mutate(|state| {
-                    state.flows.insert(
-                        flow_id.clone(),
-                        FlowSession {
-                            request: stored_request,
-                            kind,
-                            initial_data,
-                            data_kind,
-                            result: result_json.clone(),
-                        },
-                    );
+                    if let Some(lease) = lease.as_ref() {
+                        let flow = state
+                            .flows
+                            .get_mut(&lease.flow_id)
+                            .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+                        ensure_flow_matches_lease(flow, lease, FlowPhase::Running)?;
+                        flow.request = stored_request;
+                        flow.result = result_json.clone();
+                        flow.phase = phase;
+                        flow.revision = flow.revision.checked_add(1).ok_or_else(|| {
+                            Error::Service("config flow revision exhausted".into())
+                        })?;
+                    } else {
+                        state.flows.insert(
+                            flow_id.clone(),
+                            FlowSession {
+                                request: stored_request,
+                                kind,
+                                initial_data: initial_data.clone(),
+                                data_kind,
+                                result: result_json.clone(),
+                                phase,
+                                revision: 1,
+                                driver_generation,
+                                driver: Arc::downgrade(&driver),
+                            },
+                        );
+                    }
                     Ok(())
                 })?;
                 self.notify_flow_progress(&request.flow_id)?;
                 Ok(result_json)
             }
             ConfigFlowResult::Abort { .. } => {
+                if let Some(lease) = lease {
+                    let plan = self.commit_running_flow_completion(lease, result.clone())?;
+                    return self.finish_external_flow(plan);
+                }
                 self.mutate(|state| {
                     state.flows.remove(&request.flow_id);
                     Ok(())
@@ -2744,6 +5274,10 @@ impl ConfigEntries {
                 Ok(flow_result_json(&request, kind, &result, None, None))
             }
             ConfigFlowResult::CreateEntry { .. } => {
+                if let Some(lease) = lease {
+                    let plan = self.commit_running_flow_completion(lease, result.clone())?;
+                    return self.finish_external_flow(plan);
+                }
                 let entry = self.finish_flow(&request, kind, &result)?;
                 let next_flow = if kind == FlowKind::Config
                     && !matches!(request.source.as_str(), "reauth" | "reconfigure")
@@ -2802,6 +5336,16 @@ impl ConfigEntries {
         request: ConfigSubentryFlowRequest,
         driver: Arc<dyn ConfigEntryDriver>,
     ) -> Result<Value> {
+        let _admission = self.begin_flow_admission()?;
+        let (registered, driver_generation) =
+            self.driver_registration(&request.domain).ok_or_else(|| {
+                Error::NotFound("subentry flow driver is no longer registered".into())
+            })?;
+        if !Arc::ptr_eq(&registered, &driver) {
+            return Err(Error::NotFound(
+                "subentry flow driver registration changed".into(),
+            ));
+        }
         let result = driver.subentry_flow(&request)?;
         match &result {
             ConfigSubentryFlowResult::Form { step_id, .. } => {
@@ -2810,21 +5354,43 @@ impl ConfigEntries {
                 stored_request.user_input = None;
                 let flow_id = request.flow_id.clone();
                 let result_json = subentry_flow_result_json(&request, &result, None);
+                let registrations = self.drivers.read().unwrap_or_else(PoisonError::into_inner);
+                let current_registration =
+                    registrations.drivers.get(&request.domain).ok_or_else(|| {
+                        Error::NotFound("subentry flow driver is no longer registered".into())
+                    })?;
+                if current_registration.generation != driver_generation
+                    || !Arc::ptr_eq(&current_registration.driver, &driver)
+                {
+                    return Err(Error::NotFound(
+                        "subentry flow driver registration changed".into(),
+                    ));
+                }
                 self.mutate(|state| {
-                    if state.flows.contains_key(&flow_id)
-                        || state.subentry_flows.contains_key(&flow_id)
-                    {
+                    if state.flows.contains_key(&flow_id) {
                         return Err(Error::InvalidInput("config flow ID collision".into()));
                     }
+                    let revision = state
+                        .subentry_flows
+                        .get(&flow_id)
+                        .map(|flow| flow.revision)
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .ok_or_else(|| Error::Service("subentry flow revision exhausted".into()))?;
                     state.subentry_flows.insert(
                         flow_id.clone(),
                         ConfigSubentryFlowSession {
                             request: stored_request,
                             result: result_json.clone(),
+                            phase: FlowPhase::Ready,
+                            revision,
+                            driver_generation,
+                            driver: Arc::downgrade(&driver),
                         },
                     );
                     Ok(())
                 })?;
+                drop(registrations);
                 self.notify_flow_progress(&request.flow_id)?;
                 Ok(result_json)
             }
@@ -2912,6 +5478,21 @@ impl ConfigEntries {
         request: &ConfigSubentryFlowRequest,
         result: &ConfigSubentryFlowResult,
     ) -> Result<String> {
+        let (reason, reload) = self.finish_subentry_reconfigure_without_reload(request, result)?;
+        if reload {
+            // The pinned flow schedules the parent reload independently of its
+            // abort result. This synchronous manager completes that reload and
+            // leaves any setup failure visible on the parent entry.
+            let _ = self.reload_entry(&request.entry_id);
+        }
+        Ok(reason)
+    }
+
+    fn finish_subentry_reconfigure_without_reload(
+        &self,
+        request: &ConfigSubentryFlowRequest,
+        result: &ConfigSubentryFlowResult,
+    ) -> Result<(String, bool)> {
         let ConfigSubentryFlowResult::UpdateAndAbort {
             update,
             data_updates,
@@ -2946,15 +5527,12 @@ impl ConfigEntries {
             update.data = Some(data);
         }
         self.update_subentry(&request.entry_id, subentry_id, update)?;
-        if *reload {
-            // The pinned flow schedules the parent reload independently of its
-            // abort result. This synchronous manager completes that reload and
-            // leaves any setup failure visible on the parent entry.
-            let _ = self.reload_entry(&request.entry_id);
-        }
-        Ok(reason
-            .clone()
-            .unwrap_or_else(|| "reconfigure_successful".into()))
+        Ok((
+            reason
+                .clone()
+                .unwrap_or_else(|| "reconfigure_successful".into()),
+            *reload,
+        ))
     }
 
     fn finish_flow(
@@ -3041,10 +5619,30 @@ impl ConfigEntries {
             .values()
             .filter(|flow| !matches!(flow.request.source.as_str(), "user" | "reconfigure"))
             .map(|flow| {
+                let context = if matches!(
+                    flow.phase,
+                    FlowPhase::AwaitingExternalCallback
+                        | FlowPhase::ResolvingExternalCallback
+                        | FlowPhase::ExternalDone
+                        | FlowPhase::ResolvingExternalDone
+                ) {
+                    ["entry_id", "source"]
+                        .into_iter()
+                        .filter_map(|key| {
+                            flow.request
+                                .context
+                                .get(key)
+                                .cloned()
+                                .map(|value| (key.to_owned(), value))
+                        })
+                        .collect::<Map<String, Value>>()
+                } else {
+                    public_flow_context(&flow.request.context)
+                };
                 json!({
                     "flow_id": flow.request.flow_id,
                     "handler": flow.request.domain,
-                    "context": flow.request.context,
+                    "context": context,
                     "step_id": flow.request.step_id,
                     "type": match flow.kind { FlowKind::Config => "config_flow", FlowKind::Options => "options_flow" },
                 })
@@ -3099,19 +5697,22 @@ impl ConfigEntries {
     }
 
     fn reload_entry_locked(&self, entry_id: &str) -> Result<()> {
-        let entry = self.require_entry(entry_id)?;
-        if entry.state.is_loaded() {
-            self.unload_entry_locked(entry_id)?;
-        }
-        self.update_entry_metadata(entry_id, |current| {
-            current.state = ConfigEntryState::NotLoaded;
-            current.reason = None;
-            current.modified_at = Utc::now();
-        })?;
-        self.setup_entry_locked(entry_id).map(|_| ())
+        let mut notification_error = None;
+        let result = self.reload_entry_with_notifications(entry_id, &mut notification_error);
+        finish_lifecycle_notifications(result, notification_error).map(|_| ())
     }
 
     fn setup_entry_locked(&self, entry_id: &str) -> Result<ConfigEntry> {
+        let mut notification_error = None;
+        let result = self.setup_entry_with_notifications(entry_id, &mut notification_error);
+        finish_lifecycle_notifications(result, notification_error)
+    }
+
+    fn setup_entry_with_notifications(
+        &self,
+        entry_id: &str,
+        notification_error: &mut Option<Error>,
+    ) -> Result<ConfigEntry> {
         // `setup_entry` owns the same operation lock, so its implementation is
         // mirrored here for callers already holding the lifecycle lock.
         let entry = self.require_entry(entry_id)?;
@@ -3132,7 +5733,8 @@ impl ConfigEntries {
         let driver = match driver {
             Ok(driver) => driver,
             Err(error) => {
-                self.update_entry_state(
+                self.update_lifecycle_state(
+                    notification_error,
                     entry_id,
                     ConfigEntryState::SetupError,
                     Some(error.to_string()),
@@ -3145,12 +5747,24 @@ impl ConfigEntries {
         if (version, minor) != (entry.version, entry.minor_version) {
             self.migrate_entry_locked(entry_id, &driver, version, minor)?;
         }
-        self.update_entry_state(entry_id, ConfigEntryState::SetupInProgress, None, None)?;
+        self.update_lifecycle_state(
+            notification_error,
+            entry_id,
+            ConfigEntryState::SetupInProgress,
+            None,
+            None,
+        )?;
         let entry = self.require_entry(entry_id)?;
         match driver.setup(&self.runtime, &entry) {
             Ok(SetupOutcome::Ready) => {
-                self.update_entry_state(entry_id, ConfigEntryState::Loaded, None, None)?;
-                self.update_entry_metadata(entry_id, |current| {
+                self.update_lifecycle_state(
+                    notification_error,
+                    entry_id,
+                    ConfigEntryState::Loaded,
+                    None,
+                    None,
+                )?;
+                self.update_lifecycle_metadata(notification_error, entry_id, |current| {
                     current.retry_attempts = 0;
                     current.retry_at = None;
                     current.require_reload = false;
@@ -3162,7 +5776,8 @@ impl ConfigEntries {
                     let error = Error::InvalidInput(format!(
                         "retry delay must be between 1 and {MAX_RETRY_DELAY_SECS} seconds"
                     ));
-                    self.update_entry_state(
+                    self.update_lifecycle_state(
+                        notification_error,
                         entry_id,
                         ConfigEntryState::SetupError,
                         Some(error.to_string()),
@@ -3171,7 +5786,7 @@ impl ConfigEntries {
                     return Err(error);
                 }
                 let retry_at = Utc::now() + Duration::seconds(seconds as i64);
-                self.update_entry_metadata(entry_id, |current| {
+                self.update_lifecycle_metadata(notification_error, entry_id, |current| {
                     current.state = ConfigEntryState::SetupRetry;
                     current.retry_attempts = current.retry_attempts.saturating_add(1);
                     current.retry_at = Some(retry_at);
@@ -3181,7 +5796,8 @@ impl ConfigEntries {
                 self.require_entry(entry_id)
             }
             Err(error) => {
-                self.update_entry_state(
+                self.update_lifecycle_state(
+                    notification_error,
                     entry_id,
                     ConfigEntryState::SetupError,
                     Some(error.to_string()),
@@ -3193,6 +5809,16 @@ impl ConfigEntries {
     }
 
     fn unload_entry_locked(&self, entry_id: &str) -> Result<()> {
+        let mut notification_error = None;
+        let result = self.unload_entry_with_notifications(entry_id, &mut notification_error);
+        finish_lifecycle_notifications(result, notification_error)
+    }
+
+    fn unload_entry_with_notifications(
+        &self,
+        entry_id: &str,
+        notification_error: &mut Option<Error>,
+    ) -> Result<()> {
         let entry = self.require_entry(entry_id)?;
         if !entry.state.is_loaded() {
             return Ok(());
@@ -3206,7 +5832,8 @@ impl ConfigEntries {
         let driver = match driver {
             Ok(driver) => driver,
             Err(error) => {
-                self.update_entry_state(
+                self.update_lifecycle_state(
+                    notification_error,
                     entry_id,
                     ConfigEntryState::FailedUnload,
                     Some(error.to_string()),
@@ -3215,12 +5842,25 @@ impl ConfigEntries {
                 return Err(error);
             }
         };
-        self.update_entry_state(entry_id, ConfigEntryState::UnloadInProgress, None, None)?;
+        self.update_lifecycle_state(
+            notification_error,
+            entry_id,
+            ConfigEntryState::UnloadInProgress,
+            None,
+            None,
+        )?;
         let entry = self.require_entry(entry_id)?;
         match driver.unload(&self.runtime, &entry) {
-            Ok(()) => self.update_entry_state(entry_id, ConfigEntryState::NotLoaded, None, None),
+            Ok(()) => self.update_lifecycle_state(
+                notification_error,
+                entry_id,
+                ConfigEntryState::NotLoaded,
+                None,
+                None,
+            ),
             Err(error) => {
-                self.update_entry_state(
+                self.update_lifecycle_state(
+                    notification_error,
                     entry_id,
                     ConfigEntryState::FailedUnload,
                     Some(error.to_string()),
@@ -3266,6 +5906,47 @@ impl ConfigEntries {
         })?;
         if let Some(entry) = emitted {
             self.emit_entry_change("updated", &entry)?;
+        }
+        Ok(())
+    }
+
+    fn update_lifecycle_state(
+        &self,
+        notification_error: &mut Option<Error>,
+        entry_id: &str,
+        state_value: ConfigEntryState,
+        reason: Option<String>,
+        retry_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        self.update_lifecycle_metadata(notification_error, entry_id, |entry| {
+            entry.state = state_value;
+            if state_value == ConfigEntryState::FailedUnload {
+                entry.require_reload = true;
+            }
+            entry.reason = reason;
+            entry.retry_at = retry_at;
+            entry.modified_at = Utc::now();
+        })
+    }
+
+    // Persistence failures stop the lifecycle. Event-delivery failures are
+    // reported after the driver and its final persisted state have completed.
+    fn update_lifecycle_metadata(
+        &self,
+        notification_error: &mut Option<Error>,
+        entry_id: &str,
+        update: impl FnOnce(&mut ConfigEntry),
+    ) -> Result<()> {
+        let entry = self.mutate(|state| {
+            let entry = state
+                .entries
+                .get_mut(entry_id)
+                .ok_or_else(|| Error::NotFound(format!("unknown config entry {entry_id}")))?;
+            update(entry);
+            Ok(entry.clone())
+        })?;
+        if let Err(error) = self.emit_entry_change("updated", &entry) {
+            notification_error.get_or_insert(error);
         }
         Ok(())
     }
@@ -3389,6 +6070,10 @@ impl ConfigEntries {
 
     fn emit_entry_change(&self, change: &str, entry: &ConfigEntry) -> Result<()> {
         let entry = self.with_supported_subentry_types(entry.clone());
+        self.emit_public_entry_change(change, &entry)
+    }
+
+    fn emit_public_entry_change(&self, change: &str, entry: &ConfigEntry) -> Result<()> {
         let mut data = Map::new();
         data.insert("type".into(), json!(change));
         data.insert("entry".into(), entry.public_json());
@@ -3463,6 +6148,52 @@ impl ConfigEntries {
     }
 }
 
+fn finish_lifecycle_notifications<T>(
+    result: Result<T>,
+    notification_error: Option<Error>,
+) -> Result<T> {
+    let value = result?;
+    match notification_error {
+        Some(error) => Err(error),
+        None => Ok(value),
+    }
+}
+
+fn public_flow_context(context: &Map<String, Value>) -> Map<String, Value> {
+    context
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.to_ascii_lowercase().as_str(),
+                "state"
+                    | "state_proof"
+                    | "oauth_state"
+                    | "code"
+                    | "authorization_code"
+                    | "code_verifier"
+                    | "pkce"
+                    | "pkce_verifier"
+                    | "client_secret"
+                    | "token"
+                    | "token_data"
+                    | "access_token"
+                    | "refresh_token"
+            )
+        })
+        .map(|(key, value)| (key.clone(), public_flow_context_value(value)))
+        .collect()
+}
+
+fn public_flow_context_value(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(public_flow_context(object)),
+        Value::Array(values) => {
+            Value::Array(values.iter().map(public_flow_context_value).collect())
+        }
+        value => value.clone(),
+    }
+}
+
 fn flow_result_json(
     request: &ConfigFlowRequest,
     kind: FlowKind,
@@ -3491,6 +6222,24 @@ fn flow_result_json(
             "errors": errors,
             "last_step": null,
             "preview": null,
+        }),
+        ConfigFlowResult::ExternalStep {
+            step_id,
+            url,
+            description_placeholders,
+        } => json!({
+            "flow_id": request.flow_id,
+            "handler": handler,
+            "type": "external",
+            "url": url,
+            "description_placeholders": description_placeholders,
+            "step_id": step_id,
+        }),
+        ConfigFlowResult::ExternalDone { step_id } => json!({
+            "flow_id": request.flow_id,
+            "handler": handler,
+            "type": "external_done",
+            "step_id": step_id,
         }),
         ConfigFlowResult::CreateEntry {
             title,
@@ -4504,6 +7253,7 @@ mod tests {
     struct FailingMetadataStore {
         inner: MemoryStore,
         fail_metadata: AtomicBool,
+        fail_events: AtomicBool,
     }
 
     impl Store for FailingMetadataStore {
@@ -4520,6 +7270,9 @@ mod tests {
         }
 
         fn append_event(&self, event: &Event) -> Result<()> {
+            if self.fail_events.load(Ordering::SeqCst) {
+                return Err(Error::Storage("injected event failure".into()));
+            }
             self.inner.append_event(event)
         }
 
@@ -6217,5 +8970,706 @@ mod tests {
             .unwrap();
         assert_eq!(restored.replay_pending_cleanup().unwrap(), 0);
         assert!(replay_observer.0.lock().unwrap().is_empty());
+    }
+
+    struct OAuthFlowTestDriver {
+        setup_calls: AtomicUsize,
+        on_create_calls: AtomicUsize,
+        manager_slot: Arc<Mutex<Option<ConfigEntries>>>,
+    }
+
+    impl OAuthFlowTestDriver {
+        fn new(manager_slot: Arc<Mutex<Option<ConfigEntries>>>) -> Self {
+            Self {
+                setup_calls: AtomicUsize::new(0),
+                on_create_calls: AtomicUsize::new(0),
+                manager_slot,
+            }
+        }
+
+        fn external_result() -> ConfigFlowResult {
+            ConfigFlowResult::ExternalStep {
+                step_id: "auth".into(),
+                url: "https://auth.example/authorize?client_id=fixture".into(),
+                description_placeholders: None,
+            }
+        }
+    }
+
+    impl ConfigEntryDriver for OAuthFlowTestDriver {
+        fn domain(&self) -> &str {
+            "oauth_fixture"
+        }
+
+        fn setup(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<SetupOutcome> {
+            self.setup_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(SetupOutcome::Ready)
+        }
+
+        fn unload(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<()> {
+            Ok(())
+        }
+
+        fn config_flow(&self, _request: &ConfigFlowRequest) -> Result<ConfigFlowResult> {
+            Ok(Self::external_result())
+        }
+
+        fn config_flow_async(
+            &self,
+            request: ConfigFlowRequest,
+        ) -> Option<Pin<Box<dyn Future<Output = Result<ConfigFlowResult>> + Send + 'static>>>
+        {
+            let manager = self
+                .manager_slot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            let step_id = request.step_id;
+            Some(Box::pin(async move {
+                assert!(matches!(step_id.as_str(), "user" | "reauth"));
+                tokio::task::yield_now().await;
+                if let Some(manager) = manager {
+                    assert!(
+                        manager
+                            .flow_handlers()
+                            .contains(&"oauth_fixture".to_owned())
+                    );
+                    let _ = manager.list_entries(None);
+                }
+                Ok(OAuthFlowTestDriver::external_result())
+            }))
+        }
+
+        fn on_create_entry(
+            &self,
+            _manager: &ConfigEntries,
+            _request: &ConfigFlowRequest,
+            _entry: &ConfigEntry,
+            _result: &ConfigFlowResult,
+        ) -> Result<Option<ConfigFlowContinuation>> {
+            self.on_create_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(None)
+        }
+    }
+
+    struct BlockingAsyncDriver {
+        started: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Arc<tokio::sync::Notify>,
+        future_drops: Arc<AtomicUsize>,
+    }
+
+    struct AsyncCallbackDrop(Arc<AtomicUsize>);
+
+    impl Drop for AsyncCallbackDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl ConfigEntryDriver for BlockingAsyncDriver {
+        fn domain(&self) -> &str {
+            "blocking_fixture"
+        }
+
+        fn setup(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<SetupOutcome> {
+            Ok(SetupOutcome::Ready)
+        }
+
+        fn unload(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<()> {
+            Ok(())
+        }
+
+        fn config_flow(&self, _request: &ConfigFlowRequest) -> Result<ConfigFlowResult> {
+            Ok(ConfigFlowResult::form("sync", None))
+        }
+
+        fn config_flow_async(
+            &self,
+            _request: ConfigFlowRequest,
+        ) -> Option<Pin<Box<dyn Future<Output = Result<ConfigFlowResult>> + Send + 'static>>>
+        {
+            let started = self
+                .started
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            let release = Arc::clone(&self.release);
+            let future_drops = Arc::clone(&self.future_drops);
+            Some(Box::pin(async move {
+                let _drop_guard = AsyncCallbackDrop(future_drops);
+                if let Some(started) = started {
+                    let _ = started.send(());
+                }
+                release.notified().await;
+                let mut data = Map::new();
+                data.insert("token".into(), json!("late-secret"));
+                Ok(ConfigFlowResult::create_entry(
+                    "Blocking account",
+                    data,
+                    None,
+                ))
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn external_flow_shapes_and_single_creation_claim_are_exact() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let manager_slot = Arc::new(Mutex::new(Some(manager.clone())));
+        let concrete = Arc::new(OAuthFlowTestDriver::new(manager_slot.clone()));
+        let driver: Arc<dyn ConfigEntryDriver> = concrete.clone();
+        manager.register_driver(driver.clone()).unwrap();
+        let mut context = Map::new();
+        context.insert("state_proof".into(), json!("private-proof"));
+        let external = manager
+            .init_config_flow_with_typed_input_async("oauth_fixture", "reauth", context, None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            external,
+            json!({
+                "flow_id": external["flow_id"],
+                "handler": "oauth_fixture",
+                "type": "external",
+                "url": "https://auth.example/authorize?client_id=fixture",
+                "description_placeholders": null,
+                "step_id": "auth",
+            })
+        );
+        assert!(!external.to_string().contains("private-proof"));
+        assert!(
+            !serde_json::to_string(&manager.flow_progress())
+                .unwrap()
+                .contains("private-proof")
+        );
+        let flow_id = external["flow_id"].as_str().unwrap();
+        let callback = manager
+            .claim_external_callback(flow_id, "oauth_fixture", "auth")
+            .unwrap();
+        let done = manager.publish_external_done(callback, "creation").unwrap();
+        assert_eq!(
+            done,
+            json!({
+                "flow_id": flow_id,
+                "handler": "oauth_fixture",
+                "type": "external_done",
+                "step_id": "creation",
+            })
+        );
+        assert!(!done.to_string().contains("private-proof"));
+        let manager_a = manager.clone();
+        let manager_b = manager.clone();
+        let id_a = flow_id.to_owned();
+        let id_b = flow_id.to_owned();
+        let (left, right) = tokio::join!(
+            tokio::task::spawn_blocking(move || {
+                manager_a.claim_external_done(&id_a, "oauth_fixture", "creation")
+            }),
+            tokio::task::spawn_blocking(move || {
+                manager_b.claim_external_done(&id_b, "oauth_fixture", "creation")
+            }),
+        );
+        let left = left.unwrap().unwrap();
+        let right = right.unwrap().unwrap();
+        assert_ne!(left.is_some(), right.is_some());
+        let lease = left.or(right).unwrap();
+        assert!(manager.abort_flow(flow_id).is_ok());
+        assert!(
+            manager
+                .commit_external_flow(
+                    lease,
+                    ConfigFlowResult::create_entry("Stale account", Map::new(), None),
+                )
+                .is_err()
+        );
+        assert!(manager.list_entries(Some("oauth_fixture")).is_empty());
+        let external = manager
+            .init_config_flow_async("oauth_fixture", "user", Map::new())
+            .await
+            .unwrap();
+        let flow_id = external["flow_id"].as_str().unwrap();
+        let callback = manager
+            .claim_external_callback(flow_id, "oauth_fixture", "auth")
+            .unwrap();
+        manager.publish_external_done(callback, "creation").unwrap();
+        let lease = manager
+            .claim_external_done(flow_id, "oauth_fixture", "creation")
+            .unwrap()
+            .unwrap();
+        manager.unregister_driver(&driver);
+        manager.register_driver(driver.clone()).unwrap();
+        assert!(
+            manager
+                .commit_external_flow(
+                    lease,
+                    ConfigFlowResult::create_entry("Stale registration", Map::new(), None),
+                )
+                .is_err()
+        );
+        assert!(manager.list_entries(Some("oauth_fixture")).is_empty());
+        manager.shutdown_flow_tasks();
+        manager.unregister_driver(&driver);
+        manager_slot.lock().unwrap().take();
+    }
+
+    #[tokio::test]
+    async fn external_reauth_merges_private_data_and_defers_callbacks() {
+        let store = Arc::new(FailingMetadataStore::default());
+        let manager = ConfigEntries::new(Runtime::new(store.clone()).unwrap()).unwrap();
+        let manager_slot = Arc::new(Mutex::new(Some(manager.clone())));
+        let concrete = Arc::new(OAuthFlowTestDriver::new(manager_slot.clone()));
+        let driver: Arc<dyn ConfigEntryDriver> = concrete.clone();
+        manager.register_driver(driver.clone()).unwrap();
+        let mut data = Map::new();
+        data.insert("keep".into(), json!("unrelated"));
+        data.insert("auth_implementation".into(), json!("old"));
+        data.insert("token".into(), json!({"access_token":"old-secret"}));
+        let mut seed = NewConfigEntry::new("oauth_fixture", "OAuth account", data);
+        seed.unique_id = Some("provider-account-1".into());
+        seed.options.insert("polling".into(), json!(45));
+        let original = manager.create_entry(seed).unwrap();
+
+        let external = manager
+            .begin_reauth_flow_async(&original.entry_id)
+            .await
+            .unwrap();
+        let flow_id = external["flow_id"].as_str().unwrap();
+        let callback = manager
+            .claim_external_callback(flow_id, "oauth_fixture", "auth")
+            .unwrap();
+        manager.publish_external_done(callback, "creation").unwrap();
+        let lease = manager
+            .claim_external_done(flow_id, "oauth_fixture", "creation")
+            .unwrap()
+            .unwrap();
+        let mut patch = Map::new();
+        patch.insert("auth_implementation".into(), json!("new"));
+        patch.insert("token".into(), json!({"access_token":"new-secret"}));
+        let result = ConfigFlowResult::CreateEntry {
+            title: "ignored replacement title".into(),
+            data: patch,
+            options: Map::new(),
+            unique_id: Some("wrong-account".into()),
+            version: 9,
+            minor_version: 9,
+        };
+        let retry_lease = lease.clone();
+        let events_before_failure = store.inner.events().unwrap().len();
+        store.fail_metadata.store(true, Ordering::SeqCst);
+        assert!(manager.commit_external_flow(lease, result.clone()).is_err());
+        let unchanged = manager.get_entry(&original.entry_id).unwrap();
+        assert_eq!(unchanged.data, original.data);
+        assert!(unchanged.needs_reauth);
+        assert_eq!(
+            manager.flow_result(flow_id).unwrap()["type"],
+            "external_done"
+        );
+        assert_eq!(store.inner.events().unwrap().len(), events_before_failure);
+        store.fail_metadata.store(false, Ordering::SeqCst);
+        let completion = manager.commit_external_flow(retry_lease, result).unwrap();
+        let stored = manager.get_entry(&original.entry_id).unwrap();
+        assert_eq!(stored.entry_id, original.entry_id);
+        assert_eq!(stored.unique_id, original.unique_id);
+        assert_eq!(stored.title, original.title);
+        assert_eq!(stored.options, original.options);
+        assert_eq!(stored.data["keep"], json!("unrelated"));
+        assert_eq!(stored.data["auth_implementation"], json!("new"));
+        assert_eq!(stored.data["token"]["access_token"], json!("new-secret"));
+        assert!(!stored.needs_reauth);
+        assert_eq!(concrete.setup_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(concrete.on_create_calls.load(Ordering::SeqCst), 0);
+        let debug_plan = format!("{completion:?}");
+        assert!(!debug_plan.contains("new-secret"));
+        assert!(!debug_plan.contains("old-secret"));
+        let persisted = store.get_data(METADATA_KEY).unwrap().unwrap();
+        assert_eq!(
+            persisted["entries"][0]["data"]["token"]["access_token"],
+            json!("new-secret")
+        );
+        assert!(manager.flow_result(flow_id).is_err());
+
+        manager.finish_external_flow(completion).unwrap();
+        assert_eq!(concrete.setup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(concrete.on_create_calls.load(Ordering::SeqCst), 0);
+        let events = serde_json::to_string(&store.inner.events().unwrap()).unwrap();
+        assert!(!events.contains("new-secret"));
+        assert!(!events.contains("old-secret"));
+        manager.shutdown_flow_tasks();
+        manager.unregister_driver(&driver);
+        manager_slot.lock().unwrap().take();
+    }
+
+    #[test]
+    fn private_token_patch_is_atomic_and_events_are_redacted() {
+        let failing_store = Arc::new(FailingMetadataStore::default());
+        let manager = ConfigEntries::new(Runtime::new(failing_store.clone()).unwrap()).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager.create_entry(seed()).unwrap();
+        let before = failing_store.get_data(METADATA_KEY).unwrap().unwrap();
+        let events_before = failing_store.inner.events().unwrap().len();
+        failing_store.fail_metadata.store(true, Ordering::SeqCst);
+        let mut patch = Map::new();
+        patch.insert("token".into(), json!("new-token-secret"));
+        assert!(
+            manager
+                .patch_entry_data(&entry.entry_id, "fixture", patch)
+                .is_err()
+        );
+        assert_eq!(manager.get_entry(&entry.entry_id).unwrap().data, entry.data);
+        assert_eq!(
+            failing_store.get_data(METADATA_KEY).unwrap().unwrap(),
+            before
+        );
+        assert_eq!(failing_store.inner.events().unwrap().len(), events_before);
+        failing_store.fail_metadata.store(false, Ordering::SeqCst);
+        let mut patch = Map::new();
+        patch.insert("token".into(), json!("new-token-secret"));
+        let updated = manager
+            .patch_entry_data(&entry.entry_id, "fixture", patch)
+            .unwrap();
+        assert_eq!(updated.data["token"], json!("new-token-secret"));
+        let events = serde_json::to_string(&failing_store.inner.events().unwrap()).unwrap();
+        assert!(!events.contains("new-token-secret"));
+        assert!(
+            manager
+                .patch_entry_data(&entry.entry_id, "other_fixture", Map::new())
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn committed_external_activation_runs_despite_persistent_event_failure() {
+        let store = Arc::new(FailingMetadataStore::default());
+        let manager = ConfigEntries::new(Runtime::new(store.clone()).unwrap()).unwrap();
+        let concrete = Arc::new(OAuthFlowTestDriver::new(Arc::new(Mutex::new(None))));
+        let driver: Arc<dyn ConfigEntryDriver> = concrete.clone();
+        manager.register_driver(driver.clone()).unwrap();
+        let start = manager
+            .init_config_flow_async("oauth_fixture", "user", Map::new())
+            .await
+            .unwrap();
+        let id = start["flow_id"].as_str().unwrap();
+        let callback = manager
+            .claim_external_callback(id, "oauth_fixture", "auth")
+            .unwrap();
+        manager.publish_external_done(callback, "creation").unwrap();
+        let lease = manager
+            .claim_external_done(id, "oauth_fixture", "creation")
+            .unwrap()
+            .unwrap();
+        let data = Map::from_iter([("token".into(), json!("committed-secret"))]);
+        let completion = manager
+            .commit_external_flow(lease, ConfigFlowResult::create_entry("Account", data, None))
+            .unwrap();
+        store.fail_events.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            manager.finish_external_flow(completion),
+            Err(Error::Storage(_))
+        ));
+        assert_eq!(concrete.setup_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(concrete.on_create_calls.load(Ordering::SeqCst), 1);
+        let entry = manager.list_entries(Some("oauth_fixture")).pop().unwrap();
+        assert_eq!(entry.state, ConfigEntryState::Loaded);
+        assert_eq!(entry.data["token"], "committed-secret");
+
+        store.fail_events.store(false, Ordering::SeqCst);
+        let reauth = manager
+            .begin_reauth_flow_async(&entry.entry_id)
+            .await
+            .unwrap();
+        let id = reauth["flow_id"].as_str().unwrap();
+        let callback = manager
+            .claim_external_callback(id, "oauth_fixture", "auth")
+            .unwrap();
+        manager.publish_external_done(callback, "creation").unwrap();
+        let lease = manager
+            .claim_external_done(id, "oauth_fixture", "creation")
+            .unwrap()
+            .unwrap();
+        let data = Map::from_iter([("token".into(), json!("reauth-secret"))]);
+        let completion = manager
+            .commit_external_flow(lease, ConfigFlowResult::create_entry("ignored", data, None))
+            .unwrap();
+        store.fail_events.store(true, Ordering::SeqCst);
+        assert!(matches!(
+            manager.finish_external_flow(completion),
+            Err(Error::Storage(_))
+        ));
+        assert_eq!(concrete.setup_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(concrete.on_create_calls.load(Ordering::SeqCst), 1);
+        let current = manager.get_entry(&entry.entry_id).unwrap();
+        assert_eq!(current.state, ConfigEntryState::Loaded);
+        assert!(!current.needs_reauth);
+        assert_eq!(current.data["token"], "reauth-secret");
+        let reopened = ConfigEntries::new(manager.runtime.clone()).unwrap();
+        assert_eq!(
+            reopened.get_entry(&entry.entry_id).unwrap().data,
+            current.data
+        );
+        manager.shutdown_flow_tasks_async().await.unwrap();
+        manager.unregister_driver(&driver);
+    }
+
+    #[tokio::test]
+    async fn running_flow_progress_filters_reserved_context_before_callback_returns() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let driver: Arc<dyn ConfigEntryDriver> = Arc::new(BlockingAsyncDriver {
+            started: Mutex::new(Some(started_sender)),
+            release: release.clone(),
+            future_drops: Arc::new(AtomicUsize::new(0)),
+        });
+        manager.register_driver(driver.clone()).unwrap();
+        let context = json!({"state_proof":"private-proof", "client_secret":"private-client", "title_placeholders":{"name":"Fixture", "refresh_token":"private-refresh"}, "metadata":[[{"access_token":"private-array-token"}]], "entry_id":"entry-identity"}).as_object().unwrap().clone();
+        let caller_manager = manager.clone();
+        let caller = tokio::spawn(async move {
+            caller_manager
+                .init_config_flow_async("blocking_fixture", "discovery", context)
+                .await
+        });
+        started_receiver.await.unwrap();
+        let progress = manager.flow_progress();
+        assert_eq!(progress.len(), 1);
+        assert_eq!(progress[0]["context"]["entry_id"], "entry-identity");
+        assert_eq!(
+            progress[0]["context"]["title_placeholders"]["name"],
+            "Fixture"
+        );
+        assert!(
+            !serde_json::to_string(&progress)
+                .unwrap()
+                .contains("private-")
+        );
+        release.notify_one();
+        caller.await.unwrap().unwrap();
+        manager.shutdown_flow_tasks_async().await.unwrap();
+        manager.unregister_driver(&driver);
+    }
+
+    #[tokio::test]
+    async fn async_flow_tasks_survive_caller_cancel_but_abort_blocks_late_create() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let future_drops = Arc::new(AtomicUsize::new(0));
+        let driver = Arc::new(BlockingAsyncDriver {
+            started: Mutex::new(Some(started_sender)),
+            release: Arc::clone(&release),
+            future_drops: Arc::clone(&future_drops),
+        });
+        let driver_trait: Arc<dyn ConfigEntryDriver> = driver;
+        manager.register_driver(driver_trait.clone()).unwrap();
+
+        let caller_manager = manager.clone();
+        let caller = tokio::spawn(async move {
+            caller_manager
+                .init_config_flow_async("blocking_fixture", "user", Map::new())
+                .await
+        });
+        started_receiver.await.unwrap();
+        caller.abort();
+        let _ = caller.await;
+        release.notify_one();
+        tokio::time::timeout(StdDuration::from_secs(2), async {
+            loop {
+                if !manager.list_entries(Some("blocking_fixture")).is_empty() {
+                    break;
+                }
+                tokio::time::sleep(StdDuration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            manager.list_entries(Some("blocking_fixture"))[0].data["token"],
+            json!("late-secret")
+        );
+        manager.shutdown_flow_tasks_async().await.unwrap();
+        assert_eq!(future_drops.load(Ordering::SeqCst), 1);
+        manager.unregister_driver(&driver_trait);
+
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let future_drops = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn ConfigEntryDriver> = Arc::new(BlockingAsyncDriver {
+            started: Mutex::new(Some(started_sender)),
+            release: Arc::clone(&release),
+            future_drops: Arc::clone(&future_drops),
+        });
+        manager.register_driver(driver.clone()).unwrap();
+        let caller_manager = manager.clone();
+        let caller = tokio::spawn(async move {
+            caller_manager
+                .init_config_flow_async("blocking_fixture", "user", Map::new())
+                .await
+        });
+        started_receiver.await.unwrap();
+        let flow_id = manager.lock_state().flows.keys().next().cloned().unwrap();
+        let abort_manager = manager.clone();
+        let abort_flow_id = flow_id.clone();
+        let abort_task =
+            tokio::spawn(async move { abort_manager.abort_flow_async(&abort_flow_id).await });
+        let shutdown_manager = manager.clone();
+        let shutdown_task =
+            tokio::spawn(async move { shutdown_manager.shutdown_flow_tasks_async().await });
+        let (abort_result, shutdown_result) =
+            tokio::time::timeout(StdDuration::from_secs(2), async {
+                tokio::join!(abort_task, shutdown_task)
+            })
+            .await
+            .unwrap();
+        abort_result.unwrap().unwrap();
+        shutdown_result.unwrap().unwrap();
+        assert!(caller.await.unwrap().is_err());
+        assert_eq!(future_drops.load(Ordering::SeqCst), 1);
+        assert!(manager.list_entries(Some("blocking_fixture")).is_empty());
+        assert!(manager.flow_result(&flow_id).is_err());
+        manager.unregister_driver(&driver);
+    }
+
+    struct BlockingSyncDriver {
+        started: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        completed: Arc<AtomicUsize>,
+    }
+
+    impl ConfigEntryDriver for BlockingSyncDriver {
+        fn domain(&self) -> &str {
+            "blocking_sync_fixture"
+        }
+
+        fn setup(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<SetupOutcome> {
+            Ok(SetupOutcome::Ready)
+        }
+
+        fn unload(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> Result<()> {
+            Ok(())
+        }
+
+        fn config_flow(&self, _request: &ConfigFlowRequest) -> Result<ConfigFlowResult> {
+            if let Some(started) = self
+                .started
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+            {
+                let _ = started.send(());
+            }
+            let (released, condition) = &*self.release;
+            let mut released = released.lock().unwrap_or_else(PoisonError::into_inner);
+            while !*released {
+                released = condition
+                    .wait(released)
+                    .unwrap_or_else(PoisonError::into_inner);
+            }
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            let mut data = Map::new();
+            data.insert("token".into(), json!("blocking-secret"));
+            Ok(ConfigFlowResult::create_entry(
+                "Blocking sync account",
+                data,
+                None,
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_persistence_failure_still_joins_the_running_blocking_callback() {
+        let store = Arc::new(FailingMetadataStore::default());
+        let manager = ConfigEntries::new(Runtime::new(store.clone()).unwrap()).unwrap();
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn ConfigEntryDriver> = Arc::new(BlockingSyncDriver {
+            started: Mutex::new(Some(started_sender)),
+            release: release.clone(),
+            completed: completed.clone(),
+        });
+        manager.register_driver(driver.clone()).unwrap();
+        let caller_manager = manager.clone();
+        let caller = tokio::spawn(async move {
+            caller_manager
+                .init_config_flow_async("blocking_sync_fixture", "user", Map::new())
+                .await
+        });
+        tokio::task::spawn_blocking(move || {
+            started_receiver.recv_timeout(StdDuration::from_secs(5))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let id = manager.lock_state().flows.keys().next().unwrap().clone();
+        store.fail_metadata.store(true, Ordering::SeqCst);
+        let abort_manager = manager.clone();
+        let mut abort = tokio::spawn(async move { abort_manager.abort_flow_async(&id).await });
+        let returned_early = tokio::time::timeout(StdDuration::from_millis(25), &mut abort)
+            .await
+            .is_ok();
+        {
+            let (released, condition) = &*release;
+            *released.lock().unwrap() = true;
+            condition.notify_all();
+        }
+        assert!(
+            !returned_early,
+            "abort returned before the blocking callback exited"
+        );
+        assert!(matches!(abort.await.unwrap(), Err(Error::Storage(_))));
+        assert!(caller.await.unwrap().is_err());
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert!(
+            manager
+                .list_entries(Some("blocking_sync_fixture"))
+                .is_empty()
+        );
+        manager.shutdown_flow_tasks_async().await.unwrap();
+        assert!(manager.lock_state().flows.is_empty());
+        manager.unregister_driver(&driver);
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_joins_legacy_blocking_callback_before_returning() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let (started_sender, started_receiver) = std::sync::mpsc::channel();
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let driver: Arc<dyn ConfigEntryDriver> = Arc::new(BlockingSyncDriver {
+            started: Mutex::new(Some(started_sender)),
+            release: Arc::clone(&release),
+            completed: Arc::clone(&completed),
+        });
+        manager.register_driver(driver.clone()).unwrap();
+        let caller_manager = manager.clone();
+        let caller = tokio::spawn(async move {
+            caller_manager
+                .init_config_flow_async("blocking_sync_fixture", "user", Map::new())
+                .await
+        });
+        tokio::task::spawn_blocking(move || started_receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let shutdown_manager = manager.clone();
+        let shutdown =
+            tokio::spawn(async move { shutdown_manager.shutdown_flow_tasks_async().await });
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        assert!(!shutdown.is_finished());
+        {
+            let (released, condition) = &*release;
+            *released.lock().unwrap() = true;
+            condition.notify_all();
+        }
+        shutdown.await.unwrap().unwrap();
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert!(caller.await.unwrap().is_err());
+        assert!(
+            manager
+                .list_entries(Some("blocking_sync_fixture"))
+                .is_empty()
+        );
+        manager.unregister_driver(&driver);
     }
 }

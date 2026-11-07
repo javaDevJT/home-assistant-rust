@@ -10,6 +10,7 @@ mod instance_id;
 mod integration_drivers;
 mod ip_policy;
 mod logging;
+mod oauth2;
 mod persons;
 mod recorder;
 mod repairs;
@@ -487,6 +488,43 @@ async fn main() -> Result<()> {
     if let Some(host) = &mut zeroconf {
         host.mark_started().await?;
     }
+    let mut oauth2_factory = None;
+    let oauth2_host = if let Some(credentials) = &application_credentials {
+        match oauth2::callback_url(&config_entries.core_config(), bound_address) {
+            Ok(Some(callback_url)) => {
+                let store = Arc::new(hass_oauth2_flow::ConfigEntryTokenStore::new(
+                    config_entries.clone(),
+                ));
+                let factory = hass_oauth2_client::OAuthClientFactory::new(store)?;
+                let host = hass_oauth2_flow::OAuthFlowHost::new(
+                    config_entries.clone(),
+                    credentials.manager(),
+                    credentials.platform_registry(),
+                    factory.clone(),
+                    hass_oauth2_flow::OAuthFlowHostOptions::new(callback_url),
+                )?;
+                oauth2_factory = Some(factory);
+                Some(host)
+            }
+            Ok(None) => {
+                warn!(
+                    "External OAuth flows require a configured HTTPS external/internal URL or a loopback listener"
+                );
+                None
+            }
+            Err(_) => {
+                warn!(
+                    "Configured OAuth callback origin is invalid; external OAuth flows are unavailable"
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let oauth2_manager = oauth2_host
+        .as_ref()
+        .map(hass_oauth2_flow::OAuthFlowHost::manager);
     let app = hass_api::router_with_features(
         hass_api::ApiState {
             runtime: runtime.clone(),
@@ -498,7 +536,7 @@ async fn main() -> Result<()> {
             auth: Some(auth),
             registries: Some(registries),
             templates: Some(templates),
-            config_entries: Some(config_entries),
+            config_entries: Some(config_entries.clone()),
             notifications: Some(notification_manager),
             zones: Some(zone_manager),
             persons: Some(person_manager),
@@ -517,6 +555,7 @@ async fn main() -> Result<()> {
             usb_usage,
             hardware: hardware_manager,
             application_credentials: application_credentials_manager,
+            oauth2_flows: oauth2_manager,
             network_adapters: Some(network_adapter_manager),
         },
         Some(shutdown_rx),
@@ -527,9 +566,7 @@ async fn main() -> Result<()> {
     );
     let result = axum_serve(listener, app, shutdown_tx, restart.receiver()).await;
     let restart_requested = restart.requested();
-    if let Some(application_credentials) = &application_credentials {
-        application_credentials.shutdown().await;
-    }
+    let flow_shutdown_result = config_entries.shutdown_flow_tasks_async().await;
     let hardware_result = if let Some(hardware) = &mut hardware {
         hardware.shutdown().await
     } else {
@@ -570,6 +607,17 @@ async fn main() -> Result<()> {
     let entity_lifecycle_result = entity_lifecycle.shutdown().await;
     let template_entity_result = template_entities.shutdown().await;
     let driver_result = drivers.shutdown().await;
+    if let Some(oauth2_host) = &oauth2_host {
+        oauth2_host.shutdown().await;
+    }
+    let oauth2_factory_result = if let Some(factory) = &oauth2_factory {
+        factory.shutdown().await
+    } else {
+        Ok(())
+    };
+    if let Some(application_credentials) = &application_credentials {
+        application_credentials.shutdown().await;
+    }
     let script_result = scripts.shutdown().await;
     let rest_result = rest.shutdown().await;
     let native_result = native.shutdown().await;
@@ -596,6 +644,8 @@ async fn main() -> Result<()> {
     })
     .await?;
     result?;
+    flow_shutdown_result?;
+    oauth2_factory_result?;
     ssdp_result?;
     zeroconf_result?;
     zeroconf_stop_result?;

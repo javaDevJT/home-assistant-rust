@@ -271,6 +271,32 @@ async fn real_process_credentials_restore_private_records_and_stream_after_resta
     .unwrap();
     for _ in 0..2 {
         let mut server = Server::start(&config).await;
+        for query in [
+            "state=untrusted-proof&code=private-callback-code",
+            "state=untrusted-proof&state=second-proof&code=private-callback-code",
+        ] {
+            let callback = server
+                .client
+                .get(format!("{}/auth/external/callback?{query}", server.url))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(callback.status(), StatusCode::BAD_REQUEST);
+            let body = callback.text().await.unwrap();
+            assert!(!body.contains("private-callback-code"));
+            assert!(!body.contains("untrusted-proof"));
+            assert!(!body.contains("dummy-fixture-secret"));
+        }
+        assert_eq!(
+            server
+                .client
+                .get(format!("{}/api/config", server.url))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNAUTHORIZED,
+        );
         let public: Value = server.get("/api/config").await.json().await.unwrap();
         assert!(
             public["components"]

@@ -21,6 +21,7 @@ mod logger;
 mod login;
 pub mod network;
 mod network_adapters;
+mod oauth2;
 mod persons;
 mod repairs;
 mod ssdp;
@@ -86,6 +87,8 @@ pub struct ApiFeatures {
     /// The application must keep the integration itself alive.
     pub application_credentials:
         Option<hass_application_credentials::ApplicationCredentialsManager>,
+    /// Weak manager; the application retains the strong OAuth flow host.
+    pub oauth2_flows: Option<hass_oauth2_flow::OAuthFlowManager>,
 }
 
 pub use usb::{UsbDiscoveryFlowUsage, UsbUsageClaim, UsbUsageProvider, UsbUsageSnapshot};
@@ -234,7 +237,7 @@ fn build_router(
             http::authenticate,
         ));
 
-    Router::new()
+    let mut routes = Router::new()
         .route("/health", get(http::health))
         .route(
             "/api/webhook/{webhook_id}",
@@ -253,7 +256,11 @@ fn build_router(
         .route("/auth/token", post(login::token))
         .route("/api/onboarding", get(login::onboarding))
         .route("/api/onboarding/users", post(login::onboard_user))
-        .merge(protected_routes)
+        .merge(protected_routes);
+    if state.features.oauth2_flows.is_some() {
+        routes = routes.route("/auth/external/callback", get(oauth2::external_callback));
+    }
+    routes
         .layer(DefaultBodyLimit::max(MAX_HTTP_BODY_BYTES))
         .layer(middleware::from_fn_with_state(
             state.clone(),
