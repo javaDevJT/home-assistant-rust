@@ -932,31 +932,25 @@ mod tests {
         let first = tokio::spawn(async move { first_cache.get(Some(&first_location)).await });
         server.wait_for_first_request().await;
 
-        let waiting_cache = cache.clone();
-        let waiting_location = location.clone();
-        let (waiting_started_tx, waiting_started_rx) = oneshot::channel();
-        let waiting = tokio::spawn(async move {
-            let _ = waiting_started_tx.send(());
-            waiting_cache.get(Some(&waiting_location)).await
-        });
-        waiting_started_rx.await.unwrap();
-        tokio::task::yield_now().await;
+        // Poll through cache registration, rather than assuming a spawned
+        // task has reached its first await after a scheduler yield.
+        let waiting = cache.get(Some(&location));
+        tokio::pin!(waiting);
+        assert!(futures_util::poll!(waiting.as_mut()).is_pending());
 
         cache.uncache(&location);
-        let second_cache = cache.clone();
-        let second_location = location.clone();
-        let (second_started_tx, second_started_rx) = oneshot::channel();
-        let second = tokio::spawn(async move {
-            let _ = second_started_tx.send(());
-            second_cache.get(Some(&second_location)).await
-        });
-        second_started_rx.await.unwrap();
-        tokio::task::yield_now().await;
+        let second = cache.get(Some(&location));
+        tokio::pin!(second);
+        assert!(futures_util::poll!(second.as_mut()).is_pending());
 
+        // Keep the replacement future unpolled until the original waiter has
+        // inspected it. A completed replacement is legitimately visible to
+        // that waiter; this case specifically exercises an in-flight one.
         server.release();
         assert!(first.await.unwrap().is_some());
-        assert!(waiting.await.unwrap().is_none());
-        assert!(second.await.unwrap().is_some());
+        assert!(!cache.peek(Some(&location)).0);
+        assert!(waiting.await.is_none());
+        assert!(second.await.is_some());
         assert!(cache.peek(Some(&location)).0);
         assert_eq!(server.task.await.unwrap(), 2);
     }
