@@ -55,6 +55,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Sun | Native astronomical calculations, singleton/config-entry entities, location updates, solar conditions and scheduled actions |
 | Logging | Actual dynamic tracing levels/message filters, admin controls, persistent and once-only settings, public change notifications |
 | System Log | Deduplicated retained errors, actual write/clear services, admin raw streams and integration filters |
+| System Health | Native provider SDK, cancellable one-shot WebSocket reports, current native version/timezone |
 | Repairs | Persistent issue registry, refresh scopes, visibility/dismissal, native fix flows and independent child-flow continuation |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
@@ -102,6 +103,7 @@ cargo test --workspace --locked
 - [Native tag collection, scan callbacks and automation triggers](crates/hass-tag/README.md)
 - [Native logger policy, filters and persisted controls](crates/hass-logger/README.md)
 - [Native System Log capture, raw streams and failure diagnostics](crates/hass-system-log/README.md)
+- [Native System Health providers, deferred values and reachability](crates/hass-system-health/README.md)
 - [Native issue registry, repair handlers and fix flows](crates/hass-repairs/README.md)
 - [Native Sun calculations, entities and config-entry lifecycle](crates/hass-sun/README.md)
 - [Config entries, native drivers, and core settings](crates/hass-config/README.md)

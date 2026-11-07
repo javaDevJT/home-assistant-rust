@@ -24,6 +24,7 @@ use tokio::{
 use tracing::{Instrument, debug_span};
 
 use crate::AppState;
+use crate::system_health::HealthStream;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -145,6 +146,7 @@ async fn handle_socket(
 
     let mut subscriptions = HashMap::<u64, Option<String>>::new();
     let mut raw_log_streams = RawLogStreams::new();
+    let mut health_streams = HashMap::<u64, HealthStream>::new();
     let mut last_command_id: Option<u64> = None;
     let mut native = crate::subscriptions::NativeSubscriptions::new(
         state.api.runtime.clone(),
@@ -177,6 +179,51 @@ async fn handle_socket(
                     }
                 }
                 for frame in frames {
+                    if send_json(&mut socket,&frame).await.is_err() {break 'connection;}
+                }
+                let mut health_frames = Vec::new();
+                let mut finished = Vec::new();
+                for (id, stream) in &mut health_streams {
+                    for _ in 0..stream.capacity() {
+                        match stream.try_recv() {
+                            Ok(frame) => {
+                                let terminal = frame["event"]["type"] == "finish"
+                                    || frame["success"] == false;
+                                health_frames.push(frame);
+                                if terminal {
+                                    finished.push(*id);
+                                    break;
+                                }
+                            }
+                            Err(mpsc::error::TryRecvError::Empty) => break,
+                            Err(mpsc::error::TryRecvError::Disconnected) => {
+                                finished.push(*id);
+                                break;
+                            }
+                        }
+                    }
+                    if stream.is_finished() && !finished.contains(id) {
+                        finished.push(*id);
+                    }
+                }
+                // Remove completed subscriptions before exposing their finish
+                // frame. A following unsubscribe must see an inactive ID.
+                for id in finished {
+                    if let Some(stream) = health_streams.remove(&id) {
+                        if stream.is_finished() {
+                            stream.join().await;
+                        } else {
+                            stream.cancel().await;
+                        }
+                    }
+                }
+                if !health_frames.is_empty() && identity.user_id.is_some() {
+                    match crate::extensions::authenticate_token(&state,&token).await {
+                        Ok(current) if crate::extensions::same_authority(&identity,&current) && (!current.local_only || origin.is_local) => {},
+                        _ => {close_socket(&mut socket).await;break;}
+                    }
+                }
+                for frame in health_frames {
                     if send_json(&mut socket,&frame).await.is_err() {break 'connection;}
                 }
             }
@@ -250,7 +297,7 @@ async fn handle_socket(
                         }
                         if crate::subscriptions::is_subscription_command(command_type)
                             && !matches!(command_type, "unsubscribe_events" | "config_entries/flow/progress")
-                            && active_subscription_count(&native, &subscriptions, &raw_log_streams)
+                            && active_subscription_count(&native, &subscriptions, &raw_log_streams, &health_streams)
                                 >= MAX_SUBSCRIPTIONS_PER_SOCKET
                         {
                             if send_error(
@@ -290,6 +337,7 @@ async fn handle_socket(
                             &mut event_receiver,
                             &mut subscriptions,
                             &mut raw_log_streams,
+                            &mut health_streams,
                             &native,
                             (id, command_type),
                             object,
@@ -412,6 +460,9 @@ async fn handle_socket(
         }
     }
     raw_log_streams.shutdown().await;
+    for (_, stream) in health_streams {
+        stream.cancel().await;
+    }
 }
 
 async fn receive_auth(socket: &mut WebSocket) -> Option<String> {
@@ -440,6 +491,7 @@ fn active_subscription_count(
     native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
     event_subscriptions: &HashMap<u64, Option<String>>,
     raw_log_streams: &RawLogStreams,
+    health_streams: &HashMap<u64, HealthStream>,
 ) -> usize {
     let native_count = native
         .lock()
@@ -448,6 +500,7 @@ fn active_subscription_count(
     native_count
         .saturating_add(event_subscriptions.len())
         .saturating_add(raw_log_streams.len())
+        .saturating_add(health_streams.len())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -457,6 +510,7 @@ async fn handle_command(
     event_receiver: &mut broadcast::Receiver<Event>,
     subscriptions: &mut HashMap<u64, Option<String>>,
     raw_log_streams: &mut RawLogStreams,
+    health_streams: &mut HashMap<u64, HealthStream>,
     native: &Arc<Mutex<crate::subscriptions::NativeSubscriptions>>,
     command: (u64, &str),
     message: &serde_json::Map<String, Value>,
@@ -505,7 +559,7 @@ async fn handle_command(
             send_core_result(socket, id, result).await.is_ok()
         }
         "subscribe_events" => {
-            if active_subscription_count(native, subscriptions, raw_log_streams)
+            if active_subscription_count(native, subscriptions, raw_log_streams, health_streams)
                 >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(
@@ -592,7 +646,14 @@ async fn handle_command(
             }
             let removed_event = subscriptions.remove(&subscription_id).is_some();
             let removed_raw_log = raw_log_streams.remove(subscription_id).await;
-            if !removed_event && !removed_raw_log {
+            let removed_health = match health_streams.remove(&subscription_id) {
+                Some(stream) => {
+                    stream.cancel().await;
+                    true
+                }
+                None => false,
+            };
+            if !removed_event && !removed_raw_log && !removed_health {
                 return send_error(
                     socket,
                     id,
@@ -602,6 +663,39 @@ async fn handle_command(
                 .is_ok();
             }
             send_success(socket, id, Value::Null).await.is_ok()
+        }
+        "system_health/info" => {
+            if message.len() != 2 {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
+            let Some(manager) = state.features.system_health.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "System Health integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            if active_subscription_count(native, subscriptions, raw_log_streams, health_streams)
+                >= MAX_SUBSCRIPTIONS_PER_SOCKET
+            {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("subscription_limit", "Subscription limit reached"),
+                )
+                .await
+                .is_ok();
+            }
+            health_streams.insert(id, HealthStream::start(manager, id));
+            true
         }
         "system_log/list" => {
             let Some(manager) = state.features.system_log.clone() else {
@@ -687,7 +781,7 @@ async fn handle_command(
             send_core_result(socket, id, result).await.is_ok()
         }
         "system_log/subscribe_raw" => {
-            if active_subscription_count(native, subscriptions, raw_log_streams)
+            if active_subscription_count(native, subscriptions, raw_log_streams, health_streams)
                 >= MAX_SUBSCRIPTIONS_PER_SOCKET
             {
                 return send_error(

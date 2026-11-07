@@ -824,6 +824,7 @@ dependencies = [
  "hass-script",
  "hass-storage",
  "hass-sun",
+ "hass-system-health",
  "hass-system-log",
  "hass-system-sensors",
  "hass-tag",
@@ -862,6 +863,7 @@ dependencies = [
  "hass-person",
  "hass-registry",
  "hass-repairs",
+ "hass-system-health",
  "hass-system-log",
  "hass-tag",
  "hass-template",
@@ -1193,6 +1195,20 @@ dependencies = [
  "hass-registry",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "hass-system-health"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures-util",
+ "hass-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

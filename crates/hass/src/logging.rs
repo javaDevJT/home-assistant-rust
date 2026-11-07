@@ -43,6 +43,14 @@ pub fn catalog() -> IntegrationCatalog {
         ("script", &["hass_script"]),
         ("tag", &["hass_tag"]),
         ("sun", &["hass_sun"]),
+        (
+            "system_health",
+            &[
+                "hass_system_health",
+                "hass_api::system_health",
+                "hass::system_health",
+            ],
+        ),
         ("system_log", &["hass_system_log", "hass_api::system_log"]),
         ("template", &["hass_template_entities", "hass_template"]),
         (

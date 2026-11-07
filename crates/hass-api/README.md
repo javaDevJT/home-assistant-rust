@@ -232,6 +232,22 @@ weak handle; requests fail after the owning Repairs integration is dropped.
 The native identity model has no separate `POLICY_EDIT` permission, so the
 administrator mapping is the closest available policy boundary.
 
+### System Health reports
+
+`system_health/info` accepts exactly `id` and `type` from an authenticated user,
+including ordinary and read-only users. Callback collection precedes its null
+acknowledgement, followed by `initial`, deferred `update` events and `finish`.
+Provider failures use generic client errors. The one-shot subscription releases
+its ID before finish is delivered. Generic unsubscribe, socket close and app
+shutdown cancel and join the collector; transferred provider tasks are aborted.
+The stream has a four-frame queue and counts toward the existing socket limit.
+
+The app retains the integration owner; API features hold a weak handle. Providers
+register explicitly through the native SDK. The core provider reports the native
+version and current runtime timezone. The real protocol tests cover role access,
+schema and error boundaries, deferred dates, task cancellation, shutdown and
+finished subscription removal. See [the provider contract](../../docs/SYSTEM-HEALTH-PORT.md).
+
 ### Repairs API checkpoint (2026-11-06)
 
 The protocol adapter and fixture implement the Repairs contract pinned to

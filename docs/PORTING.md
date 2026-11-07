@@ -397,3 +397,38 @@ Repairs registry owner v24 completed/released all assigned source corrections, 2
 System Health SDK owner v25 completed/released its isolated draft with 10 tests, strict Clippy and formatting. Consumer `system_health_transport_v27` completed/released unreferenced API `src/system_health.rs` and nested `tests/drafts/system_health_protocol.rs`, with formatting only; root will enroll and run its actual protocol cases after the 28-crate checkpoint is published. Root review added a provider-panic boundary so callback/deferred panic completes generically instead of silently terminating its transport task; 11 isolated SDK tests and strict Clippy pass. The transport uses an owned bounded frame channel, cancellable joined task and weak SDK handle, so callback collection does not block socket reads and no public Runtime event listener is created. Draft System Health files remain outside the 28-crate publication and gate. All implementation/review/inventory workers use native Luna/max; backend/tier controls are unexposed. The full rewrite continues after the checkpoint.
 
 Frozen 28-crate gate passes 617 tests across 75 targets, zero failed/ignored, formatting, strict locked workspace all-target Clippy, optimized build and optimized example CLI validation. macOS executable SHA-256 is `2fbc9762b76a6f94536953cc1f124062b9cda2e36c8c2666c2a814fc4090ac51`; `/tmp/home-assistant-native-28-{fmt,clippy,tests,release}.log` retain local output. Source publication and exact Linux CI follow. No deployment or production provider activity occurred.
+
+### Active 29-crate System Health acceptance (2026-11-07)
+
+Repairs/subentries source is committed and pushed as `9149318a0b6ff83056355adc7c6916dcce609cb5`; [exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42340433764) passes. The source and 28-crate executable receipt remain separate from the following candidate.
+
+Root enrolled `hass-system-health` as member 29, using shared workspace dependencies and the root lockfile, and moved its API fixture into normal test discovery. The app retains the strong owner, supplies only actual native version/current Runtime timezone through the `homeassistant` provider, and drops the owner after the server has joined socket cleanup. API streams use four-frame bounded queues, share the 32-subscription limit, retain command authority checks and remove/join completed streams before exposing finish. Unsubscribe and socket/server exit cancel and join their collectors. No new public Runtime receiver, HTTP route or service is added.
+
+Four real health protocol cases, two app core-provider/YAML cases and the compiled-process version/timezone/restart case pass. The process fixture initially used a nonexistent HTTP core-update route; root corrected it to the existing `config/core/update` WebSocket command. The isolated SDK's original 11 cases include native panic recovery; independent source review found that raw Tokio JoinHandle drop detaches child work. Root added `SystemHealthValue::from_task`, an abort-on-drop transfer adapter, and a new SDK task completion/cancellation case passes. Real API unsubscribe, socket close and shutdown now exercise spawned tasks and observe their drop guards. Ordinary deferred futures own and cancel any work they start; collector joining and transferred-task abort are distinct guarantees.
+
+Pinned `cv.empty_config_schema` accepts arbitrary domain values and logs for truthy parameters; it does not reject nonempty mappings or scalar input. Native `system_health` YAML preserves that acceptance/truthiness behavior and emits a generic startup/check diagnostic without parameter values. No provider configuration is inferred. Root now owns all candidate source; frozen formatting/strict Clippy/full tests are running. Inventory owner `system_health_parity_v30` writes only PARITY.md/upstream-parity.json and will promote only System Health to partial after the gate. Next source-contract owner `ssdp_contract_v31` writes only docs/SSDP-PORT.md, with no network probes or source mutation. All workers use native Luna/max; backend/tier controls are unexposed. The full rewrite continues after this checkpoint.
+
+Frozen 29-crate local acceptance passes: formatting, strict locked workspace
+all-target Clippy, 636 tests over 78 targets with zero failed/ignored, optimized
+build and optimized example CLI. macOS executable SHA-256:
+`a43914e4fb97becfdcc2d3f198b135c96c32b0730b8136e4ffc5957e40f6364e`.
+The optimized CLI also verifies source-accepted truthy health parameters with a
+generic diagnostic, no sentinel value disclosure and no database creation.
+`/tmp/home-assistant-native-29-{fmt,clippy,tests,release}.log` retain output.
+Source publication and exact Linux CI follow; no deployment occurred.
+
+Inventory patches require a unique domain/component anchor and a semantic
+record-by-domain comparison against immutable HEAD. Identical unported
+boilerplate can otherwise promote the wrong integration while leaving total
+counts correct. Restore accidental records from HEAD, then verify only the
+intended domain changes status.
+
+Next-wave `cleanup_replay_v32` owns only `crates/hass-config/src/lib.rs` and
+that crate's README. Its durable pending-removal cleanup journal is outside the
+staged 29-crate candidate and must remain unstaged until separate acceptance.
+The journal is queued atomically with parent/child deletion, retains minimal
+typed IDs/domain rather than private entry data, and acknowledges only after
+idempotent observer cleanup. Root will wire its replay method after observer
+registration in the app owner. Do not use a blanket staging command while this
+future writer runs. Current 29-crate receipts still explicitly retain the
+absence of registry-cleanup replay in that published source.

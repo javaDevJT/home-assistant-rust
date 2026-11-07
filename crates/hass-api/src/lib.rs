@@ -20,6 +20,7 @@ pub mod network;
 mod persons;
 mod repairs;
 mod subscriptions;
+mod system_health;
 mod tags;
 mod webhooks;
 mod websocket;
@@ -66,6 +67,7 @@ pub struct ApiFeatures {
     pub logger_catalog: Option<hass_logger::IntegrationCatalogProvider>,
     pub system_log: Option<hass_system_log::SystemLogManager>,
     pub repairs: Option<hass_repairs::RepairsManager>,
+    pub system_health: Option<hass_system_health::SystemHealthManager>,
 }
 
 #[derive(Clone)]

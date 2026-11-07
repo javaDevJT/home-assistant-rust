@@ -8,6 +8,7 @@ mod logging;
 mod persons;
 mod recorder;
 mod repairs;
+mod system_health;
 mod system_sensors;
 mod yaml;
 mod zones;
@@ -75,6 +76,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let config = Config::load(&args.config)?;
     if args.check {
+        if config.system_health_has_parameters() {
+            eprintln!("{}", system_health::CONFIGURATION_WARNING);
+        }
         println!("Configuration valid (supported Rust subset)");
         return Ok(());
     }
@@ -150,6 +154,8 @@ async fn main() -> Result<()> {
     })
     .await??;
     let repairs_manager = repairs.manager();
+    let system_health = system_health::start(runtime.clone())?;
+    let system_health_manager = system_health.manager();
     let logger_runtime = runtime.clone();
     let logger_auth = auth.clone();
     let logger_config = config.logger.clone().unwrap_or_default();
@@ -174,6 +180,9 @@ async fn main() -> Result<()> {
         .with(system_log.layer().with_filter(logger.filter()))
         .try_init()
         .context("cannot initialize native logging")?;
+    if config.system_health_has_parameters() {
+        tracing::error!(target: "hass::system_health", "{}", system_health::CONFIGURATION_WARNING);
+    }
     let image_runtime = runtime.clone();
     let image_directory = args
         .config
@@ -341,6 +350,7 @@ async fn main() -> Result<()> {
             logger_catalog: Some(logger_catalog),
             system_log: Some(system_log_manager),
             repairs: Some(repairs_manager),
+            system_health: Some(system_health_manager),
         },
         Some(shutdown_rx),
     );
@@ -349,6 +359,7 @@ async fn main() -> Result<()> {
         "Rust rewrite in progress; consult docs/upstream-parity.json for verified integration coverage"
     );
     let result = axum_serve(listener, app, shutdown_tx).await;
+    drop(system_health);
     let recorder_result = recorder.shutdown().await;
     let automation_result = automations.shutdown().await;
     let system_sensor_result = system_sensors.shutdown().await;

@@ -168,6 +168,14 @@ bounded dispatch failures are surfaced rather than treated as persisted output.
 See the [source contracts](SYSTEM-LOG-PORT.md) for deduplication, queue bounds
 and the remaining LLM consumer scope.
 
+System Health exposes `system_health/info` to authenticated users, including
+ordinary and read-only users. Its one-shot report contains the native core
+version and current saved timezone, with explicit native providers able to add
+fields. `system_health:` is optional. Source-compatible YAML accepts all section
+values; truthy parameters are ignored with a generic startup/check diagnostic.
+Parameter values are kept out of that diagnostic. See the
+[provider and stream contract](SYSTEM-HEALTH-PORT.md).
+
 `tag:` accepts null or an empty mapping. Tags are editable persistent collection
 items managed by the authenticated `tag/*` WebSocket commands; names live in
 the shared entity registry. Native reader integrations call `TagManager::scan`,

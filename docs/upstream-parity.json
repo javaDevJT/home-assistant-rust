@@ -1048,7 +1048,7 @@
     {
       "area": "WebSocket auth, command channels, subscriptions and payload contracts",
       "coverage_status": "partial_or_unported",
-      "gap": "System Log list/raw commands, Repairs issue/list/data/ignore commands, and config-subentry list/update/delete commands have native adapters and focused transport fixtures. Repairs changes use the ordinary public event path and native event history; subentry responses omit private data. Only command subsets are available; remaining command families, per-feature authorization, flow lifecycle, message validation, subscription fan-out, exact event/result envelopes and exhaustive pinned acceptance remain open.",
+      "gap": "System Log list/raw commands, Repairs issue/list/data/ignore commands, config-subentry list/update/delete commands, and the System Health system_health/info stream have native adapters and focused transport fixtures. Repairs changes use the ordinary public event path and native event history; subentry responses omit private data. System Health uses strict command fields, authenticated access for admin/ordinary/read-only identities, and joined callback cleanup on unsubscribe, disconnect, and shutdown. Only command subsets are available; remaining command families, per-feature authorization, flow lifecycle, message validation, subscription fan-out, exact event/result envelopes and exhaustive pinned acceptance remain open.",
       "id": "websocket_api",
       "local_evidence_paths": [
         "crates/hass-api/src/websocket.rs",
@@ -1057,11 +1057,14 @@
         "crates/hass-api/tests/system_log_protocol.rs",
         "crates/hass-api/src/repairs.rs",
         "crates/hass-api/src/config_subentries.rs",
+        "crates/hass-system-health/src/lib.rs",
+        "crates/hass-api/src/system_health.rs",
+        "crates/hass-api/tests/system_health_protocol.rs",
         "crates/hass-api/tests/repairs_protocol.rs",
         "crates/hass-api/tests/config_subentries_protocol.rs",
         "crates/hass/tests/end_to_end.rs"
       ],
-      "next_acceptance": "Finish pinned Repairs and subentry command authorization, field, error and flow-lifecycle cases; then enumerate every remaining pinned command/channel, implement authorization and envelopes, and test malformed/duplicate IDs, auth expiry, subscriptions, shutdown and cleanup.",
+      "next_acceptance": "Finish remaining pinned System Health provider/stream fixtures and Repairs/subentry command authorization, field, error and flow-lifecycle cases; then enumerate every remaining pinned command/channel, implement authorization and envelopes, and test malformed/duplicate IDs, auth expiry, subscriptions, shutdown and cleanup.",
       "pinned_upstream_sources": [
         "homeassistant/components/websocket_api/auth.py",
         "homeassistant/components/websocket_api/commands.py",
@@ -1866,13 +1869,21 @@
     {
       "area": "Backup, repairs, diagnostics, onboarding and system-level services",
       "coverage_status": "partial_or_unported",
-      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. System Log list/write/raw-stream support is partial; its LLM consumers, coercion parity, observable overflow, reader-backed backlog and complete pinned acceptance remain open. Repairs now has a partial native registry/fix-flow manager, HTTP/WebSocket subset, post-commit host lifecycle and actual-process persistence/event/confirmation/restart evidence. Cross-document cleanup is not atomic and has no durable registry replay journal; fine-grained POLICY_EDIT, exhaustive pinned acceptance, frontend/translations, Python loader, and real provider activity remain open. Backup/restore, diagnostics and remaining system/frontend operating workflows are unported.",
+      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. System Log list/write/raw-stream support is partial; its LLM consumers, coercion parity, observable overflow, reader-backed backlog and complete pinned acceptance remain open. Repairs now has a partial native registry/fix-flow manager, HTTP/WebSocket subset, post-commit host lifecycle and actual-process persistence/event/confirmation/restart evidence. System Health now has a native provider SDK, authenticated system_health/info stream, core native-version/current-timezone callback, privacy-safe config warning, and focused protocol/process evidence; only the core provider is included, and full pinned provider coverage, Python/platform discovery, frontend/LLM metadata and real external health probes remain open. Arbitrary provider callback values remain generic and source-compatible for authenticated readers without blanket redaction. Cross-document cleanup is not atomic and has no durable registry replay journal; fine-grained POLICY_EDIT, exhaustive pinned acceptance, frontend/translations, Python loader, and real provider activity remain open. Backup/restore, diagnostics and remaining system/frontend operating workflows are unported.",
       "id": "backup_repairs_diagnostics_and_system_services",
       "local_evidence_paths": [
         "crates/hass/src/main.rs",
         "crates/hass-storage/src/lib.rs",
         "crates/hass-system-log/src/lib.rs",
         "crates/hass-api/tests/system_log_protocol.rs",
+        "crates/hass-system-health/README.md",
+        "crates/hass-system-health/src/lib.rs",
+        "crates/hass-api/src/system_health.rs",
+        "crates/hass-api/tests/system_health_protocol.rs",
+        "crates/hass/src/system_health.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/main.rs",
+        "docs/SYSTEM-HEALTH-PORT.md",
         "crates/hass-repairs/src/lib.rs",
         "crates/hass-repairs/src/registry.rs",
         "crates/hass-repairs/src/flows.rs",
@@ -1881,7 +1892,7 @@
         "crates/hass/src/repairs.rs",
         "crates/hass/tests/end_to_end.rs"
       ],
-      "next_acceptance": "Complete the pinned Repairs storage, lifecycle, authorization, HTTP/WebSocket and failure acceptance; exercise recovery after explicit post-commit cross-document cleanup failures, and finish System Log LLM/coercion/dedup/overflow/backlog parity. Then port backup/restore, diagnostics and remaining system-service families with failure-safe persistence, authorization, restore/rollback and pinned API/test shape.",
+      "next_acceptance": "Complete the pinned Repairs storage, lifecycle, authorization, HTTP/WebSocket and failure acceptance; exercise recovery after explicit post-commit cross-document cleanup failures; finish System Log LLM/coercion/dedup/overflow/backlog parity; and expand System Health beyond the native core callback with full pinned provider, stream, Python/platform, frontend and LLM acceptance. Then port backup/restore, diagnostics and remaining system-service families with failure-safe persistence, authorization, restore/rollback and pinned API/test shape.",
       "pinned_upstream_sources": [
         {
           "path_count": 23,
@@ -12605,6 +12616,8 @@
       "config_flow_classes": [],
       "domain": "api",
       "local_evidence_paths": [
+        "crates/hass-api/src/system_health.rs",
+        "crates/hass-api/tests/system_health_protocol.rs::system_health_is_readable_by_admin_ordinary_and_read_only_identities",
         "crates/hass-api/src/http.rs",
         "crates/hass-api/src/websocket.rs",
         "crates/hass-api/src/lib.rs",
@@ -26399,6 +26412,7 @@
       "config_flow_classes": [],
       "domain": "config",
       "local_evidence_paths": [
+        "crates/hass/src/config.rs::system_health_yaml_accepts_ignored_values_and_preserves_source_truthiness",
         "crates/hass-registry/src/lib.rs",
         "crates/hass-api/src/websocket.rs",
         "crates/hass-config/src/lib.rs",
@@ -135696,7 +135710,17 @@
       "component_directory": "homeassistant/components/system_health/",
       "config_flow_classes": [],
       "domain": "system_health",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-system-health/README.md",
+        "crates/hass-system-health/src/lib.rs",
+        "crates/hass-api/src/system_health.rs",
+        "crates/hass-api/tests/system_health_protocol.rs",
+        "crates/hass/src/system_health.rs",
+        "crates/hass/src/config.rs",
+        "crates/hass/src/main.rs",
+        "crates/hass/tests/end_to_end.rs",
+        "docs/SYSTEM-HEALTH-PORT.md"
+      ],
       "manifest": {
         "codeowners": [],
         "dependencies": [
@@ -135710,10 +135734,10 @@
       },
       "manifest_blob_oid": "cbbe1caf8032c2547bdc0914fcc998999e4a8512",
       "manifest_path": "homeassistant/components/system_health/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "The native SDK and authenticated system_health/info protocol provide a focused subset: weak-owner provider registration/replacement, concurrent five-second callbacks, typed dates/deferred values, pending/update/finish events, generic client errors with detailed internal get_info, a five-second loopback GET helper, cold-future/session cancellation, transferred-task abort-on-drop, joined API stream cleanup, strict command fields, admin/ordinary/read-only access, and a core native-version/current-Runtime-timezone provider. The empty configuration schema accepts all values and emits a generic warning for truthy parameters without echoing values. This remains partial: only the core provider is included; Python/provider-platform discovery, frontend, LLM integration/metadata, complete pinned provider/error/auth fixtures, and real external health probes remain open. Arbitrary provider values are passed through to authenticated readers as in source; blanket redaction is not implemented.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "15_cloud_http_auth_webhook",
       "protocol_families": [
         "cloud_http_auth_webhook"
@@ -155115,6 +155139,9 @@
       "config_flow_classes": [],
       "domain": "websocket_api",
       "local_evidence_paths": [
+        "crates/hass-api/src/system_health.rs",
+        "crates/hass-api/tests/system_health_protocol.rs::health_stream_acknowledges_after_collection_and_finishes_deferred_updates",
+        "crates/hass-api/tests/system_health_protocol.rs::unsubscribe_socket_close_and_server_shutdown_cancel_deferred_work",
         "crates/hass-api/src/websocket.rs",
         "crates/hass-api/src/login.rs",
         "crates/hass-api/src/tags.rs",
@@ -167859,11 +167886,23 @@
               "repairs_websocket_commands_are_authenticated_and_events_are_minimal",
               "repairs_http_flow_routes_enforce_policy_and_return_terminal_next_flow_metadata"
             ]
+          },
+          {
+            "path": "crates/hass-api/src/system_health.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/system_health_protocol.rs",
+            "test_functions_present": [
+              "health_stream_acknowledges_after_collection_and_finishes_deferred_updates",
+              "system_health_is_readable_by_admin_ordinary_and_read_only_identities",
+              "strict_command_validation_missing_feature_and_invalid_auth_are_rejected",
+              "unsubscribe_socket_close_and_server_shutdown_cancel_deferred_work"
+            ]
           }
         ],
-        "remaining": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The config-subentry protocol fixture passes with graceful teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, and history semantics require complete acceptance.",
+        "remaining": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. System Health adds an authenticated system_health/info feature over the existing WebSocket transport, strict id/type command validation, admin/ordinary/read-only reads, and joined callback cleanup without a new HTTP route or public Runtime listener. The config-subentry protocol fixture passes with graceful teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, and history semantics require complete acceptance.",
         "status": "partial",
-        "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+        "verification": "Root reports the four focused System Health protocol cases passing in the unpublished 29-crate candidate. The inventory writer inspected source and did not run tests; primary acceptance is tracked separately."
       },
       {
         "domain": "auth",
@@ -168027,11 +168066,17 @@
               "committed_entry_and_subentry_changes_update_actual_issue_visibility_and_cleanup",
               "dropping_host_unregisters_its_observer_before_same_manager_restart"
             ]
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "system_health_yaml_accepts_ignored_values_and_preserves_source_truthiness"
+            ]
           }
         ],
-        "remaining": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation, and a focused HTTP/WebSocket subset now have evidence. The subentry protocol fixture passes with graceful teardown. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
+        "remaining": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation, and a focused HTTP/WebSocket subset now have evidence. The subentry protocol fixture passes with graceful teardown. Native System Health YAML accepts the pinned empty-schema values and tracks source truthiness for a generic startup/check warning without echoing values. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
         "status": "partial",
-        "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+        "verification": "Root reports the System Health YAML truthiness case passing within the unpublished 29-crate candidate app checks. The inventory writer inspected source and did not run tests; primary acceptance is tracked separately."
       },
       {
         "domain": "counter",
@@ -168823,6 +168868,81 @@
         "verification": "The owner reports 39 automation and 10 script cases with strict checks. Root reports 26 Sun cases and both compiled-process checks passing, including trigger id/idx/alias through actual UTC actions. Local workspace formatting, strict Clippy and 578 tests/71 targets pass; release/CLI/publication receipts remain separate. This inventory writer did not run tests."
       },
       {
+        "domain": "system_health",
+        "local_evidence": [
+          {
+            "path": "crates/hass-system-health/README.md"
+          },
+          {
+            "path": "crates/hass-system-health/src/lib.rs",
+            "public_functions": [
+              "new",
+              "manager",
+              "register_info",
+              "collect",
+              "get_info",
+              "next_update",
+              "to_transport_event",
+              "from_task",
+              "check_can_reach_url"
+            ],
+            "test_functions_present": [
+              "same_domain_registration_replaces_callback_and_manage_url",
+              "callback_collection_is_concurrent_and_domains_are_sorted",
+              "callback_error_and_timeout_are_generic_in_initial_data",
+              "provider_panics_complete_with_generic_transport_failures",
+              "callback_timeout_uses_the_pinned_five_second_deadline",
+              "deferred_dates_encode_as_dates_and_internal_helper_stringifies",
+              "deferred_errors_are_generic_for_transport_but_detailed_in_get_info",
+              "dropping_session_drops_unfinished_deferred_futures",
+              "transferred_tasks_complete_or_abort_with_the_session",
+              "owner_drop_invalidates_weak_handle",
+              "reachability_helper_uses_loopback_only_and_ignores_status",
+              "reachability_timeout_uses_loopback_delayed_response"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/system_health.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/system_health_protocol.rs",
+            "test_functions_present": [
+              "health_stream_acknowledges_after_collection_and_finishes_deferred_updates",
+              "system_health_is_readable_by_admin_ordinary_and_read_only_identities",
+              "strict_command_validation_missing_feature_and_invalid_auth_are_rejected",
+              "unsubscribe_socket_close_and_server_shutdown_cancel_deferred_work"
+            ]
+          },
+          {
+            "path": "crates/hass/src/config.rs",
+            "test_functions_present": [
+              "system_health_yaml_accepts_ignored_values_and_preserves_source_truthiness"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/src/system_health.rs",
+            "public_functions": [
+              "start"
+            ],
+            "test_functions_present": [
+              "core_provider_reports_native_version_and_current_runtime_timezone"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_system_health_reports_native_runtime_and_saved_timezone"
+            ]
+          }
+        ],
+        "remaining": "The native provider SDK, authenticated system_health/info stream, generic configuration behavior and core version/timezone callback now have focused fixtures; only the core provider is implemented. Python provider/platform discovery, frontend/assets, LLM integration/metadata, full pinned provider/error/auth/stream acceptance and real external health probes remain open. The source-compatible API passes arbitrary provider callback values through to authenticated readers without blanket redaction; the core callback reports only native version and current Runtime timezone.",
+        "status": "partial",
+        "verification": "Root reports 12 focused SDK cases (11 existing plus transferred_tasks_complete_or_abort_with_the_session), 4 API protocol cases, 2 app cases and 1 actual-process System Health case passing. The frozen unpublished 29-crate candidate passes formatting, strict locked all-target Clippy, 636 tests across 78 targets (0 failed, 0 ignored), optimized release build and example CLI --check. The CLI check accepts truthy System Health values, emits a generic diagnostic without echoing sentinel values, and creates no database. The inventory writer inspected source and did not run tests; source SHA and CI publication receipt remain pending."
+      },
+      {
         "domain": "system_log",
         "local_evidence": [
           {
@@ -169114,15 +169234,30 @@
             ]
           },
           {
+            "path": "crates/hass-system-health/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-api/src/system_health.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/system_health_protocol.rs",
+            "test_functions_present": [
+              "health_stream_acknowledges_after_collection_and_finishes_deferred_updates",
+              "system_health_is_readable_by_admin_ordinary_and_read_only_identities",
+              "strict_command_validation_missing_feature_and_invalid_auth_are_rejected",
+              "unsubscribe_socket_close_and_server_shutdown_cancel_deferred_work"
+            ]
+          },
+          {
             "path": "crates/hass/tests/end_to_end.rs",
             "test_functions_present": [
               "real_process_repairs_sdk_storage_events_confirm_and_restart"
             ]
           }
         ],
-        "remaining": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused transport fixtures cover both subsets. The config-subentry fixture now passes with graceful teardown. The Tag private subscription feed also has actual-transport evidence. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
+        "remaining": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused transport fixtures cover both subsets. System Health uses the existing authenticated WebSocket dispatcher with strict id/type validation, ordinary/read-only access, generic transport failures, deferred updates, and joined cancellation on unsubscribe, socket close, or server shutdown. The config-subentry fixture now passes with graceful teardown. The Tag private subscription feed also has actual-transport evidence. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
+        "verification": "Root reports the four focused System Health protocol cases passing in the unpublished 29-crate candidate. The inventory writer inspected source and did not run tests; primary acceptance is tracked separately."
       },
       {
         "domain": "zone",
@@ -169151,10 +169286,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 37,
+    "partial": 38,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1528
+    "unported": 1527
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

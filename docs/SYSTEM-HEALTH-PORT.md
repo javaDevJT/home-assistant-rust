@@ -22,7 +22,11 @@ System Health page or a native frontend version.
 
 - `homeassistant/components/system_health/__init__.py` declares
   `CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)`. This is an empty config
-  schema; it is not a `str` schema or a provider configuration format.
+  validator; it is not a `str` schema or a provider configuration format.
+  Pinned `config_validation.py:1191-1207` accepts all domain values, logs for
+  truthy parameters, and returns the input unchanged. Native YAML keeps that
+  acceptance/truthiness behavior and emits a generic startup/check diagnostic
+  without copying arbitrary configuration or secret values into logs.
 - `async_setup` registers the WebSocket handler and creates
   `LazyIntegrationPlatforms(hass, "system_health", ...)`.
 - `SystemHealthProtocol.async_register(hass, register)` is synchronous and
@@ -122,8 +126,8 @@ must not be fabricated by the native port or confused with
 - Add the native manager as an optional `ApiFeatures` field and route only the
   existing `system_health/info` WebSocket command through the extension
   dispatcher. Match the source command's `id`/`type` only schema and reject
-  extra keys. The current API has no System Health feature, HTTP endpoint,
-  service, or frontend panel; do not invent any of those surfaces. When the
+  extra keys. `ApiFeatures.system_health` now supplies the weak handle; there
+  is no new HTTP endpoint, service, or frontend panel. When the
   manager is absent, return the API's normal unconfigured-feature error rather
   than a synthetic empty health report.
 - The only current `IntegrationCatalog` is the logger's map from integration
@@ -140,7 +144,7 @@ must not be fabricated by the native port or confused with
   nonexistent runtime-weak API. If a provider needs runtime data, pass the
   smallest read-only native context it actually uses; do not retain an
   unrelated strong runtime clone in the API feature.
-- Proposed native SDK (new `hass-system-health` crate):
+- Native SDK (`hass-system-health` crate, current candidate):
   `SystemHealthIntegration` owns a registry and exposes a weak
   `SystemHealthManager`; `register_info(domain, callback, manage_url)` stores
   one callback and optional URL per domain, with later registration replacing
@@ -166,12 +170,17 @@ must not be fabricated by the native port or confused with
   }
   ```
 
-  This is the isolated draft SDK shape, outside the accepted workspace until
-  enrollment. Both immediate and deferred dates retain typed encoding.
+  This SDK is enrolled in the 29-crate candidate. Both immediate and deferred
+  dates retain typed encoding.
   Provider closures capture only the native subsystem handles they need; do
   not capture futures borrowed from a WebSocket request. Keep callback
   registrations in manager-owned state, not in a public runtime event
   subscription.
+  Transfer spawned tasks with `SystemHealthValue::from_task(handle)` to add
+  abort-on-drop ownership, matching source pending Task cancellation. Ordinary
+  deferred futures must own and cancel their own spawned work; a raw Tokio
+  JoinHandle detaches on drop. Collector cancellation is joined at the API
+  boundary, and transferred tasks receive an abort request on session teardown.
 - The native WebSocket dispatcher currently allows authenticated identities
   to use commands unless the command is in its administrator list or a
   specific read/control guard applies. `system_health/info` is not an

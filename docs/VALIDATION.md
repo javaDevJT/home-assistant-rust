@@ -1,5 +1,39 @@
 # Validation evidence
 
+## Accepted 29-crate System Health source
+
+The frozen workspace passes **636 tests across 78 targets**, with zero failed or
+ignored tests, formatting, strict locked workspace all-target Clippy, optimized
+build and optimized example CLI validation on 2026-11-07. Optimized macOS
+executable SHA-256:
+`a43914e4fb97becfdcc2d3f198b135c96c32b0730b8136e4ffc5957e40f6364e`.
+Publication and exact Linux CI are the next receipt steps.
+
+The 12-case System Health SDK suite covers concurrent five-second callback
+timeouts, generic transport errors, immediate/deferred dates, internal-helper
+conversion, registration replacement, weak ownership, cold-future cancellation,
+transferred task completion/abort, and actual loopback HTTP reachability,
+including 5xx responses and timeout. Native provider panics become generic
+client failures while preserving details for native logs/internal reporting.
+The four real WebSocket cases verify source event ordering, administrator,
+ordinary and read-only access, strict fields, authentication, generic errors,
+finished subscription removal and cancellation on unsubscribe, close and shutdown.
+The cancellation cases use real spawned tasks with drop guards.
+
+Two app cases verify native version/current timezone reporting and the source
+YAML validator's acceptance/truthiness rules. The real compiled process changes
+the saved timezone through `config/core/update`, obtains a fresh health report,
+hard-restarts and verifies the saved value. Only native version and timezone are
+reported by the core provider. The optimized CLI additionally accepts ignored
+truthy health parameters, emits a generic diagnostic without a sentinel value,
+and creates no database during `--check`.
+
+Provider registration is explicit. Python platform discovery, frontend/LLM
+consumers, unknown host/runtime metadata and exhaustive pinned acceptance remain
+open. A transferred task is aborted on session drop; collector cancellation is
+joined separately. There is no new public event-bus subscription, HTTP route or
+service, production deployment or external health probe.
+
 ## Accepted 28-crate Repairs and configuration-subentry source
 
 The frozen workspace passes **617 tests across 75 targets**, with zero failed or
@@ -7,7 +41,8 @@ ignored tests, `cargo fmt --all -- --check` and strict locked all-target Clippy
 on 2026-11-06. The locked optimized build and optimized example CLI `--check`
 also pass. Optimized macOS executable SHA-256:
 `2fbc9762b76a6f94536953cc1f124062b9cda2e36c8c2666c2a814fc4090ac51`.
-A source SHA and exact Linux CI receipt follow publication.
+Published source `9149318a0b6ff83056355adc7c6916dcce609cb5` also passes
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42340433764).
 The isolated System Health SDK and its nested API draft are outside this gate.
 
 Repairs has 23 package cases covering storage migration, restored identity shells,

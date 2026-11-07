@@ -48,6 +48,8 @@ pub struct Config {
     pub logger: Option<hass_logger::LoggerConfig>,
     #[serde(default)]
     pub system_log: Option<hass_system_log::SystemLogConfig>,
+    #[serde(default)]
+    pub system_health: serde_yaml::Value,
     #[serde(default, deserialize_with = "deserialize_sun")]
     pub sun: bool,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
@@ -241,6 +243,7 @@ impl Config {
                 "tag",
                 "logger",
                 "system_log",
+                "system_health",
                 "sun",
                 "sensor",
                 "timer",
@@ -343,6 +346,23 @@ impl Config {
         Ok(())
     }
 
+    /// The source empty-config validator accepts any value and warns only for
+    /// truthy parameters; it does not reject them or configure a provider.
+    pub fn system_health_has_parameters(&self) -> bool {
+        fn truthy(value: &serde_yaml::Value) -> bool {
+            match value {
+                serde_yaml::Value::Null => false,
+                serde_yaml::Value::Bool(value) => *value,
+                serde_yaml::Value::Number(value) => value.as_f64().is_none_or(|value| value != 0.0),
+                serde_yaml::Value::String(value) => !value.is_empty(),
+                serde_yaml::Value::Sequence(value) => !value.is_empty(),
+                serde_yaml::Value::Mapping(value) => !value.is_empty(),
+                serde_yaml::Value::Tagged(value) => truthy(&value.value),
+            }
+        }
+        truthy(&self.system_health)
+    }
+
     pub fn native_config(&self) -> hass_native::NativeConfig {
         hass_native::NativeConfig {
             timer: self.timer.clone(),
@@ -376,6 +396,7 @@ impl Config {
             "logger",
             "system_log",
             "repairs",
+            "system_health",
             "sun",
             "webhook",
             "time_date",
@@ -530,6 +551,32 @@ mod tests {
         }
         for source in ["sun: true\n", "sun: []\n", "sun:\n  unknown: true\n"] {
             assert!(Config::parse(source).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn system_health_yaml_accepts_ignored_values_and_preserves_source_truthiness() {
+        for (source, warns) in [
+            ("{}\n", false),
+            ("system_health:\n", false),
+            ("system_health: {}\n", false),
+            ("system_health: []\n", false),
+            ("system_health: false\n", false),
+            ("system_health: 0\n", false),
+            ("system_health: ''\n", false),
+            ("system_health: {ignored: value}\n", true),
+            ("system_health: [ignored]\n", true),
+            ("system_health: value\n", true),
+            ("system_health: true\n", true),
+            ("system_health: -1\n", true),
+        ] {
+            assert_eq!(
+                Config::parse(source)
+                    .unwrap()
+                    .system_health_has_parameters(),
+                warns,
+                "{source}"
+            );
         }
     }
 

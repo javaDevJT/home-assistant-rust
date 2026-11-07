@@ -221,6 +221,74 @@ automation:
 }
 
 #[tokio::test]
+async fn real_process_system_health_reports_native_runtime_and_saved_timezone() {
+    use futures_util::StreamExt;
+
+    async fn report(socket: &mut Socket, id: u64) -> Value {
+        let acknowledgement =
+            ws_command(socket, json!({"id":id,"type":"system_health/info"})).await;
+        assert_eq!(acknowledgement["success"], true, "{acknowledgement}");
+        assert_eq!(acknowledgement["result"], Value::Null);
+        let initial = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let initial: Value = serde_json::from_str(initial.to_text().unwrap()).unwrap();
+        assert_eq!(initial["id"], id);
+        assert_eq!(initial["event"]["type"], "initial", "{initial}");
+        let finish = tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let finish: Value = serde_json::from_str(finish.to_text().unwrap()).unwrap();
+        assert_eq!(
+            finish,
+            json!({"id":id,"type":"event","event":{"type":"finish"}})
+        );
+        initial["event"]["data"]["homeassistant"]["info"].clone()
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        "homeassistant:\n  time_zone: America/Detroit\nrecorder:\n  db_path: state.sqlite\n",
+    )
+    .unwrap();
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    assert_eq!(
+        report(&mut socket, 1).await,
+        json!({"version":"core-0.1.0-rust","timezone":"America/Detroit"})
+    );
+    let updated = ws_command(
+        &mut socket,
+        json!({"id":2,"type":"config/core/update","time_zone":"Europe/London"}),
+    )
+    .await;
+    assert_eq!(updated["success"], true, "{updated}");
+    assert_eq!(
+        report(&mut socket, 3).await,
+        json!({"version":"core-0.1.0-rust","timezone":"Europe/London"})
+    );
+    socket.close(None).await.unwrap();
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+
+    let mut restarted = Server::start(&config).await;
+    let mut socket = authenticated_socket(&restarted).await;
+    assert_eq!(
+        report(&mut socket, 1).await,
+        json!({"version":"core-0.1.0-rust","timezone":"Europe/London"})
+    );
+    socket.close(None).await.unwrap();
+    restarted.child.kill().await.unwrap();
+    restarted.child.wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn real_process_repairs_sdk_storage_events_confirm_and_restart() {
     use futures_util::{SinkExt, StreamExt};
     let directory = tempfile::tempdir().unwrap();
