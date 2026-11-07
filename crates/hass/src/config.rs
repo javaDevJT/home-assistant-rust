@@ -58,6 +58,10 @@ pub struct Config {
     pub zeroconf: ZeroconfConfig,
     #[serde(skip)]
     pub zeroconf_enabled: bool,
+    #[serde(default)]
+    pub dhcp: serde_yaml::Value,
+    #[serde(skip)]
+    pub dhcp_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_sun")]
     pub sun: bool,
     #[serde(default, deserialize_with = "deserialize_sensor_platforms")]
@@ -306,6 +310,7 @@ impl Config {
                 "system_health",
                 "ssdp",
                 "zeroconf",
+                "dhcp",
                 "sun",
                 "sensor",
                 "timer",
@@ -321,6 +326,7 @@ impl Config {
         }
         let ssdp_enabled = mapping.contains_key(serde_yaml::Value::String("ssdp".into()));
         let zeroconf_enabled = mapping.contains_key(serde_yaml::Value::String("zeroconf".into()));
+        let dhcp_enabled = mapping.contains_key(serde_yaml::Value::String("dhcp".into()));
         let mut config: Self = serde_path_to_error::deserialize(value).map_err(|error| {
             // A typed decoding error can quote an invalid scalar. Preserve
             // its configuration path without printing resolved secret values.
@@ -332,6 +338,7 @@ impl Config {
         config.group_order = group_order;
         config.ssdp_enabled = ssdp_enabled;
         config.zeroconf_enabled = zeroconf_enabled;
+        config.dhcp_enabled = dhcp_enabled;
         config.validate()?;
         Ok(config)
     }
@@ -422,6 +429,10 @@ impl Config {
         yaml_truthy(&self.ssdp)
     }
 
+    pub fn dhcp_has_parameters(&self) -> bool {
+        yaml_truthy(&self.dhcp)
+    }
+
     pub fn zeroconf_has_deprecated_parameters(&self) -> bool {
         self.zeroconf.has_deprecated_parameters()
     }
@@ -471,6 +482,9 @@ impl Config {
         }
         if self.zeroconf_enabled {
             components.push("zeroconf");
+        }
+        if self.dhcp_enabled {
+            components.push("dhcp");
         }
         if !self.script.is_empty() {
             components.push("script");
@@ -767,6 +781,41 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .contains(&json!("ssdp"))
+            );
+        }
+    }
+
+    #[test]
+    fn dhcp_yaml_enables_only_an_explicit_section_and_ignores_legacy_parameters() {
+        let absent = Config::parse("{}\n").unwrap();
+        assert!(!absent.dhcp_enabled);
+        assert!(
+            !absent.api_config()["components"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("dhcp"))
+        );
+        for (value, warns) in [
+            ("null", false),
+            ("{}", false),
+            ("[]", false),
+            ("false", false),
+            ("0", false),
+            ("''", false),
+            ("{ignored: value}", true),
+            ("[ignored]", true),
+            ("value", true),
+            ("true", true),
+            ("-1", true),
+        ] {
+            let config = Config::parse(&format!("dhcp: {value}\n")).unwrap();
+            assert!(config.dhcp_enabled, "{value}");
+            assert_eq!(config.dhcp_has_parameters(), warns, "{value}");
+            assert!(
+                config.api_config()["components"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("dhcp"))
             );
         }
     }

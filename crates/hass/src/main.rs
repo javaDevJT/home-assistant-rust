@@ -1,11 +1,14 @@
 //! Independent native Rust implementation of a subset of Home Assistant Core.
 
 mod config;
+mod dhcp;
+mod dhcp_providers;
 mod discovery;
 mod helpers;
 mod homeassistant;
 mod instance_id;
 mod integration_drivers;
+mod ip_policy;
 mod logging;
 mod persons;
 mod recorder;
@@ -33,6 +36,8 @@ use std::{
 };
 use tracing::{info, warn};
 use tracing_subscriber::prelude::*;
+
+const DHCP_CONFIGURATION_WARNING: &str = "The dhcp integration does not support configuration parameters; remove the parameters from configuration.";
 
 #[derive(Parser)]
 #[command(
@@ -91,6 +96,9 @@ async fn main() -> Result<()> {
         }
         if config.zeroconf_has_deprecated_parameters() {
             eprintln!("{}", zeroconf::CONFIGURATION_WARNING);
+        }
+        if config.dhcp_has_parameters() {
+            eprintln!("{DHCP_CONFIGURATION_WARNING}");
         }
         println!("Configuration valid (supported Rust subset)");
         return Ok(());
@@ -213,7 +221,21 @@ async fn main() -> Result<()> {
     if config.zeroconf_has_deprecated_parameters() {
         tracing::warn!(target: "hass::zeroconf", "{}", zeroconf::CONFIGURATION_WARNING);
     }
+    if config.dhcp_has_parameters() {
+        tracing::error!(target: "hass::dhcp", "{DHCP_CONFIGURATION_WARNING}");
+    }
     let discovery_dispatcher = discovery::DiscoveryDispatcher::new(config_entries.clone());
+    let mut dhcp = if config.dhcp_enabled {
+        Some(dhcp::DhcpHost::start(
+            runtime.clone(),
+            config_entries.clone(),
+            registries.clone(),
+            discovery_dispatcher.handle(),
+        )?)
+    } else {
+        None
+    };
+    let dhcp_manager = dhcp.as_ref().map(dhcp::DhcpHost::manager);
     let mut zeroconf = if config.zeroconf_enabled {
         Some(
             zeroconf::ZeroconfHost::start(
@@ -390,6 +412,15 @@ async fn main() -> Result<()> {
     .await??;
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     discovery_dispatcher.mark_started().await;
+    let dhcp_providers = if let Some(host) = &mut dhcp {
+        let providers =
+            dhcp_providers::DhcpProviders::start(host.manager(), network_adapter_manager.clone())
+                .await?;
+        host.observe_removed_keys()?;
+        Some(providers)
+    } else {
+        None
+    };
     if let Some(host) = &mut ssdp {
         host.mark_started(bound_address).await?;
     }
@@ -421,6 +452,7 @@ async fn main() -> Result<()> {
             system_health: Some(system_health_manager),
             ssdp: ssdp_manager,
             zeroconf: zeroconf_manager,
+            dhcp: dhcp_manager,
             network_adapters: Some(network_adapter_manager),
         },
         Some(shutdown_rx),
@@ -431,6 +463,16 @@ async fn main() -> Result<()> {
     );
     let result = axum_serve(listener, app, shutdown_tx, restart.receiver()).await;
     let restart_requested = restart.requested();
+    let dhcp_providers_result = if let Some(providers) = dhcp_providers {
+        providers.shutdown().await
+    } else {
+        Ok(())
+    };
+    let dhcp_result = if let Some(dhcp) = dhcp {
+        dhcp.shutdown().await
+    } else {
+        Ok(())
+    };
     let zeroconf_stop_result = if let Some(zeroconf) = &mut zeroconf {
         zeroconf.stop_discovery().await
     } else {
@@ -480,6 +522,8 @@ async fn main() -> Result<()> {
     ssdp_result?;
     zeroconf_result?;
     zeroconf_stop_result?;
+    dhcp_result?;
+    dhcp_providers_result?;
     recorder_result?;
     automation_result?;
     system_sensor_result?;

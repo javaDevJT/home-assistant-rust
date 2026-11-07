@@ -1,5 +1,52 @@
 # Validation evidence
 
+## Accepted local DHCP source (35 crates)
+
+The native DHCP candidate passes 874 tests across 100 targets with zero failed
+or ignored. A final app-bin run passes all 126 cases. Formatting, strict locked
+offline workspace all-target Clippy and the optimized workspace build pass.
+The macOS optimized `hass` binary SHA-256 is
+`3d7db1362393f27d411694fdb6c7b7c6a4a7bfa60375f2aed0591caa93e6b817`.
+Exact-source publication and Linux CI follow this local receipt.
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked --offline -- -D warnings
+cargo test --workspace --locked --offline --no-fail-fast
+cargo test -p hass --bin hass --locked --offline
+cargo build --release --workspace --locked --offline
+target/release/hass --config examples/configuration.yaml --check
+```
+
+Optimized CLI checks also accept empty configuration, ignored DHCP parameters
+and `dhcp: false`, reject an unknown root key, and open no database or data
+directory. Configuration validation never starts capture or scanning.
+
+New focused proof includes nine DHCP cache/matcher cases, sixteen wire/capture
+cases, nineteen scanner cases, five real WebSocket protocol cases, four
+Runtime/registry/flow host cases, six provider ownership/scheduling cases and
+one parameterized YAML compatibility case. Wire fixtures use actual Ethernet
+IPv4/IPv6 DHCP bytes with requested-address precedence, IDNA2003 and malformed
+options. Scanner fixtures include actual loopback UDP DNS with recursion
+disabled, a 2,048-address bound, named-only neighbor work, failure caching,
+configuration revision/24-hour expiry, deterministic host order and DNS name
+bounds. No test opens live capture or probes a LAN/real resolver/device.
+
+The app proves tracker snapshot/add-only rules, typed private connected-device
+publication without public events, same-MAC registered devices, persisted
+discovery-key identity and forced cache rediscovery after removal. Capture
+callbacks enter a bounded serial runtime queue; startup follows the real
+started event. Shutdown joins capture, drains/joins its consumer and joins
+cancelled scans before the cache SDK closes. Long scans skip missed hourly
+ticks rather than starting a late immediate scan.
+
+The Linux system scan provider and explicit selected capture path are native.
+macOS system scanning is explicitly unsupported; injected providers remain
+portable. Kernel BPF, other link layers, custom integration loading, live
+interface rebinding, frontend consumers and full upstream fixture acceptance
+remain open. See [DHCP-PORT.md](DHCP-PORT.md) and [PORTING.md](PORTING.md).
+Future USB work is outside this immutable receipt.
+
 ## Accepted local Zeroconf source (32 crates)
 
 The current native Zeroconf candidate passes the complete workspace gate:
@@ -7,7 +54,9 @@ The current native Zeroconf candidate passes the complete workspace gate:
 locked offline workspace all-target Clippy, and the optimized workspace build
 pass. The optimized macOS `hass` binary SHA-256 is
 `b18e3006af3628d797c2a59b735e4f39a5c38663b4eb860986d6411a79fd94be`.
-Exact-source publication and Linux CI are recorded after publication.
+Published source is `0b859507ce02a5a8d5be8da50c80285c62fe4949`.
+[Exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42366215802)
+passes at that exact head.
 
 ```sh
 cargo fmt --all -- --check

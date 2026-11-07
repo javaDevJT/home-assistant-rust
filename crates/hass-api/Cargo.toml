@@ -17,6 +17,7 @@ hass-auth.workspace = true
 hass-registry.workspace = true
 hass-template.workspace = true
 hass-config.workspace = true
+hass-dhcp.workspace = true
 hass-notifications.workspace = true
 hass-zone.workspace = true
 hass-person.workspace = true

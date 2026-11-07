@@ -661,3 +661,59 @@ engine owner v73 audits only pinned package archives/provenance and extends
 DHCP-PORT.md, without importing dependency code or capturing/scanning a LAN.
 SDK owner v74 owns only the future hass-dhcp crate, isolated from this workspace
 gate until root separately enrolls it. Root retains app/API/provider wiring.
+
+Published 32-crate source is `0b859507ce02a5a8d5be8da50c80285c62fe4949`.
+[Its exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42366215802)
+passes at that exact head. Root verified only Zeroconf's three status/evidence fields changed
+in the JSON, all 61 test symbols and 76 paths resolve, original source snapshots
+and other records are unchanged, and the 41 partial / 1,524 unported / zero
+complete counts agree with Markdown. The vendor's original lock and manifest
+are retained; only two upstream trailing-whitespace occurrences were trimmed
+and documented before clean staged whitespace validation. The final optimized
+build retains the recorded binary hash. Future DHCP files were not staged.
+
+## DHCP implementation and 35-crate acceptance
+
+The next wave enrolled three separate native owners: `hass-dhcp` for cache and
+matching, `hass-dhcp-wire` for Ethernet decoding and joined passive capture,
+and `hass-dhcp-discover` for cancellable PTR/neighbor scanning. Source-contract
+owner v71 and engine audit v73 inspected exact pinned HA/PyPI source without
+importing or executing package code. SDK v74, wire v77 and scanner v78 released
+their files to root after focused checks. API v75 integrated five passing real
+WebSocket cases. Host fixtures v80 add four Runtime/registry/key-replay cases;
+provider owner v82 adds six actual-frame/injected-provider ownership and
+anchored-scheduling cases. Every source owner has released; root owns further
+integration changes. Inventory v87 owns only PARITY.md/upstream-parity.json.
+
+Independent SDK review v79 found the optional `registered_devices` flag is
+selected by presence even when false; root retains that presence, rejects null
+and adds the exact custom-matcher regression (nine SDK cases pass). Review v81
+found the IDNA UTS46/IDNA2003 mismatch and missing requested-address traffic
+without an IPv4 header. Decoder owner v84 fixed Nameprep and Python's roundtrip
+fallback, preserves ASCII case, and supports bounded IPv6 UDP extension parsing
+with requested-address-only acceptance. All sixteen wire cases pass. Explicit
+empty capture remains idle by native design; default input is projected from
+selected Network adapters, and userspace filtering remains a documented gap.
+
+Scanner review v83 found resolver failure caching, stable host order and the
+terminating DNS root byte were missing. Root added success-conditioned caching,
+resolver mtime/size and list invalidation, the independent 24-hour expiry timer,
+ordered hosts and the exact 255/256-byte boundary. Nineteen scanner cases pass.
+Capture callbacks enter a bounded queue before runtime cache/flow work. The
+private tracker publisher carries genuine integration observations only.
+Producer shutdown and queue draining complete before dropping the weak-handle
+cache owner; accepted in-flight SDK callbacks are documented separately.
+
+The complete 35-crate gate passes 874 tests across 100 targets, zero failed or
+ignored, with a final 126-case app-bin run. Formatting, strict locked offline
+workspace all-target Clippy, optimized build and optimized CLI checks pass.
+Optimized macOS binary SHA-256 is
+`3d7db1362393f27d411694fdb6c7b7c6a4a7bfa60375f2aed0591caa93e6b817`.
+No live capture, real resolver, LAN scan or device traffic was exercised.
+Root reconciles the inventory and publishes this source before exact Linux CI.
+
+USB source-contract v86 is outside this receipt. Root corrected its speculative
+key proposal: pinned USB supplies no discovery key, so the native shared bridge
+will need no-key admission rather than invented persistence/reload behavior.
+The USB consumer unique-ID helper is not the scanner cache key and can collide
+when metadata is absent; path-specific records must remain distinct.

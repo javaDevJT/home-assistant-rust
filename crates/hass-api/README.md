@@ -262,3 +262,22 @@ retain the existing policy. API validation passed with:
 
 The workspace-wide 28-crate gate and compiled app-host persistence fixture are
 owned by the primary integration pass.
+
+### Native discovery streams
+
+The admin-only commands `ssdp/subscribe_discovery`,
+`zeroconf/subscribe_discovery` and `dhcp/subscribe_discovery` use exact `id`/`type`
+requests. Each acknowledges with a null result before its initial cache feed.
+Zeroconf and DHCP install their update listeners before that acknowledgement;
+SSDP retains its source callback replay order. Streams share the 32-subscription
+socket limit, recheck authorization on delivery, report bounded-queue overflow,
+and remove their exact guards and join owned work on unsubscribe/disconnect.
+DHCP sends a single `{add: [...]}` snapshot even when empty, then add-only rows
+with formatted uppercase MACs and the original cached hostname/IP values.
+These protocol callbacks do not introduce synthetic public Runtime events.
+
+`network` and `network/configure` expose admin adapter selection;
+`network/url` reports saved URLs to authenticated callers. See the pinned
+[SSDP](../../docs/SSDP-PORT.md), [Zeroconf](../../docs/ZEROCONF-PORT.md),
+[DHCP](../../docs/DHCP-PORT.md) and [Network](../../docs/NETWORK-PORT.md) contracts
+for command payloads, ownership and remaining compatibility limits.

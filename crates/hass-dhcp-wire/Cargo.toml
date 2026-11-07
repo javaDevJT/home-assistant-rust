@@ -1,0 +1,14 @@
+[package]
+name = "hass-dhcp-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+idna.workspace = true
+stringprep.workspace = true
+pnet_datalink.workspace = true
+tokio.workspace = true

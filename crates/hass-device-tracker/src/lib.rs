@@ -23,11 +23,40 @@ const SERVICE_DOMAIN: &str = "device_tracker";
 const SERVICE_SEE: &str = "see";
 /// Event emitted when `device_tracker.see` first creates a device record.
 pub const EVENT_NEW_DEVICE: &str = "device_tracker_new_device";
+/// Private dispatcher signal for an integration's actual connected device.
+pub const CONNECTED_DEVICE_REGISTERED: &str = "device_tracker_connected_device_registered";
 const METADATA_KEY: &str = "hass-device-tracker.native.v1";
 const HOME_ZONE_ID: &str = "zone.home";
 const STATE_HOME: &str = "home";
 const STATE_NOT_HOME: &str = "not_home";
 const TRACKING_TYPE_POSITION: &str = "position";
+
+/// Connection metadata supplied by a native router/tracker integration.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ConnectedDevice {
+    pub ip: Option<String>,
+    pub host_name: Option<String>,
+    pub mac: Option<String>,
+}
+
+/// Forward a genuine integration observation to private consumers such as DHCP.
+/// This does not create a tracker, persist an event or publish to the public bus.
+pub fn dispatch_connected_device(
+    runtime: &Runtime,
+    device: &ConnectedDevice,
+    context: Context,
+) -> hass_core::Result<()> {
+    runtime.dispatch_signal(
+        CONNECTED_DEVICE_REGISTERED,
+        Map::from_iter([
+            ("ip".into(), json!(device.ip)),
+            ("host_name".into(), json!(device.host_name)),
+            ("mac".into(), json!(device.mac)),
+        ]),
+        context,
+    )?;
+    Ok(())
+}
 
 /// Errors returned by the native provider.
 #[derive(Debug, Error)]

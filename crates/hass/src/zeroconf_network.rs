@@ -6,6 +6,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use crate::ip_policy::ipv4_is_global as python_ipv4_is_global;
 use anyhow::{Context, Result, bail};
 use hass_network::{NetworkAdapter, NetworkManager};
 use mdns_sd::{IfAddr, IfOperStatus, Ifv4Addr, Ifv6Addr, NetworkInterface};
@@ -299,46 +300,6 @@ fn ipv4_mapped(address: Ipv6Addr) -> Option<Ipv4Addr> {
     } else {
         None
     }
-}
-
-fn python_ipv4_is_global(address: Ipv4Addr) -> bool {
-    const PRIVATE: [(Ipv4Addr, u8); 14] = [
-        (Ipv4Addr::new(0, 0, 0, 0), 8),
-        (Ipv4Addr::new(10, 0, 0, 0), 8),
-        (Ipv4Addr::new(127, 0, 0, 0), 8),
-        (Ipv4Addr::new(169, 254, 0, 0), 16),
-        (Ipv4Addr::new(172, 16, 0, 0), 12),
-        (Ipv4Addr::new(192, 0, 0, 0), 24),
-        (Ipv4Addr::new(192, 0, 0, 170), 31),
-        (Ipv4Addr::new(192, 0, 2, 0), 24),
-        (Ipv4Addr::new(192, 168, 0, 0), 16),
-        (Ipv4Addr::new(198, 18, 0, 0), 15),
-        (Ipv4Addr::new(198, 51, 100, 0), 24),
-        (Ipv4Addr::new(203, 0, 113, 0), 24),
-        (Ipv4Addr::new(240, 0, 0, 0), 4),
-        (Ipv4Addr::new(255, 255, 255, 255), 32),
-    ];
-    const GLOBAL_EXCEPTIONS: [Ipv4Addr; 2] =
-        [Ipv4Addr::new(192, 0, 0, 9), Ipv4Addr::new(192, 0, 0, 10)];
-
-    let value = u32::from(address);
-    let in_private = PRIVATE.iter().any(|(network, prefix)| {
-        let shift = 32 - u32::from(*prefix);
-        let mask = if *prefix == 0 { 0 } else { u32::MAX << shift };
-        value & mask == u32::from(*network) & mask
-    });
-    let is_exception = GLOBAL_EXCEPTIONS.contains(&address);
-    let shared_address_space = ipv4_in_prefix(address, Ipv4Addr::new(100, 64, 0, 0), 10);
-    !((in_private && !is_exception) || shared_address_space)
-}
-
-fn ipv4_in_prefix(address: Ipv4Addr, network: Ipv4Addr, prefix: u8) -> bool {
-    let mask = if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - u32::from(prefix))
-    };
-    u32::from(address) & mask == u32::from(network) & mask
 }
 
 fn ipv6_in_prefix(address: Ipv6Addr, network: Ipv6Addr, prefix: u8) -> bool {

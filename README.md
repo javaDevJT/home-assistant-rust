@@ -60,6 +60,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Repairs | Persistent issue registry, refresh scopes, visibility/dismissal, native fix flows and independent child-flow continuation |
 | SSDP | Native discovery cache/callbacks, UDP scanning, UPnP XML/advertisements, config-flow bridge and admin WebSocket feed |
 | Zeroconf | Native DNS-SD wire/cache, generated matching, HomeKit flow policy, local advertisement, duplicate-ID repair and admin WebSocket feed |
+| DHCP | Native observation cache/matching, selected passive capture, Linux PTR/neighbor scans, tracker and config-flow bridges, admin WebSocket feed |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -85,6 +86,7 @@ cargo test --workspace --locked
 - [Network adapter selection and source-IP contracts](docs/NETWORK-PORT.md)
 - [Native Network SDK and injected-provider checks](crates/hass-network/README.md)
 - [Pinned Zeroconf discovery and mDNS port contract](docs/ZEROCONF-PORT.md)
+- [Pinned DHCP observation and packet-engine port contract](docs/DHCP-PORT.md)
 - [Native SSDP SDK, scanner and UPnP server APIs](crates/hass-ssdp/README.md)
 - [Repairs and issue registry port contracts](docs/REPAIRS-PORT.md)
 - [Config subentries, native flow callbacks and lifecycle contracts](docs/CONFIG-SUBENTRIES-PORT.md)
