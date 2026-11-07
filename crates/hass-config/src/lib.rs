@@ -52,6 +52,10 @@ pub struct ConfigEntry {
     pub minor_version: u32,
     pub data: Map<String, Value>,
     pub options: Map<String, Value>,
+    /// Persistent child configurations, serialized in creation order like
+    /// Home Assistant's `subentries` storage list.
+    #[serde(default, deserialize_with = "deserialize_subentries")]
+    pub subentries: Vec<ConfigSubentry>,
     pub state: ConfigEntryState,
     pub reason: Option<String>,
     pub retry_attempts: u32,
@@ -99,6 +103,7 @@ impl fmt::Debug for ConfigEntry {
             .field("minor_version", &self.minor_version)
             .field("data", &"[REDACTED]")
             .field("options", &"[REDACTED]")
+            .field("subentries", &self.subentries.len())
             .field("state", &self.state)
             .field("reason", &self.reason)
             .field("retry_attempts", &self.retry_attempts)
@@ -135,8 +140,221 @@ impl ConfigEntry {
             "pref_disable_polling": self.pref_disable_polling,
             "created_at": self.created_at.timestamp() as f64 + self.created_at.timestamp_subsec_nanos() as f64 / 1_000_000_000.0,
             "modified_at": self.modified_at.timestamp() as f64 + self.modified_at.timestamp_subsec_nanos() as f64 / 1_000_000_000.0,
-            "num_subentries": 0,
+            "num_subentries": self.subentries.len(),
         })
+    }
+}
+
+/// Persisted child configuration belonging to a config entry.
+///
+/// The private `data` map is available to the owning integration driver and
+/// typed manager APIs. It is omitted by [`ConfigSubentry::public_json`] and
+/// redacted from debug output.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigSubentry {
+    pub subentry_id: String,
+    pub subentry_type: String,
+    pub title: String,
+    pub unique_id: Option<String>,
+    pub data: Map<String, Value>,
+}
+
+impl fmt::Debug for ConfigSubentry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConfigSubentry")
+            .field("subentry_id", &self.subentry_id)
+            .field("subentry_type", &self.subentry_type)
+            .field("title", &self.title)
+            .field("unique_id", &self.unique_id)
+            .field("data", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ConfigSubentry {
+    /// Return the public subentry fragment used by config listing adapters.
+    pub fn public_json(&self) -> Value {
+        json!({
+            "subentry_id": self.subentry_id,
+            "subentry_type": self.subentry_type,
+            "title": self.title,
+            "unique_id": self.unique_id,
+        })
+    }
+}
+
+/// Input for adding a new subentry. A persistent ID is assigned by the manager.
+#[derive(Clone)]
+pub struct NewConfigSubentry {
+    pub subentry_type: String,
+    pub title: String,
+    pub unique_id: Option<String>,
+    pub data: Map<String, Value>,
+}
+
+impl NewConfigSubentry {
+    /// Create a new child configuration seed with no optional identity.
+    pub fn new(
+        subentry_type: impl Into<String>,
+        title: impl Into<String>,
+        data: Map<String, Value>,
+    ) -> Self {
+        Self {
+            subentry_type: subentry_type.into(),
+            title: title.into(),
+            unique_id: None,
+            data,
+        }
+    }
+}
+
+/// Fields to replace when updating an existing subentry.
+///
+/// `unique_id: None` means unchanged; `Some(None)` clears the optional ID.
+#[derive(Clone, Default)]
+pub struct ConfigSubentryUpdate {
+    pub title: Option<String>,
+    pub unique_id: Option<Option<String>>,
+    pub data: Option<Map<String, Value>>,
+}
+
+/// Capability advertised for one supported subentry type.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigSubentryTypeInfo {
+    pub supports_reconfigure: bool,
+}
+
+/// Request for one native subentry-flow step.
+#[derive(Clone)]
+pub struct ConfigSubentryFlowRequest {
+    pub flow_id: String,
+    pub domain: String,
+    pub entry_id: String,
+    pub subentry_type: String,
+    pub subentry_id: Option<String>,
+    pub step_id: String,
+    pub source: String,
+    pub user_input: Option<Map<String, Value>>,
+    pub context: Map<String, Value>,
+}
+
+/// Result from a registered native subentry-flow callback.
+#[derive(Clone)]
+pub enum ConfigSubentryFlowResult {
+    Form {
+        step_id: String,
+        data_schema: Option<Value>,
+        errors: Option<Map<String, Value>>,
+        description_placeholders: Option<Map<String, Value>>,
+    },
+    CreateEntry {
+        title: String,
+        data: Map<String, Value>,
+        unique_id: Option<String>,
+    },
+    UpdateAndAbort {
+        update: ConfigSubentryUpdate,
+        data_updates: Option<Map<String, Value>>,
+        reason: Option<String>,
+        reload: bool,
+    },
+    Abort {
+        reason: String,
+    },
+}
+
+impl fmt::Debug for ConfigSubentryFlowResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Form { step_id, .. } => f
+                .debug_struct("Form")
+                .field("step_id", step_id)
+                .finish_non_exhaustive(),
+            Self::CreateEntry {
+                title, unique_id, ..
+            } => f
+                .debug_struct("CreateEntry")
+                .field("title", title)
+                .field("data", &"[REDACTED]")
+                .field("unique_id", unique_id)
+                .finish(),
+            Self::UpdateAndAbort {
+                update,
+                data_updates,
+                reason,
+                reload,
+            } => f
+                .debug_struct("UpdateAndAbort")
+                .field(
+                    "update",
+                    &format_args!(
+                        "title={:?}, unique_id={:?}, data={}",
+                        update.title,
+                        update.unique_id,
+                        update.data.is_some() || data_updates.is_some()
+                    ),
+                )
+                .field("reason", reason)
+                .field("reload", reload)
+                .finish(),
+            Self::Abort { reason } => f.debug_struct("Abort").field("reason", reason).finish(),
+        }
+    }
+}
+
+/// A committed config-entry lifecycle change relevant to native integrations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConfigLifecycleEvent {
+    EntryRemoved {
+        entry_id: String,
+        domain: String,
+    },
+    EntryDisabledByChanged {
+        entry_id: String,
+        disabled_by: Option<String>,
+    },
+    SubentryRemoved {
+        entry_id: String,
+        subentry_id: String,
+    },
+}
+
+/// Owned observer for committed config-entry and subentry lifecycle changes.
+///
+/// Implementations run after persistence and outside config-manager locks. An
+/// error is reported to the initiating caller after commit and cannot undo the
+/// config change.
+pub trait ConfigLifecycleObserver: Send + Sync {
+    fn config_lifecycle_changed(&self, event: &ConfigLifecycleEvent) -> Result<()>;
+}
+
+fn deserialize_subentries<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<ConfigSubentry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StoredSubentries {
+        List(Vec<ConfigSubentry>),
+        LegacyMap(BTreeMap<String, ConfigSubentry>),
+    }
+
+    match StoredSubentries::deserialize(deserializer)? {
+        StoredSubentries::List(entries) => Ok(entries),
+        StoredSubentries::LegacyMap(entries) => {
+            for (subentry_id, subentry) in &entries {
+                if subentry_id != &subentry.subentry_id {
+                    return Err(serde::de::Error::custom(
+                        "stored subentry map key does not match subentry_id",
+                    ));
+                }
+            }
+            Ok(entries.into_values().collect())
+        }
     }
 }
 
@@ -196,6 +414,71 @@ pub struct ConfigFlowRequest {
     pub unique_id: Option<String>,
     pub user_input: Option<Map<String, Value>>,
     pub context: Map<String, Value>,
+}
+
+/// Flow manager that a parent flow can launch after creating its entry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigFlowType {
+    Config,
+    Options,
+    ConfigSubentries,
+}
+
+impl ConfigFlowType {
+    /// Name used by the config-flow continuation protocol.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Config => "config_flow",
+            Self::Options => "options_flow",
+            Self::ConfigSubentries => "config_subentries_flow",
+        }
+    }
+}
+
+/// Public snapshot of one currently active native flow.
+///
+/// The result is the cached API fragment returned by [`ConfigEntries::flow_result`].
+/// `flow_type` remains a Rust enum so adapters can validate a continuation
+/// without guessing from a JSON `handler` value.
+#[derive(Clone)]
+pub struct ConfigFlowInfo {
+    pub flow_type: ConfigFlowType,
+    pub flow_id: String,
+    pub domain: String,
+    pub result: Value,
+}
+
+/// A valid next flow to attach to a parent config flow's create result.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConfigFlowContinuation {
+    pub flow_type: ConfigFlowType,
+    pub flow_id: String,
+}
+
+impl ConfigFlowContinuation {
+    /// Continue with a registered native config flow.
+    pub fn config_flow(flow_id: impl Into<String>) -> Self {
+        Self {
+            flow_type: ConfigFlowType::Config,
+            flow_id: flow_id.into(),
+        }
+    }
+
+    /// Continue with a registered native options flow.
+    pub fn options_flow(flow_id: impl Into<String>) -> Self {
+        Self {
+            flow_type: ConfigFlowType::Options,
+            flow_id: flow_id.into(),
+        }
+    }
+
+    /// Continue with a registered native config-subentry flow.
+    pub fn config_subentries_flow(flow_id: impl Into<String>) -> Self {
+        Self {
+            flow_type: ConfigFlowType::ConfigSubentries,
+            flow_id: flow_id.into(),
+        }
+    }
 }
 
 /// A native handler's response for a config or options flow.
@@ -322,6 +605,39 @@ pub trait ConfigEntryDriver: Send + Sync {
 
     /// Execute one config-flow step.
     fn config_flow(&self, request: &ConfigFlowRequest) -> Result<ConfigFlowResult>;
+
+    /// Run after a new entry has been persisted and setup attempted. A driver
+    /// can use the manager to begin a related config, options, or subentry flow
+    /// and return that flow as the parent's `next_flow` result.
+    fn on_create_entry(
+        &self,
+        _manager: &ConfigEntries,
+        _request: &ConfigFlowRequest,
+        _entry: &ConfigEntry,
+        _result: &ConfigFlowResult,
+    ) -> Result<Option<ConfigFlowContinuation>> {
+        Ok(None)
+    }
+
+    /// Supported child-configuration flow types for this entry. The returned
+    /// values are exposed in the parent's redacted API fragment.
+    fn supported_subentry_types(
+        &self,
+        _entry: &ConfigEntry,
+    ) -> BTreeMap<String, ConfigSubentryTypeInfo> {
+        BTreeMap::new()
+    }
+
+    /// Execute one native subentry-flow step for a registered type.
+    fn subentry_flow(
+        &self,
+        _request: &ConfigSubentryFlowRequest,
+    ) -> Result<ConfigSubentryFlowResult> {
+        Err(Error::InvalidInput(format!(
+            "integration {} does not implement subentry flows",
+            self.domain()
+        )))
+    }
 
     /// Execute one options-flow step. Integrations without options may retain
     /// this default, which fails explicitly if invoked.
@@ -507,6 +823,12 @@ struct FlowSession {
     result: Value,
 }
 
+#[derive(Clone)]
+struct ConfigSubentryFlowSession {
+    request: ConfigSubentryFlowRequest,
+    result: Value,
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum FlowKind {
     Config,
@@ -519,6 +841,7 @@ struct PersistedState {
     core_config: CoreConfig,
     core_config_initialized: bool,
     flows: BTreeMap<String, FlowSession>,
+    subentry_flows: BTreeMap<String, ConfigSubentryFlowSession>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -538,6 +861,21 @@ pub struct ConfigEntries {
     state: Arc<Mutex<PersistedState>>,
     drivers: Arc<RwLock<HashMap<String, Arc<dyn ConfigEntryDriver>>>>,
     operation_lock: Arc<Mutex<()>>,
+    lifecycle_observers: Arc<RwLock<Vec<Arc<dyn ConfigLifecycleObserver>>>>,
+}
+
+/// Owned registration for one config lifecycle observer.
+///
+/// Dropping the guard unregisters only the observer instance it installed.
+pub struct ConfigLifecycleObserverGuard {
+    manager: ConfigEntries,
+    observer: Arc<dyn ConfigLifecycleObserver>,
+}
+
+impl Drop for ConfigLifecycleObserverGuard {
+    fn drop(&mut self) {
+        let _ = self.manager.unregister_lifecycle_observer(&self.observer);
+    }
 }
 
 impl ConfigEntries {
@@ -592,9 +930,11 @@ impl ConfigEntries {
                 core_config,
                 core_config_initialized,
                 flows: BTreeMap::new(),
+                subentry_flows: BTreeMap::new(),
             })),
             drivers: Arc::new(RwLock::new(HashMap::new())),
             operation_lock: Arc::new(Mutex::new(())),
+            lifecycle_observers: Arc::new(RwLock::new(Vec::new())),
         };
         // Persist any restart state normalization before returning.
         {
@@ -622,6 +962,11 @@ impl ConfigEntries {
         }
         drivers.insert(domain.clone(), Arc::clone(&driver));
         drop(drivers);
+        let supported_by_entry = self
+            .list_entries(Some(&domain))
+            .into_iter()
+            .map(|entry| (entry.entry_id, entry.supported_subentry_types))
+            .collect::<HashMap<_, _>>();
         if let Err(error) = self.mutate(|state| {
             for entry in state
                 .entries
@@ -633,6 +978,10 @@ impl ConfigEntries {
                 entry.supports_remove_device = driver.supports_remove_device();
                 entry.supports_unload = driver.supports_unload();
                 entry.supports_reconfigure = driver.supports_reconfigure();
+                entry.supported_subentry_types = supported_by_entry
+                    .get(&entry.entry_id)
+                    .cloned()
+                    .unwrap_or_default();
             }
             Ok(())
         }) {
@@ -662,6 +1011,61 @@ impl ConfigEntries {
         }
     }
 
+    /// Register one owned lifecycle observer.
+    ///
+    /// Registration is pointer-owned: duplicate registration is rejected and
+    /// `unregister_lifecycle_observer` only removes the exact same `Arc`.
+    pub fn register_lifecycle_observer(
+        &self,
+        observer: Arc<dyn ConfigLifecycleObserver>,
+    ) -> Result<()> {
+        let mut observers = self
+            .lifecycle_observers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        if observers
+            .iter()
+            .any(|registered| Arc::ptr_eq(registered, &observer))
+        {
+            return Err(Error::InvalidInput(
+                "config lifecycle observer is already registered".into(),
+            ));
+        }
+        observers.push(observer);
+        Ok(())
+    }
+
+    /// Register an observer with an owned guard that unregisters on drop.
+    pub fn observe_lifecycle(
+        &self,
+        observer: Arc<dyn ConfigLifecycleObserver>,
+    ) -> Result<ConfigLifecycleObserverGuard> {
+        self.register_lifecycle_observer(Arc::clone(&observer))?;
+        Ok(ConfigLifecycleObserverGuard {
+            manager: self.clone(),
+            observer,
+        })
+    }
+
+    /// Unregister only this exact observer instance.
+    pub fn unregister_lifecycle_observer(
+        &self,
+        expected: &Arc<dyn ConfigLifecycleObserver>,
+    ) -> bool {
+        let mut observers = self
+            .lifecycle_observers
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        let Some(index) = observers
+            .iter()
+            .position(|registered| Arc::ptr_eq(registered, expected))
+        else {
+            return false;
+        };
+        observers.remove(index);
+        true
+    }
+
     /// Return a registered integration driver by domain.
     pub fn driver(&self, domain: &str) -> Option<Arc<dyn ConfigEntryDriver>> {
         self.drivers
@@ -669,6 +1073,14 @@ impl ConfigEntries {
             .unwrap_or_else(PoisonError::into_inner)
             .get(domain)
             .cloned()
+    }
+
+    fn with_supported_subentry_types(&self, mut entry: ConfigEntry) -> ConfigEntry {
+        if let Some(driver) = self.driver(&entry.domain) {
+            entry.supported_subentry_types =
+                supported_subentry_types_json(driver.supported_subentry_types(&entry));
+        }
+        entry
     }
 
     /// List only actual registered native flow handlers.
@@ -686,19 +1098,60 @@ impl ConfigEntries {
 
     /// Return the current public form without executing its driver again.
     pub fn flow_result(&self, flow_id: &str) -> Result<Value> {
-        self.lock_state()
+        let state = self.lock_state();
+        state
             .flows
             .get(flow_id)
             .map(|flow| flow.result.clone())
+            .or_else(|| {
+                state
+                    .subentry_flows
+                    .get(flow_id)
+                    .map(|flow| flow.result.clone())
+            })
             .ok_or_else(|| Error::NotFound("unknown config flow".into()))
+    }
+
+    /// Return one active native flow only when its typed flow kind matches.
+    ///
+    /// The snapshot includes the cached result and owning integration domain.
+    /// This is intended for adapters resolving a validated
+    /// [`ConfigFlowContinuation`]; unknown, completed, or mismatched flows fail
+    /// closed with `NotFound`.
+    pub fn active_flow(&self, flow_type: ConfigFlowType, flow_id: &str) -> Result<ConfigFlowInfo> {
+        let state = self.lock_state();
+        let session = match flow_type {
+            ConfigFlowType::Config => state
+                .flows
+                .get(flow_id)
+                .filter(|flow| flow.kind == FlowKind::Config)
+                .map(|flow| (flow.request.domain.clone(), flow.result.clone())),
+            ConfigFlowType::Options => state
+                .flows
+                .get(flow_id)
+                .filter(|flow| flow.kind == FlowKind::Options)
+                .map(|flow| (flow.request.domain.clone(), flow.result.clone())),
+            ConfigFlowType::ConfigSubentries => state
+                .subentry_flows
+                .get(flow_id)
+                .map(|flow| (flow.request.domain.clone(), flow.result.clone())),
+        }
+        .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+        Ok(ConfigFlowInfo {
+            flow_type,
+            flow_id: flow_id.to_owned(),
+            domain: session.0,
+            result: session.1,
+        })
     }
 
     pub fn abort_flow(&self, flow_id: &str) -> Result<()> {
         self.mutate(|state| {
-            state
-                .flows
-                .remove(flow_id)
-                .ok_or_else(|| Error::NotFound("unknown config flow".into()))?;
+            let removed_entry_flow = state.flows.remove(flow_id).is_some();
+            let removed_subentry_flow = state.subentry_flows.remove(flow_id).is_some();
+            if !removed_entry_flow && !removed_subentry_flow {
+                return Err(Error::NotFound("unknown config flow".into()));
+            }
             Ok(())
         })?;
         self.notify_flow_progress(flow_id)
@@ -718,17 +1171,167 @@ impl ConfigEntries {
 
     /// List entries, optionally scoped to an integration domain.
     pub fn list_entries(&self, domain: Option<&str>) -> Vec<ConfigEntry> {
-        self.lock_state()
+        let entries = self
+            .lock_state()
             .entries
             .values()
             .filter(|entry| domain.is_none_or(|domain| entry.domain == domain))
             .cloned()
+            .collect::<Vec<_>>();
+        entries
+            .into_iter()
+            .map(|entry| self.with_supported_subentry_types(entry))
             .collect()
     }
 
     /// Fetch one trusted entry, including its private data and options.
     pub fn get_entry(&self, entry_id: &str) -> Option<ConfigEntry> {
-        self.lock_state().entries.get(entry_id).cloned()
+        let entry = { self.lock_state().entries.get(entry_id).cloned() };
+        entry.map(|entry| self.with_supported_subentry_types(entry))
+    }
+
+    /// Fetch one trusted subentry by its exact parent and child IDs.
+    pub fn get_subentry(&self, entry_id: &str, subentry_id: &str) -> Option<ConfigSubentry> {
+        self.get_entry(entry_id)?
+            .subentries
+            .into_iter()
+            .find(|subentry| subentry.subentry_id == subentry_id)
+    }
+
+    /// Return the parent's persisted subentries in their creation order.
+    pub fn list_subentries(&self, entry_id: &str) -> Result<Vec<ConfigSubentry>> {
+        self.require_entry(entry_id).map(|entry| entry.subentries)
+    }
+
+    /// Check that the child belongs to this exact persisted parent entry.
+    pub fn subentry_exists(&self, entry_id: &str, subentry_id: &str) -> bool {
+        self.lock_state()
+            .entries
+            .get(entry_id)
+            .is_some_and(|entry| {
+                entry
+                    .subentries
+                    .iter()
+                    .any(|subentry| subentry.subentry_id == subentry_id)
+            })
+    }
+
+    /// Persist a new subentry and assign its stable ID.
+    pub fn create_subentry(
+        &self,
+        entry_id: &str,
+        seed: NewConfigSubentry,
+    ) -> Result<ConfigSubentry> {
+        let subentry = ConfigSubentry {
+            subentry_id: Uuid::new_v4().to_string(),
+            subentry_type: seed.subentry_type,
+            title: seed.title,
+            unique_id: seed.unique_id,
+            data: seed.data,
+        };
+        let committed_entry = self.mutate(|state| {
+            let entry = state
+                .entries
+                .get_mut(entry_id)
+                .ok_or_else(|| Error::NotFound(format!("unknown config entry {entry_id}")))?;
+            ensure_subentry_unique_id(&entry.subentries, subentry.unique_id.as_deref(), None)?;
+            if entry
+                .subentries
+                .iter()
+                .any(|existing| existing.subentry_id == subentry.subentry_id)
+            {
+                return Err(Error::Service("generated subentry ID collision".into()));
+            }
+            entry.subentries.push(subentry.clone());
+            entry.modified_at = Utc::now();
+            Ok(entry.clone())
+        })?;
+        self.emit_entry_change("updated", &committed_entry)?;
+        Ok(subentry)
+    }
+
+    /// Replace selected subentry fields. Returns false when no field changed.
+    pub fn update_subentry(
+        &self,
+        entry_id: &str,
+        subentry_id: &str,
+        update: ConfigSubentryUpdate,
+    ) -> Result<bool> {
+        let changed_entry = self.mutate(|state| {
+            let entry = state
+                .entries
+                .get_mut(entry_id)
+                .ok_or_else(|| Error::NotFound(format!("unknown config entry {entry_id}")))?;
+            let subentry_index = entry
+                .subentries
+                .iter()
+                .position(|subentry| subentry.subentry_id == subentry_id)
+                .ok_or_else(|| Error::NotFound("Config subentry not found".into()))?;
+            let previous_unique_id = entry.subentries[subentry_index].unique_id.clone();
+            let mut changed = false;
+            if let Some(unique_id) = update.unique_id.as_ref()
+                && previous_unique_id != *unique_id
+            {
+                ensure_subentry_unique_id(
+                    &entry.subentries,
+                    unique_id.as_deref(),
+                    Some(subentry_id),
+                )?;
+                entry.subentries[subentry_index].unique_id = unique_id.clone();
+                changed = true;
+            }
+            if let Some(title) = update.title.as_ref()
+                && entry.subentries[subentry_index].title != *title
+            {
+                entry.subentries[subentry_index].title = title.clone();
+                changed = true;
+            }
+            if let Some(data) = update.data.as_ref()
+                && entry.subentries[subentry_index].data != *data
+            {
+                entry.subentries[subentry_index].data = data.clone();
+                changed = true;
+            }
+            if !changed {
+                return Ok(None);
+            }
+            entry.modified_at = Utc::now();
+            Ok(Some(entry.clone()))
+        })?;
+        let Some(entry) = changed_entry else {
+            return Ok(false);
+        };
+        self.emit_entry_change("updated", &entry)?;
+        Ok(true)
+    }
+
+    /// Persist subentry removal and notify lifecycle observers after commit.
+    pub fn remove_subentry(&self, entry_id: &str, subentry_id: &str) -> Result<bool> {
+        let removed = self.mutate(|state| {
+            let entry = state
+                .entries
+                .get_mut(entry_id)
+                .ok_or_else(|| Error::NotFound(format!("unknown config entry {entry_id}")))?;
+            let index = entry
+                .subentries
+                .iter()
+                .position(|subentry| subentry.subentry_id == subentry_id)
+                .ok_or_else(|| Error::NotFound("Config subentry not found".into()))?;
+            let subentry = entry.subentries.remove(index);
+            entry.modified_at = Utc::now();
+            Ok((entry.clone(), subentry))
+        })?;
+        let event = ConfigLifecycleEvent::SubentryRemoved {
+            entry_id: entry_id.to_owned(),
+            subentry_id: removed.1.subentry_id,
+        };
+        // Home Assistant clears child registry references before notifying
+        // update listeners; Repairs cleanup follows the same post-commit order.
+        let observer_result = self.notify_lifecycle_observers(&event);
+        let entry_change_result = self.emit_entry_change("updated", &removed.0);
+        observer_result?;
+        entry_change_result?;
+        Ok(true)
     }
 
     /// Create and persist a config entry, checking its identity and source.
@@ -740,7 +1343,7 @@ impl ConfigEntries {
             .as_ref()
             .map(|driver| driver.integration_type().to_owned())
             .unwrap_or_else(default_integration_type);
-        let entry = ConfigEntry {
+        let mut entry = ConfigEntry {
             entry_id: Uuid::new_v4().to_string(),
             domain: seed.domain,
             title: seed.title.trim().to_owned(),
@@ -750,6 +1353,7 @@ impl ConfigEntries {
             minor_version: seed.minor_version,
             data: seed.data,
             options: seed.options,
+            subentries: Vec::new(),
             state: ConfigEntryState::NotLoaded,
             reason: None,
             retry_attempts: 0,
@@ -779,6 +1383,7 @@ impl ConfigEntries {
             modified_at: now,
             integration_type,
         };
+        entry = self.with_supported_subentry_types(entry);
         let entry_id = entry.entry_id.clone();
         self.mutate(|state| {
             ensure_unique_id(
@@ -861,52 +1466,76 @@ impl ConfigEntries {
                 "disabled_by must be `user` or null".into(),
             ));
         }
-        let _operation = self.lock_operation();
+        let operation = self.lock_operation();
         let entry = self.require_entry(entry_id)?;
         if entry.disabled_by.as_deref() == disabled_by {
             return Ok(true);
         }
-        if disabled_by.is_none() && entry.state == ConfigEntryState::FailedUnload {
-            self.update_entry_metadata(entry_id, |current| {
-                current.disabled_by = None;
+        let committed_entry = self.mutate(|state| {
+            let current = state
+                .entries
+                .get_mut(entry_id)
+                .ok_or_else(|| Error::NotFound(format!("unknown config entry {entry_id}")))?;
+            current.disabled_by = disabled_by.map(str::to_owned);
+            if disabled_by.is_none() && current.state == ConfigEntryState::FailedUnload {
                 current.require_reload = true;
-                current.modified_at = Utc::now();
-            })?;
-            return Ok(false);
-        }
-        if disabled_by.is_some() {
-            self.update_entry_metadata(entry_id, |current| {
-                current.disabled_by = Some("user".into());
-                current.modified_at = Utc::now();
-            })?;
-            if entry.state.is_loaded() && self.unload_entry_locked(entry_id).is_err() {
-                return Ok(false);
             }
-            return Ok(true);
-        }
-        self.update_entry_metadata(entry_id, |current| {
-            current.disabled_by = None;
             current.modified_at = Utc::now();
+            Ok(current.clone())
         })?;
-        match self.setup_entry_locked(entry_id) {
-            Ok(_) => Ok(true),
-            Err(error) => {
-                let current = self.require_entry(entry_id)?;
-                if matches!(
-                    current.state,
-                    ConfigEntryState::SetupError | ConfigEntryState::SetupRetry
-                ) {
+
+        // The disable state is durable before the parent lifecycle callbacks,
+        // matching Home Assistant's issue/registry notification ordering.
+        let entry_change_result = self.emit_entry_change("updated", &committed_entry);
+        drop(operation);
+
+        let observer_result =
+            self.notify_lifecycle_observers(&ConfigLifecycleEvent::EntryDisabledByChanged {
+                entry_id: entry_id.to_owned(),
+                disabled_by: disabled_by.map(str::to_owned),
+            });
+
+        // The observer runs before unload/setup, like the pinned source. The
+        // state may be changed by a concurrent request while it runs, so only
+        // complete this transition when the requested value is still current.
+        let operation = self.lock_operation();
+        let operation_result = match self.require_entry(entry_id) {
+            Err(error) => Err(error),
+            Ok(current) if current.disabled_by.as_deref() != disabled_by => Ok(true),
+            Ok(current) if disabled_by.is_some() => {
+                if current.state.is_loaded() && self.unload_entry_locked(entry_id).is_err() {
                     Ok(false)
                 } else {
-                    Err(error)
+                    Ok(true)
                 }
             }
-        }
+            Ok(current) if current.state == ConfigEntryState::FailedUnload => Ok(false),
+            Ok(_) => match self.setup_entry_locked(entry_id) {
+                Ok(_) => Ok(true),
+                Err(error) => match self.require_entry(entry_id) {
+                    Ok(current)
+                        if matches!(
+                            current.state,
+                            ConfigEntryState::SetupError | ConfigEntryState::SetupRetry
+                        ) =>
+                    {
+                        Ok(false)
+                    }
+                    Ok(_) => Err(error),
+                    Err(read_error) => Err(read_error),
+                },
+            },
+        };
+        drop(operation);
+        let success = operation_result?;
+        entry_change_result?;
+        observer_result?;
+        Ok(success)
     }
 
     /// Remove an entry after running its unload and cleanup callbacks.
     pub fn remove_entry(&self, entry_id: &str) -> Result<()> {
-        let _operation = self.lock_operation();
+        let operation = self.lock_operation();
         let entry = self.require_entry(entry_id)?;
         let driver = self.driver(&entry.domain).ok_or_else(|| {
             Error::NotFound(format!(
@@ -924,7 +1553,17 @@ impl ConfigEntries {
             state
                 .flows
                 .retain(|_, flow| flow.request.entry_id.as_deref() != Some(entry_id));
+            state
+                .subentry_flows
+                .retain(|_, flow| flow.request.entry_id != entry_id);
             Ok(())
+        })?;
+        drop(operation);
+        // Source removal dispatch follows registry/issue cleanup. Keep both
+        // outside manager locks so observers can reenter the committed state.
+        self.notify_lifecycle_observers(&ConfigLifecycleEvent::EntryRemoved {
+            entry_id: entry_id.to_owned(),
+            domain: entry.domain.clone(),
         })?;
         self.emit_entry_change("removed", &entry)
     }
@@ -1101,13 +1740,109 @@ impl ConfigEntries {
         self.run_flow_step(request, FlowKind::Options, driver)
     }
 
+    /// Begin a supported native subentry flow. New flows use `source = "user"`
+    /// with no subentry ID; reconfigure flows require the existing exact child
+    /// ID and a type that advertises `supports_reconfigure`.
+    pub fn init_subentry_flow(
+        &self,
+        entry_id: &str,
+        subentry_type: &str,
+        source: &str,
+        subentry_id: Option<&str>,
+        mut context: Map<String, Value>,
+        user_input: Option<Map<String, Value>>,
+    ) -> Result<Value> {
+        validate_source(source)?;
+        match (source, subentry_id) {
+            ("user", None) | ("reconfigure", Some(_)) => {}
+            ("user", Some(_)) => {
+                return Err(Error::InvalidInput(
+                    "new subentry flows cannot specify subentry_id".into(),
+                ));
+            }
+            ("reconfigure", None) => {
+                return Err(Error::InvalidInput(
+                    "subentry reconfigure flow requires subentry_id".into(),
+                ));
+            }
+            _ => {
+                return Err(Error::InvalidInput(
+                    "subentry flows support user and reconfigure sources".into(),
+                ));
+            }
+        }
+        let entry = self.require_entry(entry_id)?;
+        let driver = self.driver(&entry.domain).ok_or_else(|| {
+            Error::NotFound(format!(
+                "no native integration driver registered for {}",
+                entry.domain
+            ))
+        })?;
+        let supported = driver.supported_subentry_types(&entry);
+        let type_info = supported.get(subentry_type).ok_or_else(|| {
+            Error::NotFound(format!(
+                "config entry {} does not support subentry type {subentry_type}",
+                entry.domain
+            ))
+        })?;
+        if source == "reconfigure" {
+            if !type_info.supports_reconfigure {
+                return Err(Error::InvalidInput(format!(
+                    "subentry type {subentry_type} does not support reconfigure"
+                )));
+            }
+            let existing = self
+                .get_subentry(entry_id, subentry_id.expect("source validated"))
+                .ok_or_else(|| Error::NotFound("Config subentry not found".into()))?;
+            if existing.subentry_type != subentry_type {
+                return Err(Error::InvalidInput(
+                    "subentry type does not match the requested reconfigure flow".into(),
+                ));
+            }
+        }
+        context.insert("source".into(), json!(source));
+        context.insert("entry_id".into(), json!(entry_id));
+        context.insert("subentry_type".into(), json!(subentry_type));
+        if let Some(subentry_id) = subentry_id {
+            context.insert("subentry_id".into(), json!(subentry_id));
+        } else {
+            context.remove("subentry_id");
+        }
+        let request = ConfigSubentryFlowRequest {
+            flow_id: Uuid::new_v4().to_string(),
+            domain: entry.domain,
+            entry_id: entry_id.to_owned(),
+            subentry_type: subentry_type.to_owned(),
+            subentry_id: subentry_id.map(str::to_owned),
+            step_id: source.to_owned(),
+            source: source.to_owned(),
+            user_input,
+            context,
+        };
+        self.run_subentry_flow_step(request, driver)
+    }
+
     /// Submit user input to an in-progress config/options flow.
     pub fn submit_flow(&self, flow_id: &str, user_input: Map<String, Value>) -> Result<Value> {
-        let session = self
-            .lock_state()
-            .flows
-            .get(flow_id)
-            .cloned()
+        let (entry_session, subentry_session) = {
+            let state = self.lock_state();
+            (
+                state.flows.get(flow_id).cloned(),
+                state.subentry_flows.get(flow_id).cloned(),
+            )
+        };
+        if let Some(session) = subentry_session {
+            let driver = self.driver(&session.request.domain).ok_or_else(|| {
+                Error::NotFound(format!(
+                    "no native integration driver registered for {}",
+                    session.request.domain
+                ))
+            })?;
+            let mut request = session.request;
+            request.user_input = Some(user_input);
+            return self.run_subentry_flow_step(request, driver);
+        }
+        let session = entry_session
             .ok_or_else(|| Error::NotFound(format!("unknown config flow {flow_id}")))?;
         let driver = self.driver(&session.request.domain).ok_or_else(|| {
             Error::NotFound(format!(
@@ -1452,19 +2187,20 @@ impl ConfigEntries {
                 stored_request.step_id = step_id.clone();
                 stored_request.user_input = None;
                 let flow_id = request.flow_id.clone();
+                let result_json = flow_result_json(&request, kind, &result, None, None);
                 self.mutate(|state| {
                     state.flows.insert(
                         flow_id.clone(),
                         FlowSession {
                             request: stored_request,
                             kind,
-                            result: flow_result_json(&request, &result, None),
+                            result: result_json.clone(),
                         },
                     );
                     Ok(())
                 })?;
                 self.notify_flow_progress(&request.flow_id)?;
-                Ok(flow_result_json(&request, &result, None))
+                Ok(result_json)
             }
             ConfigFlowResult::Abort { .. } => {
                 self.mutate(|state| {
@@ -1472,18 +2208,220 @@ impl ConfigEntries {
                     Ok(())
                 })?;
                 self.notify_flow_progress(&request.flow_id)?;
-                Ok(flow_result_json(&request, &result, None))
+                Ok(flow_result_json(&request, kind, &result, None, None))
             }
             ConfigFlowResult::CreateEntry { .. } => {
                 let entry = self.finish_flow(&request, kind, &result)?;
+                let next_flow = if kind == FlowKind::Config
+                    && !matches!(request.source.as_str(), "reauth" | "reconfigure")
+                {
+                    let next_flow = driver.on_create_entry(self, &request, &entry, &result)?;
+                    if let Some(next_flow) = next_flow.as_ref() {
+                        self.validate_flow_continuation(next_flow)?;
+                    }
+                    next_flow
+                } else {
+                    None
+                };
                 self.mutate(|state| {
                     state.flows.remove(&request.flow_id);
                     Ok(())
                 })?;
                 self.notify_flow_progress(&request.flow_id)?;
-                Ok(flow_result_json(&request, &result, Some(entry)))
+                Ok(flow_result_json(
+                    &request,
+                    kind,
+                    &result,
+                    Some(entry),
+                    next_flow,
+                ))
             }
         }
+    }
+
+    fn validate_flow_continuation(&self, continuation: &ConfigFlowContinuation) -> Result<()> {
+        let state = self.lock_state();
+        let valid = match continuation.flow_type {
+            ConfigFlowType::Config => state
+                .flows
+                .get(&continuation.flow_id)
+                .is_some_and(|flow| flow.kind == FlowKind::Config),
+            ConfigFlowType::Options => state
+                .flows
+                .get(&continuation.flow_id)
+                .is_some_and(|flow| flow.kind == FlowKind::Options),
+            ConfigFlowType::ConfigSubentries => {
+                state.subentry_flows.contains_key(&continuation.flow_id)
+            }
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(Error::InvalidInput(format!(
+                "on_create_entry returned an unknown {:?} flow {}",
+                continuation.flow_type, continuation.flow_id
+            )))
+        }
+    }
+
+    fn run_subentry_flow_step(
+        &self,
+        request: ConfigSubentryFlowRequest,
+        driver: Arc<dyn ConfigEntryDriver>,
+    ) -> Result<Value> {
+        let result = driver.subentry_flow(&request)?;
+        match &result {
+            ConfigSubentryFlowResult::Form { step_id, .. } => {
+                let mut stored_request = request.clone();
+                stored_request.step_id = step_id.clone();
+                stored_request.user_input = None;
+                let flow_id = request.flow_id.clone();
+                let result_json = subentry_flow_result_json(&request, &result, None);
+                self.mutate(|state| {
+                    if state.flows.contains_key(&flow_id)
+                        || state.subentry_flows.contains_key(&flow_id)
+                    {
+                        return Err(Error::InvalidInput("config flow ID collision".into()));
+                    }
+                    state.subentry_flows.insert(
+                        flow_id.clone(),
+                        ConfigSubentryFlowSession {
+                            request: stored_request,
+                            result: result_json.clone(),
+                        },
+                    );
+                    Ok(())
+                })?;
+                self.notify_flow_progress(&request.flow_id)?;
+                Ok(result_json)
+            }
+            ConfigSubentryFlowResult::Abort { .. } => {
+                let result_json = subentry_flow_result_json(&request, &result, None);
+                self.mutate(|state| {
+                    state.subentry_flows.remove(&request.flow_id);
+                    Ok(())
+                })?;
+                self.notify_flow_progress(&request.flow_id)?;
+                Ok(result_json)
+            }
+            ConfigSubentryFlowResult::CreateEntry { .. } => {
+                let subentry = match self.finish_subentry_flow(&request, &result) {
+                    Ok(subentry) => subentry,
+                    Err(Error::InvalidInput(message)) if message == SUBENTRY_ALREADY_CONFIGURED => {
+                        let duplicate = ConfigSubentryFlowResult::Abort {
+                            reason: "already_configured".into(),
+                        };
+                        let result_json = subentry_flow_result_json(&request, &duplicate, None);
+                        self.mutate(|state| {
+                            state.subentry_flows.remove(&request.flow_id);
+                            Ok(())
+                        })?;
+                        self.notify_flow_progress(&request.flow_id)?;
+                        return Ok(result_json);
+                    }
+                    Err(error) => return Err(error),
+                };
+                let result_json = subentry_flow_result_json(&request, &result, Some(subentry));
+                self.mutate(|state| {
+                    state.subentry_flows.remove(&request.flow_id);
+                    Ok(())
+                })?;
+                self.notify_flow_progress(&request.flow_id)?;
+                Ok(result_json)
+            }
+            ConfigSubentryFlowResult::UpdateAndAbort { .. } => {
+                let reason = match self.finish_subentry_reconfigure(&request, &result) {
+                    Ok(reason) => reason,
+                    Err(Error::InvalidInput(message)) if message == SUBENTRY_ALREADY_CONFIGURED => {
+                        "already_configured".into()
+                    }
+                    Err(error) => return Err(error),
+                };
+                let abort = ConfigSubentryFlowResult::Abort { reason };
+                let result_json = subentry_flow_result_json(&request, &abort, None);
+                self.mutate(|state| {
+                    state.subentry_flows.remove(&request.flow_id);
+                    Ok(())
+                })?;
+                self.notify_flow_progress(&request.flow_id)?;
+                Ok(result_json)
+            }
+        }
+    }
+
+    fn finish_subentry_flow(
+        &self,
+        request: &ConfigSubentryFlowRequest,
+        result: &ConfigSubentryFlowResult,
+    ) -> Result<ConfigSubentry> {
+        let ConfigSubentryFlowResult::CreateEntry {
+            title,
+            data,
+            unique_id,
+        } = result
+        else {
+            return Err(Error::InvalidInput(
+                "subentry flow did not create a subentry".into(),
+            ));
+        };
+        if request.source != "user" || request.subentry_id.is_some() {
+            return Err(Error::InvalidInput(
+                "subentry creation requires a new user flow".into(),
+            ));
+        }
+        let mut seed = NewConfigSubentry::new(&request.subentry_type, title, data.clone());
+        seed.unique_id = unique_id.clone();
+        self.create_subentry(&request.entry_id, seed)
+    }
+
+    fn finish_subentry_reconfigure(
+        &self,
+        request: &ConfigSubentryFlowRequest,
+        result: &ConfigSubentryFlowResult,
+    ) -> Result<String> {
+        let ConfigSubentryFlowResult::UpdateAndAbort {
+            update,
+            data_updates,
+            reason,
+            reload,
+        } = result
+        else {
+            return Err(Error::InvalidInput(
+                "subentry reconfigure flow did not update a subentry".into(),
+            ));
+        };
+        if request.source != "reconfigure" {
+            return Err(Error::InvalidInput(
+                "subentry update requires a reconfigure flow".into(),
+            ));
+        }
+        let subentry_id = request.subentry_id.as_deref().ok_or_else(|| {
+            Error::InvalidInput("subentry reconfigure flow is missing subentry_id".into())
+        })?;
+        let mut update = update.clone();
+        if let Some(data_updates) = data_updates {
+            if update.data.is_some() {
+                return Err(Error::InvalidInput(
+                    "cannot set both replacement data and data_updates".into(),
+                ));
+            }
+            let mut data = self
+                .get_subentry(&request.entry_id, subentry_id)
+                .ok_or_else(|| Error::NotFound("Config subentry not found".into()))?
+                .data;
+            data.extend(data_updates.clone());
+            update.data = Some(data);
+        }
+        self.update_subentry(&request.entry_id, subentry_id, update)?;
+        if *reload {
+            // The pinned flow schedules the parent reload independently of its
+            // abort result. This synchronous manager completes that reload and
+            // leaves any setup failure visible on the parent entry.
+            let _ = self.reload_entry(&request.entry_id);
+        }
+        Ok(reason
+            .clone()
+            .unwrap_or_else(|| "reconfigure_successful".into()))
     }
 
     fn finish_flow(
@@ -1826,12 +2764,35 @@ impl ConfigEntries {
     }
 
     fn emit_entry_change(&self, change: &str, entry: &ConfigEntry) -> Result<()> {
+        let entry = self.with_supported_subentry_types(entry.clone());
         let mut data = Map::new();
         data.insert("type".into(), json!(change));
         data.insert("entry".into(), entry.public_json());
         self.runtime
             .fire_event("config_entry_changed", data, Context::default())?;
         Ok(())
+    }
+
+    fn notify_lifecycle_observers(&self, event: &ConfigLifecycleEvent) -> Result<()> {
+        let observers = self
+            .lifecycle_observers
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let mut first_error = None;
+        for observer in observers {
+            if let Err(error) = observer.config_lifecycle_changed(event)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(Error::Service(format!(
+                "config lifecycle committed but observer failed: {error}"
+            ))),
+            None => Ok(()),
+        }
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, PersistedState> {
@@ -1847,10 +2808,16 @@ impl ConfigEntries {
 
 fn flow_result_json(
     request: &ConfigFlowRequest,
+    kind: FlowKind,
     result: &ConfigFlowResult,
     entry: Option<ConfigEntry>,
+    next_flow: Option<ConfigFlowContinuation>,
 ) -> Value {
-    match result {
+    let handler = match kind {
+        FlowKind::Config => json!(request.domain),
+        FlowKind::Options => json!(request.entry_id.as_deref().unwrap_or(&request.domain)),
+    };
+    let mut value = match result {
         ConfigFlowResult::Form {
             step_id,
             data_schema,
@@ -1859,7 +2826,8 @@ fn flow_result_json(
         } => json!({
             "flow_id": request.flow_id,
             "type": "form",
-            "handler": request.domain,
+            "handler": handler,
+            "context": request.context,
             "step_id": step_id,
             "data_schema": data_schema,
             "description_placeholders": description_placeholders,
@@ -1875,7 +2843,7 @@ fn flow_result_json(
             ..
         } => json!({
             "flow_id": request.flow_id,
-            "handler": request.domain,
+            "handler": handler,
             "type": "create_entry",
             "title": title,
             "version": version,
@@ -1888,12 +2856,69 @@ fn flow_result_json(
         }),
         ConfigFlowResult::Abort { reason } => json!({
             "flow_id": request.flow_id,
-            "handler": request.domain,
+            "handler": handler,
             "type": "abort",
+            "context": request.context,
+            "reason": reason,
+        }),
+    };
+    if let Some(next_flow) = next_flow {
+        value["next_flow"] = json!([next_flow.flow_type.as_str(), next_flow.flow_id]);
+    }
+    value
+}
+
+fn subentry_flow_result_json(
+    request: &ConfigSubentryFlowRequest,
+    result: &ConfigSubentryFlowResult,
+    subentry: Option<ConfigSubentry>,
+) -> Value {
+    let handler = json!([request.entry_id, request.subentry_type]);
+    match result {
+        ConfigSubentryFlowResult::Form {
+            step_id,
+            data_schema,
+            errors,
+            description_placeholders,
+        } => json!({
+            "flow_id": request.flow_id,
+            "handler": handler,
+            "type": "form",
+            "context": request.context,
+            "step_id": step_id,
+            "data_schema": data_schema,
+            "description_placeholders": description_placeholders,
+            "errors": errors,
+            "last_step": null,
+            "preview": null,
+        }),
+        ConfigSubentryFlowResult::CreateEntry { title, .. } => json!({
+            "flow_id": request.flow_id,
+            "handler": handler,
+            "type": "create_entry",
+            "title": title,
+            "result": subentry.map(|subentry| subentry.public_json()),
+            "description": null,
+            "description_placeholders": null,
+        }),
+        ConfigSubentryFlowResult::UpdateAndAbort { reason, .. } => json!({
+            "flow_id": request.flow_id,
+            "handler": handler,
+            "type": "abort",
+            "context": request.context,
+            "reason": reason.as_deref().unwrap_or("reconfigure_successful"),
+        }),
+        ConfigSubentryFlowResult::Abort { reason } => json!({
+            "flow_id": request.flow_id,
+            "handler": handler,
+            "type": "abort",
+            "context": request.context,
             "reason": reason,
         }),
     }
 }
+
+const SUBENTRY_ALREADY_CONFIGURED: &str = "subentry unique ID already configured";
 
 fn validate_new_entry(seed: &NewConfigEntry) -> Result<()> {
     validate_domain(&seed.domain)?;
@@ -1914,6 +2939,46 @@ fn validate_new_entry(seed: &NewConfigEntry) -> Result<()> {
     Ok(())
 }
 
+fn validate_subentry(subentry: &ConfigSubentry) -> Result<()> {
+    if subentry.subentry_id.trim().is_empty() {
+        return Err(Error::InvalidInput(
+            "stored subentry has an empty ID".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_subentry_unique_id(
+    subentries: &[ConfigSubentry],
+    unique_id: Option<&str>,
+    except_subentry: Option<&str>,
+) -> Result<()> {
+    let Some(unique_id) = unique_id else {
+        return Ok(());
+    };
+    if subentries.iter().any(|existing| {
+        existing.unique_id.as_deref() == Some(unique_id)
+            && Some(existing.subentry_id.as_str()) != except_subentry
+    }) {
+        return Err(Error::InvalidInput(SUBENTRY_ALREADY_CONFIGURED.into()));
+    }
+    Ok(())
+}
+
+fn supported_subentry_types_json(
+    supported: BTreeMap<String, ConfigSubentryTypeInfo>,
+) -> Map<String, Value> {
+    supported
+        .into_iter()
+        .map(|(subentry_type, info)| {
+            (
+                subentry_type,
+                json!({"supports_reconfigure": info.supports_reconfigure}),
+            )
+        })
+        .collect()
+}
+
 fn validate_entry(entry: &ConfigEntry) -> Result<()> {
     validate_domain(&entry.domain)?;
     validate_source(&entry.source)?;
@@ -1931,6 +2996,25 @@ fn validate_entry(entry: &ConfigEntry) -> Result<()> {
         return Err(Error::InvalidInput(
             "stored disabled_by must be user or null".into(),
         ));
+    }
+    let mut subentry_ids = std::collections::HashSet::new();
+    for subentry in &entry.subentries {
+        validate_subentry(subentry)?;
+        if !subentry_ids.insert(subentry.subentry_id.as_str()) {
+            return Err(Error::InvalidInput(
+                "duplicate subentry ID in stored config entry".into(),
+            ));
+        }
+    }
+    let mut unique_ids = std::collections::HashSet::new();
+    for subentry in &entry.subentries {
+        if let Some(unique_id) = subentry.unique_id.as_deref()
+            && !unique_ids.insert(unique_id)
+        {
+            return Err(Error::InvalidInput(
+                "duplicate subentry unique ID in stored config entry".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2063,9 +3147,13 @@ fn optional_url_value(field: &str, value: &Value) -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration as StdDuration;
 
-    use hass_core::{MemoryStore, Runtime};
+    use hass_core::{
+        Event, EventHistoryQuery, HistoryQuery, HistorySeries, MemoryStore, PurgeResult, Runtime,
+        State, Store,
+    };
 
     use super::*;
 
@@ -2073,9 +3161,12 @@ mod tests {
         setup_calls: AtomicUsize,
         unload_calls: AtomicUsize,
         remove_calls: AtomicUsize,
+        on_create_calls: AtomicUsize,
+        on_create_saw_loaded: AtomicBool,
         fail_first_setup: bool,
         fail_unload: bool,
         retry_second_setup: bool,
+        launch_subentry_flow_after_create: bool,
         version: (u32, u32),
     }
 
@@ -2085,9 +3176,12 @@ mod tests {
                 setup_calls: AtomicUsize::new(0),
                 unload_calls: AtomicUsize::new(0),
                 remove_calls: AtomicUsize::new(0),
+                on_create_calls: AtomicUsize::new(0),
+                on_create_saw_loaded: AtomicBool::new(false),
                 fail_first_setup: false,
                 fail_unload: false,
                 retry_second_setup: false,
+                launch_subentry_flow_after_create: false,
                 version: (1, 1),
             }
         }
@@ -2162,6 +3256,88 @@ mod tests {
             Ok(result)
         }
 
+        fn on_create_entry(
+            &self,
+            manager: &ConfigEntries,
+            _request: &ConfigFlowRequest,
+            entry: &ConfigEntry,
+            _result: &ConfigFlowResult,
+        ) -> Result<Option<ConfigFlowContinuation>> {
+            self.on_create_calls.fetch_add(1, Ordering::SeqCst);
+            self.on_create_saw_loaded.store(
+                manager
+                    .get_entry(&entry.entry_id)
+                    .is_some_and(|entry| entry.state == ConfigEntryState::Loaded),
+                Ordering::SeqCst,
+            );
+            if !self.launch_subentry_flow_after_create {
+                return Ok(None);
+            }
+            let flow = manager.init_subentry_flow(
+                &entry.entry_id,
+                "fixture_child",
+                "user",
+                None,
+                Map::new(),
+                None,
+            )?;
+            let flow_id = flow
+                .get("flow_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Error::InvalidInput("subentry flow has no flow_id".into()))?;
+            Ok(Some(ConfigFlowContinuation::config_subentries_flow(
+                flow_id,
+            )))
+        }
+
+        fn supported_subentry_types(
+            &self,
+            _entry: &ConfigEntry,
+        ) -> BTreeMap<String, ConfigSubentryTypeInfo> {
+            BTreeMap::from([(
+                "fixture_child".into(),
+                ConfigSubentryTypeInfo {
+                    supports_reconfigure: true,
+                },
+            )])
+        }
+
+        fn subentry_flow(
+            &self,
+            request: &ConfigSubentryFlowRequest,
+        ) -> Result<ConfigSubentryFlowResult> {
+            let Some(user_input) = request.user_input.as_ref() else {
+                return Ok(ConfigSubentryFlowResult::Form {
+                    step_id: if request.source == "reconfigure" {
+                        "reconfigure".into()
+                    } else {
+                        "user".into()
+                    },
+                    data_schema: Some(json!([{"name":"token","type":"string"}])),
+                    errors: None,
+                    description_placeholders: None,
+                });
+            };
+            if request.source == "reconfigure" {
+                Ok(ConfigSubentryFlowResult::UpdateAndAbort {
+                    update: ConfigSubentryUpdate {
+                        title: Some("Fixture child updated".into()),
+                        unique_id: Some(Some("fixture-child-updated".into())),
+                        data: None,
+                    },
+                    data_updates: Some(user_input.clone()),
+                    reason: None,
+                    reload: false,
+                })
+            } else {
+                Ok(ConfigSubentryFlowResult::CreateEntry {
+                    title: "Fixture child".into(),
+                    data: user_input.clone(),
+                    unique_id: Some("fixture-child-1".into()),
+                })
+            }
+        }
+
         fn options_flow(&self, request: &ConfigFlowRequest) -> Result<ConfigFlowResult> {
             if request.user_input.is_none() {
                 return Ok(ConfigFlowResult::form(
@@ -2215,6 +3391,209 @@ mod tests {
         seed
     }
 
+    #[derive(Default)]
+    struct LifecycleObserver {
+        events: std::sync::Mutex<Vec<ConfigLifecycleEvent>>,
+        manager: std::sync::Mutex<Option<ConfigEntries>>,
+        runtime_events: std::sync::Mutex<Option<tokio::sync::broadcast::Receiver<Event>>>,
+        check_subentry_cleanup_order: AtomicBool,
+        check_disable_notification_order: AtomicBool,
+        check_parent_remove_notification_order: AtomicBool,
+    }
+
+    impl ConfigLifecycleObserver for LifecycleObserver {
+        fn config_lifecycle_changed(&self, event: &ConfigLifecycleEvent) -> Result<()> {
+            if let Some(manager) = self
+                .manager
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                match event {
+                    ConfigLifecycleEvent::EntryRemoved { entry_id, .. } => {
+                        let (sender, receiver) = std::sync::mpsc::channel();
+                        let entry_id = entry_id.clone();
+                        std::thread::spawn(move || {
+                            let result = manager.unload_entry(&entry_id).is_err();
+                            let _ = sender.send(result);
+                        });
+                        if receiver.recv_timeout(StdDuration::from_secs(1)) != Ok(true) {
+                            return Err(Error::Service(
+                                "entry-removal observer could not reenter the manager".into(),
+                            ));
+                        }
+                        if self
+                            .check_parent_remove_notification_order
+                            .load(Ordering::SeqCst)
+                        {
+                            let mut receiver = self.runtime_events.lock().unwrap();
+                            let receiver = receiver.as_mut().unwrap();
+                            while let Ok(event) = receiver.try_recv() {
+                                if event.event_type == "config_entry_changed"
+                                    && event.data.get("type").and_then(Value::as_str)
+                                        == Some("removed")
+                                {
+                                    return Err(Error::Service(
+                                        "parent removal event preceded cleanup observer".into(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    ConfigLifecycleEvent::EntryDisabledByChanged {
+                        entry_id,
+                        disabled_by,
+                    } => {
+                        if disabled_by.is_some() {
+                            let (sender, receiver) = std::sync::mpsc::channel();
+                            let entry_id = entry_id.clone();
+                            std::thread::spawn(move || {
+                                let result = manager.unload_entry(&entry_id).is_ok();
+                                let _ = sender.send(result);
+                            });
+                            if receiver.recv_timeout(StdDuration::from_secs(1)) != Ok(true) {
+                                return Err(Error::Service(
+                                    "disable observer could not reenter the manager".into(),
+                                ));
+                            }
+                        }
+                        if self.check_disable_notification_order.load(Ordering::SeqCst) {
+                            self.expect_entry_change("updated")?;
+                        }
+                    }
+                    ConfigLifecycleEvent::SubentryRemoved {
+                        entry_id,
+                        subentry_id,
+                    } if manager.subentry_exists(entry_id, subentry_id) => {
+                        return Err(Error::Service(
+                            "subentry observer ran before persisted removal".into(),
+                        ));
+                    }
+                    ConfigLifecycleEvent::SubentryRemoved { .. }
+                        if self.check_subentry_cleanup_order.load(Ordering::SeqCst) =>
+                    {
+                        if let Some(receiver) = self
+                            .runtime_events
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_mut()
+                            && !matches!(
+                                receiver.try_recv(),
+                                Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                            )
+                        {
+                            return Err(Error::Service(
+                                "subentry removal event preceded cleanup observer".into(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
+            Ok(())
+        }
+    }
+
+    impl LifecycleObserver {
+        fn expect_entry_change(&self, expected_change: &str) -> Result<()> {
+            let mut receiver = self
+                .runtime_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let receiver = receiver
+                .as_mut()
+                .ok_or_else(|| Error::Service("runtime event receiver is missing".into()))?;
+            loop {
+                match receiver.try_recv() {
+                    Ok(event)
+                        if event.event_type == "config_entry_changed"
+                            && event.data.get("type").and_then(Value::as_str)
+                                == Some(expected_change) =>
+                    {
+                        return Ok(());
+                    }
+                    Ok(_) | Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                        return Err(Error::Service(format!(
+                            "expected config entry {expected_change} event before lifecycle callback"
+                        )));
+                    }
+                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                        return Err(Error::Service("runtime event receiver closed".into()));
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingMetadataStore {
+        inner: MemoryStore,
+        fail_metadata: AtomicBool,
+    }
+
+    impl Store for FailingMetadataStore {
+        fn load_states(&self) -> Result<Vec<State>> {
+            self.inner.load_states()
+        }
+
+        fn put_state(&self, state: &State, event: Option<&Event>) -> Result<()> {
+            self.inner.put_state(state, event)
+        }
+
+        fn remove_state(&self, entity_id: &str, event: &Event) -> Result<()> {
+            self.inner.remove_state(entity_id, event)
+        }
+
+        fn append_event(&self, event: &Event) -> Result<()> {
+            self.inner.append_event(event)
+        }
+
+        fn get_data(&self, key: &str) -> Result<Option<Value>> {
+            self.inner.get_data(key)
+        }
+
+        fn set_data(&self, key: &str, value: &Value) -> Result<()> {
+            if self.fail_metadata.load(Ordering::SeqCst) {
+                return Err(Error::Storage("injected metadata failure".into()));
+            }
+            self.inner.set_data(key, value)
+        }
+
+        fn delete_data(&self, key: &str) -> Result<bool> {
+            self.inner.delete_data(key)
+        }
+
+        fn history(
+            &self,
+            entity_id: &str,
+            start: DateTime<Utc>,
+            end: DateTime<Utc>,
+        ) -> Result<Vec<State>> {
+            self.inner.history(entity_id, start, end)
+        }
+
+        fn history_query(&self, query: &HistoryQuery) -> Result<Vec<HistorySeries>> {
+            self.inner.history_query(query)
+        }
+
+        fn event_history_query(&self, query: &EventHistoryQuery) -> Result<Vec<Event>> {
+            self.inner.event_history_query(query)
+        }
+
+        fn purge_before(&self, cutoff: DateTime<Utc>) -> Result<PurgeResult> {
+            self.inner.purge_before(cutoff)
+        }
+
+        fn repack(&self) -> Result<()> {
+            self.inner.repack()
+        }
+    }
+
     #[test]
     fn driver_cleanup_matches_instance_and_preserves_replacements() {
         let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
@@ -2247,7 +3626,19 @@ mod tests {
             .unwrap();
         assert_eq!(started["type"], "form");
         assert_eq!(started["step_id"], "credentials");
+        assert_eq!(started["context"]["source"], "user");
         let flow_id = started["flow_id"].as_str().unwrap();
+        let active = manager
+            .active_flow(ConfigFlowType::Config, flow_id)
+            .unwrap();
+        assert_eq!(active.flow_type, ConfigFlowType::Config);
+        assert_eq!(active.domain, "fixture");
+        assert_eq!(active.result, started);
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::Options, flow_id)
+                .is_err()
+        );
         let mut input = Map::new();
         input.insert("token".into(), json!("top-secret-flow-token"));
         let finished = manager.submit_flow(flow_id, input).unwrap();
@@ -2281,11 +3672,22 @@ mod tests {
 
         let options_start = manager.init_options_flow(&entry_id).unwrap();
         assert_eq!(options_start["type"], "form");
+        assert_eq!(options_start["handler"], entry_id);
+        assert_eq!(options_start["context"]["entry_id"], entry_id);
         let options_flow_id = options_start["flow_id"].as_str().unwrap();
+        let active_options = manager
+            .active_flow(ConfigFlowType::Options, options_flow_id)
+            .unwrap();
+        assert_eq!(active_options.result, options_start);
         let mut options = Map::new();
         options.insert("polling".into(), json!(15));
         let options_result = manager.submit_flow(options_flow_id, options).unwrap();
         assert_eq!(options_result["type"], "create_entry");
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::Options, options_flow_id)
+                .is_err()
+        );
         assert_eq!(manager.get_entry(&entry_id).unwrap().options["polling"], 15);
         assert_eq!(driver.unload_calls.load(Ordering::SeqCst), 1);
         assert_eq!(driver.setup_calls.load(Ordering::SeqCst), 2);
@@ -2523,5 +3925,540 @@ mod tests {
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn subentry_crud_preserves_identity_uniqueness_and_secret_redaction() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let driver = Arc::new(FixtureDriver::new());
+        register(&manager, driver);
+        let entry = manager.create_entry(seed()).unwrap();
+        assert_eq!(entry.public_json()["num_subentries"], 0);
+        assert_eq!(
+            entry.public_json()["supported_subentry_types"]["fixture_child"]["supports_reconfigure"],
+            true
+        );
+
+        let mut data = Map::new();
+        data.insert("token".into(), json!("private-child-secret"));
+        let mut child_seed = NewConfigSubentry::new("fixture_child", "Fixture child", data);
+        child_seed.unique_id = Some("child-unique-1".into());
+        let child = manager
+            .create_subentry(&entry.entry_id, child_seed.clone())
+            .unwrap();
+        assert_ne!(child.subentry_id, entry.entry_id);
+        assert!(Uuid::parse_str(&child.subentry_id).is_ok());
+        assert_eq!(
+            manager.get_subentry(&entry.entry_id, &child.subentry_id),
+            Some(child.clone())
+        );
+        let listed = manager.list_subentries(&entry.entry_id).unwrap();
+        assert_eq!(listed.as_slice(), std::slice::from_ref(&child));
+        assert!(manager.subentry_exists(&entry.entry_id, &child.subentry_id));
+        assert_eq!(
+            manager.get_entry(&entry.entry_id).unwrap().public_json()["num_subentries"],
+            1
+        );
+        assert!(child.public_json().get("data").is_none());
+        assert!(!format!("{child:?}").contains("private-child-secret"));
+        assert!(
+            !child
+                .public_json()
+                .to_string()
+                .contains("private-child-secret")
+        );
+
+        assert!(
+            manager
+                .create_subentry(&entry.entry_id, child_seed)
+                .is_err()
+        );
+        assert_eq!(manager.list_subentries(&entry.entry_id).unwrap().len(), 1);
+
+        let mut replacement_data = Map::new();
+        replacement_data.insert("region".into(), json!("north"));
+        assert!(
+            manager
+                .update_subentry(
+                    &entry.entry_id,
+                    &child.subentry_id,
+                    ConfigSubentryUpdate {
+                        title: Some("Renamed child".into()),
+                        unique_id: Some(Some("child-unique-2".into())),
+                        data: Some(replacement_data.clone()),
+                    },
+                )
+                .unwrap()
+        );
+        assert!(
+            !manager
+                .update_subentry(
+                    &entry.entry_id,
+                    &child.subentry_id,
+                    ConfigSubentryUpdate {
+                        title: Some("Renamed child".into()),
+                        unique_id: Some(Some("child-unique-2".into())),
+                        data: Some(replacement_data.clone()),
+                    },
+                )
+                .unwrap()
+        );
+
+        let mut sibling_seed = NewConfigSubentry::new("fixture_child", "Sibling", Map::new());
+        sibling_seed.unique_id = Some("sibling-unique".into());
+        let sibling = manager
+            .create_subentry(&entry.entry_id, sibling_seed)
+            .unwrap();
+        assert!(
+            manager
+                .update_subentry(
+                    &entry.entry_id,
+                    &child.subentry_id,
+                    ConfigSubentryUpdate {
+                        unique_id: Some(Some("sibling-unique".into())),
+                        ..ConfigSubentryUpdate::default()
+                    },
+                )
+                .is_err()
+        );
+        assert_eq!(
+            manager
+                .get_subentry(&entry.entry_id, &child.subentry_id)
+                .unwrap()
+                .unique_id
+                .as_deref(),
+            Some("child-unique-2")
+        );
+        assert!(
+            manager
+                .remove_subentry(&entry.entry_id, &child.subentry_id)
+                .unwrap()
+        );
+        assert!(!manager.subentry_exists(&entry.entry_id, &child.subentry_id));
+        assert!(
+            manager
+                .get_subentry(&entry.entry_id, &sibling.subentry_id)
+                .is_some()
+        );
+        assert!(
+            manager
+                .remove_subentry(&entry.entry_id, &child.subentry_id)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn registered_native_subentry_flow_creates_reconfigures_and_rejects_duplicates() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager.create_entry(seed()).unwrap();
+
+        let started = manager
+            .init_subentry_flow(
+                &entry.entry_id,
+                "fixture_child",
+                "user",
+                None,
+                Map::new(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(started["type"], "form");
+        assert_eq!(started["handler"], json!([entry.entry_id, "fixture_child"]));
+        assert!(
+            manager
+                .flow_result(started["flow_id"].as_str().unwrap())
+                .is_ok()
+        );
+        let active = manager
+            .active_flow(
+                ConfigFlowType::ConfigSubentries,
+                started["flow_id"].as_str().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(active.result, started);
+        assert!(
+            manager
+                .active_flow(ConfigFlowType::Config, &active.flow_id)
+                .is_err()
+        );
+        let mut input = Map::new();
+        input.insert("token".into(), json!("private-flow-secret"));
+        let created = manager
+            .submit_flow(started["flow_id"].as_str().unwrap(), input)
+            .unwrap();
+        assert_eq!(created["type"], "create_entry");
+        assert_eq!(created["result"]["subentry_type"], "fixture_child");
+        assert!(created["result"].get("data").is_none());
+        assert!(!created.to_string().contains("private-flow-secret"));
+        let subentry_id = created["result"]["subentry_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            manager
+                .get_subentry(&entry.entry_id, &subentry_id)
+                .unwrap()
+                .data["token"],
+            "private-flow-secret"
+        );
+
+        let duplicate = manager
+            .init_subentry_flow(
+                &entry.entry_id,
+                "fixture_child",
+                "user",
+                None,
+                Map::new(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            manager
+                .submit_flow(
+                    duplicate["flow_id"].as_str().unwrap(),
+                    Map::from_iter([("token".into(), json!("duplicate"))]),
+                )
+                .unwrap()["reason"],
+            "already_configured"
+        );
+        assert_eq!(manager.list_subentries(&entry.entry_id).unwrap().len(), 1);
+
+        let reconfigure = manager
+            .init_subentry_flow(
+                &entry.entry_id,
+                "fixture_child",
+                "reconfigure",
+                Some(&subentry_id),
+                Map::new(),
+                None,
+            )
+            .unwrap();
+        let mut updates = Map::new();
+        updates.insert("region".into(), json!("west"));
+        let finished = manager
+            .submit_flow(reconfigure["flow_id"].as_str().unwrap(), updates)
+            .unwrap();
+        assert_eq!(finished["type"], "abort");
+        assert_eq!(finished["reason"], "reconfigure_successful");
+        let updated = manager.get_subentry(&entry.entry_id, &subentry_id).unwrap();
+        assert_eq!(updated.title, "Fixture child updated");
+        assert_eq!(updated.unique_id.as_deref(), Some("fixture-child-updated"));
+        assert_eq!(updated.data["region"], "west");
+        assert_eq!(updated.data["token"], "private-flow-secret");
+
+        assert!(
+            manager
+                .init_subentry_flow(
+                    &entry.entry_id,
+                    "unsupported",
+                    "user",
+                    None,
+                    Map::new(),
+                    None,
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn parent_create_callback_can_launch_a_registered_subentry_flow() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let driver = Arc::new(FixtureDriver {
+            launch_subentry_flow_after_create: true,
+            ..FixtureDriver::new()
+        });
+        register(&manager, driver.clone());
+
+        let started = manager
+            .init_config_flow("fixture", "user", Map::new())
+            .unwrap();
+        let mut input = Map::new();
+        input.insert("token".into(), json!("parent-token"));
+        let parent_result = manager
+            .submit_flow(started["flow_id"].as_str().unwrap(), input)
+            .unwrap();
+        assert_eq!(parent_result["type"], "create_entry");
+        assert_eq!(
+            parent_result["next_flow"][0],
+            ConfigFlowType::ConfigSubentries.as_str()
+        );
+        assert!(driver.on_create_saw_loaded.load(Ordering::SeqCst));
+        assert_eq!(driver.on_create_calls.load(Ordering::SeqCst), 1);
+
+        let child_flow_id = parent_result["next_flow"][1].as_str().unwrap();
+        let child_form = manager.flow_result(child_flow_id).unwrap();
+        assert_eq!(child_form["type"], "form");
+        assert_eq!(
+            child_form["handler"],
+            json!([parent_result["result"]["entry_id"], "fixture_child"])
+        );
+        let mut child_input = Map::new();
+        child_input.insert("token".into(), json!("child-token"));
+        let child_result = manager.submit_flow(child_flow_id, child_input).unwrap();
+        assert_eq!(child_result["type"], "create_entry");
+        assert_eq!(
+            manager
+                .get_entry(parent_result["result"]["entry_id"].as_str().unwrap())
+                .unwrap()
+                .public_json()["num_subentries"],
+            1
+        );
+    }
+
+    #[test]
+    fn lifecycle_observers_receive_committed_events_outside_manager_locks() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager.create_entry(seed()).unwrap();
+        let child = manager
+            .create_subentry(
+                &entry.entry_id,
+                NewConfigSubentry::new("fixture_child", "Child", Map::new()),
+            )
+            .unwrap();
+
+        let observer = Arc::new(LifecycleObserver::default());
+        let observer_trait: Arc<dyn ConfigLifecycleObserver> = observer.clone();
+        let replacement: Arc<dyn ConfigLifecycleObserver> = Arc::new(LifecycleObserver::default());
+        manager
+            .register_lifecycle_observer(observer_trait.clone())
+            .unwrap();
+        observer.manager.lock().unwrap().replace(manager.clone());
+        assert!(
+            manager
+                .register_lifecycle_observer(observer_trait.clone())
+                .is_err()
+        );
+        assert!(!manager.unregister_lifecycle_observer(&replacement));
+
+        let mut runtime_events = manager.runtime.subscribe();
+        while runtime_events.try_recv().is_ok() {}
+        observer
+            .runtime_events
+            .lock()
+            .unwrap()
+            .replace(runtime_events);
+        observer
+            .check_subentry_cleanup_order
+            .store(true, Ordering::SeqCst);
+        assert!(
+            manager
+                .remove_subentry(&entry.entry_id, &child.subentry_id)
+                .unwrap()
+        );
+        observer
+            .check_subentry_cleanup_order
+            .store(false, Ordering::SeqCst);
+        assert_eq!(
+            observer
+                .runtime_events
+                .lock()
+                .unwrap()
+                .as_mut()
+                .unwrap()
+                .try_recv()
+                .unwrap()
+                .event_type,
+            "config_entry_changed"
+        );
+
+        observer
+            .check_disable_notification_order
+            .store(true, Ordering::SeqCst);
+        assert!(
+            manager
+                .disable_entry(&entry.entry_id, Some("user"))
+                .unwrap()
+        );
+        assert!(manager.disable_entry(&entry.entry_id, None).unwrap());
+        observer
+            .check_disable_notification_order
+            .store(false, Ordering::SeqCst);
+        while observer
+            .runtime_events
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .try_recv()
+            .is_ok()
+        {}
+        observer
+            .check_parent_remove_notification_order
+            .store(true, Ordering::SeqCst);
+        manager.remove_entry(&entry.entry_id).unwrap();
+        observer.expect_entry_change("removed").unwrap();
+        observer
+            .check_parent_remove_notification_order
+            .store(false, Ordering::SeqCst);
+        assert_eq!(
+            *observer.events.lock().unwrap(),
+            vec![
+                ConfigLifecycleEvent::SubentryRemoved {
+                    entry_id: entry.entry_id.clone(),
+                    subentry_id: child.subentry_id.clone(),
+                },
+                ConfigLifecycleEvent::EntryDisabledByChanged {
+                    entry_id: entry.entry_id.clone(),
+                    disabled_by: Some("user".into()),
+                },
+                ConfigLifecycleEvent::EntryDisabledByChanged {
+                    entry_id: entry.entry_id.clone(),
+                    disabled_by: None,
+                },
+                ConfigLifecycleEvent::EntryRemoved {
+                    entry_id: entry.entry_id.clone(),
+                    domain: entry.domain.clone(),
+                },
+            ]
+        );
+        assert!(manager.unregister_lifecycle_observer(&observer_trait));
+        assert!(!manager.unregister_lifecycle_observer(&observer_trait));
+    }
+
+    #[test]
+    fn observer_guard_unregisters_only_its_owned_instance() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        let entry = manager.create_entry(seed()).unwrap();
+        let guarded = Arc::new(LifecycleObserver::default());
+        let guarded_trait: Arc<dyn ConfigLifecycleObserver> = guarded.clone();
+        let guard = manager.observe_lifecycle(guarded_trait.clone()).unwrap();
+        let retained = Arc::new(LifecycleObserver::default());
+        let retained_trait: Arc<dyn ConfigLifecycleObserver> = retained.clone();
+        manager
+            .register_lifecycle_observer(retained_trait.clone())
+            .unwrap();
+
+        drop(guard);
+        manager
+            .disable_entry(&entry.entry_id, Some("user"))
+            .unwrap();
+        assert!(guarded.events.lock().unwrap().is_empty());
+        assert_eq!(retained.events.lock().unwrap().len(), 1);
+        assert!(manager.unregister_lifecycle_observer(&retained_trait));
+    }
+
+    #[test]
+    fn failed_persistence_never_notifies_lifecycle_observers() {
+        let store = Arc::new(FailingMetadataStore::default());
+        let runtime = Runtime::new(store.clone()).unwrap();
+        let manager = ConfigEntries::new(runtime).unwrap();
+        register(&manager, Arc::new(FixtureDriver::new()));
+        let entry = manager.create_entry(seed()).unwrap();
+        let child = manager
+            .create_subentry(
+                &entry.entry_id,
+                NewConfigSubentry::new("fixture_child", "Child", Map::new()),
+            )
+            .unwrap();
+        let observer = Arc::new(LifecycleObserver::default());
+        let observer_trait: Arc<dyn ConfigLifecycleObserver> = observer.clone();
+        manager
+            .register_lifecycle_observer(observer_trait.clone())
+            .unwrap();
+        observer.manager.lock().unwrap().replace(manager.clone());
+
+        store.fail_metadata.store(true, Ordering::SeqCst);
+        assert!(
+            manager
+                .remove_subentry(&entry.entry_id, &child.subentry_id)
+                .is_err()
+        );
+        assert!(
+            manager
+                .disable_entry(&entry.entry_id, Some("user"))
+                .is_err()
+        );
+        assert!(manager.remove_entry(&entry.entry_id).is_err());
+        assert!(manager.subentry_exists(&entry.entry_id, &child.subentry_id));
+        assert_eq!(
+            manager.get_entry(&entry.entry_id).unwrap().disabled_by,
+            None
+        );
+        assert!(observer.events.lock().unwrap().is_empty());
+
+        store.fail_metadata.store(false, Ordering::SeqCst);
+        manager
+            .remove_subentry(&entry.entry_id, &child.subentry_id)
+            .unwrap();
+        manager
+            .disable_entry(&entry.entry_id, Some("user"))
+            .unwrap();
+        manager.remove_entry(&entry.entry_id).unwrap();
+        assert_eq!(observer.events.lock().unwrap().len(), 3);
+        manager.unregister_lifecycle_observer(&observer_trait);
+    }
+
+    #[test]
+    fn old_config_store_migrates_absent_and_legacy_empty_subentry_fields() {
+        let store = Arc::new(MemoryStore::default());
+        let manager = ConfigEntries::new(runtime(store.clone())).unwrap();
+        let entry = manager.create_entry(seed()).unwrap();
+        let mut document = store.get_data(METADATA_KEY).unwrap().unwrap();
+        document["entries"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("subentries");
+        store.set_data(METADATA_KEY, &document).unwrap();
+        drop(manager);
+
+        let restored = ConfigEntries::new(runtime(store.clone())).unwrap();
+        assert!(
+            restored
+                .list_subentries(&entry.entry_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store.get_data(METADATA_KEY).unwrap().unwrap()["entries"][0]["subentries"],
+            json!([])
+        );
+        drop(restored);
+
+        let mut document = store.get_data(METADATA_KEY).unwrap().unwrap();
+        document["entries"][0]["subentries"] = json!({});
+        store.set_data(METADATA_KEY, &document).unwrap();
+        let restored_legacy_map = ConfigEntries::new(runtime(store)).unwrap();
+        assert!(
+            restored_legacy_map
+                .list_subentries(&entry.entry_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn subentries_survive_sqlite_runtime_restart_with_stable_private_data() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config-subentries.sqlite");
+        let (entry_id, subentry_id) = {
+            let store = Arc::new(hass_storage::SqliteStore::open(&path).unwrap());
+            let runtime = Runtime::new(store).unwrap();
+            let manager = ConfigEntries::new(runtime).unwrap();
+            register(&manager, Arc::new(FixtureDriver::new()));
+            let entry = manager.create_entry(seed()).unwrap();
+            let mut data = Map::new();
+            data.insert("token".into(), json!("sqlite-private-secret"));
+            let subentry = manager
+                .create_subentry(
+                    &entry.entry_id,
+                    NewConfigSubentry::new("fixture_child", "SQLite child", data),
+                )
+                .unwrap();
+            (entry.entry_id, subentry.subentry_id)
+        };
+
+        let store = Arc::new(hass_storage::SqliteStore::open(&path).unwrap());
+        let manager = ConfigEntries::new(Runtime::new(store).unwrap()).unwrap();
+        let restored = manager.get_subentry(&entry_id, &subentry_id).unwrap();
+        assert_eq!(restored.title, "SQLite child");
+        assert_eq!(restored.data["token"], "sqlite-private-secret");
+        assert!(manager.subentry_exists(&entry_id, &subentry_id));
+        assert_eq!(
+            manager.get_entry(&entry_id).unwrap().public_json()["num_subentries"],
+            1
+        );
+        assert!(restored.public_json().get("data").is_none());
     }
 }

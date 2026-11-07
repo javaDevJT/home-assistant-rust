@@ -819,6 +819,7 @@ dependencies = [
  "hass-notifications",
  "hass-person",
  "hass-registry",
+ "hass-repairs",
  "hass-rest",
  "hass-script",
  "hass-storage",
@@ -860,6 +861,7 @@ dependencies = [
  "hass-notifications",
  "hass-person",
  "hass-registry",
+ "hass-repairs",
  "hass-system-log",
  "hass-tag",
  "hass-template",
@@ -1106,6 +1108,22 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "hass-repairs"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-config",
+ "hass-core",
+ "hass-storage",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tracing",
  "uuid",
 ]

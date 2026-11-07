@@ -353,6 +353,9 @@ pub(crate) async fn handle_ws(
     if kind == "get_config" && state.features.config_entries.is_some() {
         return Some(configuration(state).await);
     }
+    if let Some(result) = crate::config_subentries::handle_ws(state, command).await {
+        return Some(result);
+    }
     if kind.starts_with("config_entries/") || kind.starts_with("config/core/") {
         let Some(entries) = state.features.config_entries.clone() else {
             return Some(Err(Error::NotFound(

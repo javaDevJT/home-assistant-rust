@@ -616,6 +616,76 @@ async fn handle_command(
             let result = run_blocking(move || manager.list()).await;
             send_core_result(socket, id, result).await.is_ok()
         }
+        "repairs/list_issues" => {
+            let Some(manager) = state.features.repairs.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "Repairs integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let result = run_repairs(move || manager.list_issues())
+                .await
+                .map(|issues| json!({"issues": issues}));
+            send_core_result(socket, id, result).await.is_ok()
+        }
+        "repairs/get_issue_data" => {
+            let (domain, issue_id) = match (
+                required_field_string(message, "domain"),
+                required_field_string(message, "issue_id"),
+            ) {
+                (Ok(domain), Ok(issue_id)) => (domain, issue_id),
+                (Err(error), _) | (_, Err(error)) => {
+                    return send_error(socket, id, error).await.is_ok();
+                }
+            };
+            let Some(manager) = state.features.repairs.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "Repairs integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let result = run_repairs(move || {
+                manager
+                    .get_issue_data(&domain, &issue_id)
+                    .map(|issue_data| json!({"issue_data": issue_data}))
+            })
+            .await;
+            send_core_result(socket, id, result).await.is_ok()
+        }
+        "repairs/ignore_issue" => {
+            let (domain, issue_id, ignore) = match (
+                required_field_string(message, "domain"),
+                required_field_string(message, "issue_id"),
+                required_field_bool(message, "ignore"),
+            ) {
+                (Ok(domain), Ok(issue_id), Ok(ignore)) => (domain, issue_id, ignore),
+                (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                    return send_error(socket, id, error).await.is_ok();
+                }
+            };
+            let Some(manager) = state.features.repairs.clone() else {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("not_found", "Repairs integration is not loaded"),
+                )
+                .await
+                .is_ok();
+            };
+            let result = run_repairs(move || {
+                manager
+                    .ignore_issue(&domain, &issue_id, ignore)
+                    .map(|()| Value::Null)
+            })
+            .await;
+            send_core_result(socket, id, result).await.is_ok()
+        }
         "system_log/subscribe_raw" => {
             if active_subscription_count(native, subscriptions, raw_log_streams)
                 >= MAX_SUBSCRIPTIONS_PER_SOCKET
@@ -933,12 +1003,54 @@ impl WsError {
 fn map_core_error(error: CoreError) -> WsError {
     match error {
         CoreError::InvalidInput(message) => WsError::new("invalid_format", message),
+        CoreError::InvalidData { schema_errors } => WsError::new(
+            "invalid_format",
+            format!("Invalid data: {}", json!(schema_errors)),
+        ),
         CoreError::NotFound(message) => WsError::new("not_found", message),
         CoreError::HomeAssistant(message) => WsError::new("home_assistant_error", message),
         CoreError::NotAllowed(message) => WsError::new("not_allowed", message),
         CoreError::Storage(_) => WsError::new("unknown_error", "Internal server error"),
         CoreError::Service(_) => WsError::new("service_error", "Service call failed"),
     }
+}
+
+fn map_repairs_error(error: hass_repairs::RepairsError) -> WsError {
+    use hass_repairs::RepairsError;
+
+    match error {
+        RepairsError::Core(error) => map_core_error(error),
+        RepairsError::UnknownIssue { issue_id, .. } => {
+            WsError::new("unknown_issue", format!("Issue '{issue_id}' not found"))
+        }
+        RepairsError::NotFixable { issue_id, .. } => WsError::new(
+            "unknown_issue",
+            format!("Issue id {issue_id} is not fixable"),
+        ),
+        RepairsError::UnknownFlow(flow_id) => {
+            WsError::new("not_found", format!("Unknown flow: {flow_id}"))
+        }
+        RepairsError::UnknownStep(message) => WsError::new("invalid_format", message),
+        RepairsError::UnknownEntry(entry_id) => {
+            WsError::new("not_found", format!("Config entry {entry_id} not found"))
+        }
+        RepairsError::Unsupported(message) => WsError::new("not_supported", message),
+    }
+}
+
+fn required_field_string(message: &Map<String, Value>, field: &str) -> Result<String, WsError> {
+    message
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| WsError::new("invalid_format", format!("Missing or invalid '{field}'")))
+}
+
+fn required_field_bool(message: &Map<String, Value>, field: &str) -> Result<bool, WsError> {
+    message
+        .get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| WsError::new("invalid_format", format!("Missing or invalid '{field}'")))
 }
 
 async fn send_core_result<T: serde::Serialize>(
@@ -1032,6 +1144,17 @@ where
         .await
         .map_err(|_| WsError::new("unknown_error", "Internal server error"))?
         .map_err(map_core_error)
+}
+
+async fn run_repairs<T, F>(operation: F) -> Result<T, WsError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> hass_repairs::RepairsResult<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|_| WsError::new("unknown_error", "Internal server error"))?
+        .map_err(map_repairs_error)
 }
 
 #[cfg(test)]

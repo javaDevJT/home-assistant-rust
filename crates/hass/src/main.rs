@@ -7,6 +7,7 @@ mod integration_drivers;
 mod logging;
 mod persons;
 mod recorder;
+mod repairs;
 mod system_sensors;
 mod yaml;
 mod zones;
@@ -141,6 +142,14 @@ async fn main() -> Result<()> {
         })
         .await
         .context("runtime initialization failed")??;
+    let repairs_runtime = runtime.clone();
+    let repairs_entries = config_entries.clone();
+    let repairs_registries = registries.clone();
+    let repairs = tokio::task::spawn_blocking(move || {
+        repairs::RepairsHost::start(repairs_runtime, repairs_entries, repairs_registries)
+    })
+    .await??;
+    let repairs_manager = repairs.manager();
     let logger_runtime = runtime.clone();
     let logger_auth = auth.clone();
     let logger_config = config.logger.clone().unwrap_or_default();
@@ -331,6 +340,7 @@ async fn main() -> Result<()> {
             logger: Some(logger_manager),
             logger_catalog: Some(logger_catalog),
             system_log: Some(system_log_manager),
+            repairs: Some(repairs_manager),
         },
         Some(shutdown_rx),
     );
@@ -357,6 +367,7 @@ async fn main() -> Result<()> {
     let zone_result = zones.shutdown().await;
     let group_result = groups.shutdown().await;
     let notification_result = notifications.shutdown();
+    drop(repairs);
     let system_log_result = system_log.shutdown().await;
     let logger_result = logger.shutdown();
     let stop_result = tokio::task::spawn_blocking(move || {

@@ -1,14 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use hass_core::{Error, Event, MemoryStore, Runtime, State, Store};
+use hass_core::{Context, Error, Event, MemoryStore, Runtime, State, Store};
 use serde_json::{Value, json};
 
 use crate::{
-    AreaInput, AreaUpdate, DeviceRegistration, DeviceUpdate, EntityRegistration, EntityUpdate,
-    FloorInput, LabelInput, Registries,
+    AreaInput, AreaUpdate, ConfigSubentryCleanup, DeviceRegistration, DeviceUpdate,
+    EntityRegistration, EntityUpdate, FloorInput, LabelInput, Registries,
 };
 
 #[derive(Debug)]
@@ -1087,11 +1087,436 @@ fn websocket_events_follow_successful_persistence_and_failed_writes_are_atomic()
     assert_eq!(registries.labels().len(), 1);
 }
 
+#[test]
+fn config_subentry_cleanup_is_atomic_targeted_and_persistent() {
+    let store = Arc::new(FaultStore::default());
+    let runtime = Runtime::new(store.clone()).unwrap();
+    let resolver = Arc::new(|entry_id: &str| match entry_id {
+        "entry-a" => Some("integration_a".into()),
+        "entry-b" => Some("integration_b".into()),
+        _ => None,
+    });
+    let registries =
+        Registries::new_with_config_entry_domain_resolver(runtime.clone(), resolver.clone())
+            .unwrap();
+
+    let target_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("entry-a".into()),
+            config_subentry_id: Some("sub-a".into()),
+            identifiers: BTreeSet::from([("serial".into(), "target-device".into())]),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+    let sibling_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("entry-a".into()),
+            config_subentry_id: Some("sub-b".into()),
+            identifiers: BTreeSet::from([("serial".into(), "sibling-device".into())]),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+    // Preserve null and additional legacy subentry memberships on an unrelated
+    // device while clearing a different primary subentry.
+    for subentry_id in [None, Some("sub-c")] {
+        registries
+            .get_or_create_device(DeviceRegistration {
+                config_entry_id: Some("entry-a".into()),
+                config_subentry_id: subentry_id.map(str::to_owned),
+                identifiers: BTreeSet::from([("serial".into(), "sibling-device".into())]),
+                ..DeviceRegistration::default()
+            })
+            .unwrap();
+    }
+    let sibling_device = registries.device(&sibling_device.id).unwrap();
+    let foreign_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("entry-b".into()),
+            config_subentry_id: Some("sub-a".into()),
+            identifiers: BTreeSet::from([("serial".into(), "foreign-device".into())]),
+            via_device_id: Some(target_device.id.clone()),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+
+    let target_entity = registries
+        .get_or_create_entity(EntityRegistration {
+            config_entry_id: Some("entry-a".into()),
+            config_subentry_id: Some("sub-a".into()),
+            device_id: Some(target_device.id.clone()),
+            ..EntityRegistration::new("sensor", "demo", "target-entity")
+        })
+        .unwrap();
+    registries
+        .update_entity(
+            &target_entity.entity_id,
+            EntityUpdate {
+                aliases: Some(vec![json!("target alias")]),
+                ..EntityUpdate::default()
+            },
+        )
+        .unwrap();
+    let sibling_entity = registries
+        .get_or_create_entity(EntityRegistration {
+            config_entry_id: Some("entry-a".into()),
+            config_subentry_id: Some("sub-b".into()),
+            device_id: Some(sibling_device.id.clone()),
+            ..EntityRegistration::new("sensor", "demo", "sibling-entity")
+        })
+        .unwrap();
+    registries
+        .update_entity(
+            &sibling_entity.entity_id,
+            EntityUpdate {
+                aliases: Some(vec![json!("sibling alias")]),
+                ..EntityUpdate::default()
+            },
+        )
+        .unwrap();
+    let foreign_active_entity = registries
+        .get_or_create_entity(EntityRegistration {
+            config_entry_id: Some("entry-b".into()),
+            config_subentry_id: Some("sub-a".into()),
+            device_id: Some(foreign_device.id.clone()),
+            ..EntityRegistration::new("sensor", "demo", "foreign-active")
+        })
+        .unwrap();
+
+    // The pinned entity helper matches deleted records by subentry ID alone,
+    // while device tombstones remain scoped to the exact owner and subentry.
+    let foreign_deleted_entity = registries
+        .get_or_create_entity(EntityRegistration {
+            config_entry_id: Some("entry-b".into()),
+            config_subentry_id: Some("sub-a".into()),
+            ..EntityRegistration::new("sensor", "demo", "foreign-deleted")
+        })
+        .unwrap();
+    registries
+        .remove_entity(&foreign_deleted_entity.entity_id)
+        .unwrap();
+    let sibling_deleted_entity = registries
+        .get_or_create_entity(EntityRegistration {
+            config_entry_id: Some("entry-a".into()),
+            config_subentry_id: Some("sub-b".into()),
+            ..EntityRegistration::new("sensor", "demo", "sibling-deleted")
+        })
+        .unwrap();
+    registries
+        .remove_entity(&sibling_deleted_entity.entity_id)
+        .unwrap();
+
+    let target_deleted_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("entry-a".into()),
+            config_subentry_id: Some("sub-a".into()),
+            identifiers: BTreeSet::from([("serial".into(), "target-deleted".into())]),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+    registries.remove_device(&target_deleted_device.id).unwrap();
+    let foreign_deleted_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("entry-b".into()),
+            config_subentry_id: Some("sub-a".into()),
+            identifiers: BTreeSet::from([("serial".into(), "foreign-deleted".into())]),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+    registries
+        .remove_device(&foreign_deleted_device.id)
+        .unwrap();
+    let sibling_deleted_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("entry-a".into()),
+            config_subentry_id: Some("sub-b".into()),
+            identifiers: BTreeSet::from([("serial".into(), "sibling-deleted".into())]),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+    registries
+        .remove_device(&sibling_deleted_device.id)
+        .unwrap();
+
+    runtime
+        .set_state(
+            &target_entity.entity_id,
+            "14",
+            serde_json::Map::new(),
+            Context::default(),
+            false,
+        )
+        .unwrap();
+    let mut events = runtime.subscribe();
+    let before = runtime.get_data("core.registries").unwrap().unwrap();
+
+    // A failed registry metadata write must leave the in-memory and durable
+    // snapshots untouched and must publish no lifecycle notifications.
+    store.fail_next_set.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        registries.clear_config_subentry("entry-a", "sub-a"),
+        Err(Error::Storage(_))
+    ));
+    assert_eq!(
+        runtime.get_data("core.registries").unwrap().unwrap(),
+        before
+    );
+    assert!(events.try_recv().is_err());
+    assert!(registries.entity(&target_entity.entity_id).is_some());
+    assert!(registries.device(&target_device.id).is_some());
+
+    *store
+        .expected_cleanup_pair
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some(("entry-a".into(), "sub-a".into()));
+    let cleanup = registries
+        .clear_config_subentry("entry-a", "sub-a")
+        .unwrap();
+    assert_eq!(
+        cleanup,
+        ConfigSubentryCleanup {
+            entities_removed: 1,
+            devices_removed: 1,
+            entity_tombstones_orphaned: 2,
+            device_tombstones_orphaned: 2,
+        }
+    );
+    assert!(store.cleanup_callback_count.load(Ordering::SeqCst) >= 3);
+    assert!(store.cleanup_snapshot_was_committed.load(Ordering::SeqCst));
+
+    let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+    assert_eq!(
+        emitted.first().unwrap().event_type,
+        "device_registry_updated"
+    );
+    assert_eq!(emitted.first().unwrap().data["action"], "remove");
+    assert_eq!(
+        emitted.last().unwrap().event_type,
+        "entity_registry_updated"
+    );
+    assert_eq!(emitted.last().unwrap().data["action"], "remove");
+    assert!(emitted.iter().any(|event| {
+        event.event_type == "device_registry_updated" && event.data["action"] == "update"
+    }));
+    assert_eq!(
+        registries
+            .clear_config_subentry("entry-a", "sub-a")
+            .unwrap(),
+        ConfigSubentryCleanup::default()
+    );
+    assert!(events.try_recv().is_err());
+
+    assert!(registries.entity(&target_entity.entity_id).is_none());
+    assert!(registries.device(&target_device.id).is_none());
+    assert!(registries.entity(&sibling_entity.entity_id).is_some());
+    assert_eq!(
+        registries
+            .entity(&foreign_active_entity.entity_id)
+            .unwrap()
+            .device_id,
+        Some(foreign_device.id.clone())
+    );
+    assert_eq!(
+        registries.device(&foreign_device.id).unwrap().via_device_id,
+        None
+    );
+    let sibling_device = registries.device(&sibling_device.id).unwrap();
+    assert_eq!(
+        sibling_device.config_entries_subentries["entry-a"],
+        vec![Some("sub-b".into()), None, Some("sub-c".into())]
+    );
+    assert_eq!(
+        registries
+            .entity(&sibling_entity.entity_id)
+            .unwrap()
+            .aliases,
+        vec![json!("sibling alias")]
+    );
+    assert!(runtime.get_state(&target_entity.entity_id).is_some());
+
+    let stored = runtime.get_data("core.registries").unwrap().unwrap();
+    let deleted_entities = stored["deleted_entities"].as_array().unwrap();
+    for entity_id in [&target_entity.entity_id, &foreign_deleted_entity.entity_id] {
+        let tombstone = deleted_entities
+            .iter()
+            .find(|entry| entry["entity_id"] == *entity_id)
+            .unwrap();
+        assert!(tombstone["config_entry_id"].is_null());
+        assert!(tombstone["config_subentry_id"].is_null());
+        assert!(!tombstone["orphaned_timestamp"].is_null());
+        if *entity_id == target_entity.entity_id {
+            assert_eq!(tombstone["aliases"], json!(["target alias"]));
+        }
+    }
+    let sibling_entity_tombstone = deleted_entities
+        .iter()
+        .find(|entry| entry["entity_id"] == sibling_deleted_entity.entity_id)
+        .unwrap();
+    assert_eq!(sibling_entity_tombstone["config_entry_id"], "entry-a");
+    assert_eq!(sibling_entity_tombstone["config_subentry_id"], "sub-b");
+    assert!(sibling_entity_tombstone["orphaned_timestamp"].is_null());
+
+    let deleted_devices = stored["deleted_devices"].as_array().unwrap();
+    for device_id in [&target_device.id, &target_deleted_device.id] {
+        let tombstone = deleted_devices
+            .iter()
+            .find(|entry| entry["id"] == *device_id)
+            .unwrap();
+        assert!(tombstone["config_entry_id"].is_null());
+        assert!(tombstone["config_subentry_id"].is_null());
+        assert_eq!(tombstone["domain"], "integration_a");
+        assert!(!tombstone["orphaned_timestamp"].is_null());
+        assert!(!tombstone["identifiers"].as_array().unwrap().is_empty());
+    }
+    let foreign_device_tombstone = deleted_devices
+        .iter()
+        .find(|entry| entry["id"] == foreign_deleted_device.id)
+        .unwrap();
+    assert_eq!(foreign_device_tombstone["config_entry_id"], "entry-b");
+    let sibling_device_tombstone = deleted_devices
+        .iter()
+        .find(|entry| entry["id"] == sibling_deleted_device.id)
+        .unwrap();
+    assert_eq!(sibling_device_tombstone["config_entry_id"], "entry-a");
+    assert_eq!(sibling_device_tombstone["config_subentry_id"], "sub-b");
+
+    drop(registries);
+    drop(runtime);
+    let restarted_runtime = Runtime::new(store).unwrap();
+    let restarted =
+        Registries::new_with_config_entry_domain_resolver(restarted_runtime.clone(), resolver)
+            .unwrap();
+    assert!(restarted.entity(&target_entity.entity_id).is_none());
+    assert!(restarted.entity(&sibling_entity.entity_id).is_some());
+    assert!(
+        restarted_runtime
+            .get_state(&target_entity.entity_id)
+            .is_some()
+    );
+    assert_eq!(
+        restarted_runtime
+            .get_data("core.registries")
+            .unwrap()
+            .unwrap(),
+        stored
+    );
+}
+
+#[test]
+fn config_entry_cleanup_uses_explicit_domain_after_parent_removal() {
+    let store = Arc::new(MemoryStore::default());
+    let runtime = Runtime::new(store.clone()).unwrap();
+    let resolver = Arc::new(|entry_id: &str| match entry_id {
+        "new-entry" => Some("integration_domain".into()),
+        _ => None,
+    });
+    let registries =
+        Registries::new_with_config_entry_domain_resolver(runtime.clone(), resolver).unwrap();
+    let active_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("removed-entry".into()),
+            config_subentry_id: Some("removed-subentry".into()),
+            identifiers: BTreeSet::from([("serial".into(), "active-device".into())]),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+    let deleted_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("removed-entry".into()),
+            config_subentry_id: Some("removed-subentry".into()),
+            identifiers: BTreeSet::from([("serial".into(), "deleted-device".into())]),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+    registries.remove_device(&deleted_device.id).unwrap();
+    let active_entity = registries
+        .get_or_create_entity(EntityRegistration {
+            config_entry_id: Some("removed-entry".into()),
+            config_subentry_id: Some("removed-subentry".into()),
+            ..EntityRegistration::new("sensor", "demo", "active-entry-cleanup")
+        })
+        .unwrap();
+    let deleted_entity = registries
+        .get_or_create_entity(EntityRegistration {
+            config_entry_id: Some("removed-entry".into()),
+            config_subentry_id: Some("historical-subentry".into()),
+            ..EntityRegistration::new("sensor", "demo", "deleted-entry-cleanup")
+        })
+        .unwrap();
+    registries.remove_entity(&deleted_entity.entity_id).unwrap();
+    let unrelated_entity = registries
+        .get_or_create_entity(EntityRegistration::new(
+            "sensor",
+            "demo",
+            "unrelated-entry-cleanup",
+        ))
+        .unwrap();
+
+    let cleanup = registries
+        .clear_config_entry("removed-entry", "integration_domain")
+        .unwrap();
+    assert_eq!(cleanup.entities_removed, 1);
+    assert_eq!(cleanup.devices_removed, 1);
+    assert_eq!(cleanup.entity_tombstones_orphaned, 2);
+    assert_eq!(cleanup.device_tombstones_orphaned, 2);
+    assert!(registries.entity(&active_entity.entity_id).is_none());
+    assert!(registries.entity(&unrelated_entity.entity_id).is_some());
+    assert!(registries.device(&active_device.id).is_none());
+
+    let stored = runtime.get_data("core.registries").unwrap().unwrap();
+    let deleted_entity_entry = stored["deleted_entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["entity_id"] == deleted_entity.entity_id)
+        .unwrap();
+    assert!(deleted_entity_entry["config_entry_id"].is_null());
+    assert_eq!(
+        deleted_entity_entry["config_subentry_id"],
+        "historical-subentry"
+    );
+    assert!(!deleted_entity_entry["orphaned_timestamp"].is_null());
+    let deleted_device_entry = stored["deleted_devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == deleted_device.id)
+        .unwrap();
+    assert!(deleted_device_entry["config_entry_id"].is_null());
+    assert_eq!(deleted_device_entry["domain"], "integration_domain");
+    assert!(!deleted_device_entry["orphaned_timestamp"].is_null());
+
+    let restored_device = registries
+        .get_or_create_device(DeviceRegistration {
+            config_entry_id: Some("new-entry".into()),
+            identifiers: BTreeSet::from([("serial".into(), "deleted-device".into())]),
+            ..DeviceRegistration::default()
+        })
+        .unwrap();
+    assert_eq!(restored_device.id, deleted_device.id);
+    assert_eq!(
+        restored_device.config_entry_id.as_deref(),
+        Some("new-entry")
+    );
+    assert_eq!(restored_device.domain, None);
+    assert_eq!(restored_device.orphaned_timestamp, None);
+
+    drop(registries);
+    drop(runtime);
+    let restarted = Registries::new(Runtime::new(store).unwrap()).unwrap();
+    assert!(restarted.entity(&unrelated_entity.entity_id).is_some());
+    assert!(restarted.entity(&active_entity.entity_id).is_none());
+    assert!(restarted.device(&deleted_device.id).is_some());
+}
+
 #[derive(Default)]
 struct FaultStore {
     inner: MemoryStore,
     fail_next_set: AtomicBool,
     fail_event: AtomicBool,
+    expected_cleanup_pair: Mutex<Option<(String, String)>>,
+    cleanup_callback_count: AtomicUsize,
+    cleanup_snapshot_was_committed: AtomicBool,
 }
 
 impl Store for FaultStore {
@@ -1110,6 +1535,33 @@ impl Store for FaultStore {
     fn append_event(&self, event: &Event) -> hass_core::Result<()> {
         if self.fail_event.swap(false, Ordering::SeqCst) {
             return Err(Error::Storage("injected event failure".into()));
+        }
+        if let Some((config_entry_id, config_subentry_id)) = self
+            .expected_cleanup_pair
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            && (event.event_type == "device_registry_updated"
+                || event.event_type == "entity_registry_updated")
+            && let Some(snapshot) = self.inner.get_data("core.registries")?
+        {
+            let active_device_matches = snapshot["devices"].as_array().is_some_and(|devices| {
+                devices.iter().any(|device| {
+                    device["config_entry_id"].as_str() == Some(&config_entry_id)
+                        && device["config_subentry_id"].as_str() == Some(&config_subentry_id)
+                })
+            });
+            let active_entity_matches = snapshot["entities"].as_array().is_some_and(|entities| {
+                entities.iter().any(|entity| {
+                    entity["config_entry_id"].as_str() == Some(&config_entry_id)
+                        && entity["config_subentry_id"].as_str() == Some(&config_subentry_id)
+                })
+            });
+            self.cleanup_callback_count.fetch_add(1, Ordering::SeqCst);
+            if !active_device_matches && !active_entity_matches {
+                self.cleanup_snapshot_was_committed
+                    .store(true, Ordering::SeqCst);
+            }
         }
         self.inner.append_event(event)
     }

@@ -359,6 +359,7 @@ impl Registries {
                     translation_key: registration.translation_key.clone(),
                     unit_of_measurement: registration.unit_of_measurement.clone(),
                     has_entity_name: registration.has_entity_name,
+                    orphaned_timestamp: None,
                 };
                 apply_provider_info_to_entry(&mut entry, &item.info);
                 data.entities.push(entry.clone());

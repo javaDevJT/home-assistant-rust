@@ -1,6 +1,16 @@
 [workspace]
 resolver = "2"
-members = ["crates/hass-core", "crates/hass-storage", "crates/hass-automation", "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth", "crates/hass-template", "crates/hass-script", "crates/hass-mqtt", "crates/hass-native", "crates/hass-config", "crates/hass-rest", "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications", "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker", "crates/hass-image-upload", "crates/hass-webhook", "crates/hass-entity", "crates/hass-system-sensors", "crates/hass-tag", "crates/hass-logger", "crates/hass-sun", "crates/hass-system-log"]
+members = [
+    "crates/hass-core", "crates/hass-storage", "crates/hass-automation",
+    "crates/hass-api", "crates/hass", "crates/hass-registry", "crates/hass-auth",
+    "crates/hass-template", "crates/hass-script", "crates/hass-mqtt",
+    "crates/hass-native", "crates/hass-config", "crates/hass-rest",
+    "crates/hass-template-entities", "crates/hass-group", "crates/hass-notifications",
+    "crates/hass-zone", "crates/hass-person", "crates/hass-device-tracker",
+    "crates/hass-image-upload", "crates/hass-webhook", "crates/hass-entity",
+    "crates/hass-system-sensors", "crates/hass-tag", "crates/hass-logger",
+    "crates/hass-sun", "crates/hass-system-log", "crates/hass-repairs",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -43,6 +53,7 @@ hass-tag = { path = "crates/hass-tag" }
 hass-logger = { path = "crates/hass-logger" }
 hass-sun = { path = "crates/hass-sun" }
 hass-system-log = { path = "crates/hass-system-log" }
+hass-repairs = { path = "crates/hass-repairs" }
 image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png"] }
 http-body-util = "0.1"
 ipnet = "2"

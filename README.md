@@ -42,7 +42,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Storage | SQLite states/history/events/private metadata, migration, restart, single writer |
 | Authentication | Password users, roles, JWT access, rotating refresh sessions, TOTP MFA, signed paths |
 | Registries | Persistent entity/device/area/floor/label identity and CRUD |
-| Configuration | Persistent entries, native driver flows/setup/unload/retry, core settings |
+| Configuration | Persistent entries and subentries, native create/options/reconfigure flows, setup/unload/retry, core settings |
 | Native helpers | input_boolean/number/text/select/button/datetime, counter, timer, schedule |
 | Groups and controls | Legacy aggregate groups, native membership services, generic turn_on/turn_off/toggle delegation |
 | Notifications | Internal feed, create/dismiss services, authenticated current/live WebSocket updates and automation triggers |
@@ -55,6 +55,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Sun | Native astronomical calculations, singleton/config-entry entities, location updates, solar conditions and scheduled actions |
 | Logging | Actual dynamic tracing levels/message filters, admin controls, persistent and once-only settings, public change notifications |
 | System Log | Deduplicated retained errors, actual write/clear services, admin raw streams and integration filters |
+| Repairs | Persistent issue registry, refresh scopes, visibility/dismissal, native fix flows and independent child-flow continuation |
 | Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
 | Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
 | REST API | Authenticated states, config, services, events, templates, history |
@@ -75,7 +76,9 @@ cargo test --workspace --locked
 - [Active full-rewrite execution ledger](docs/PORTING.md)
 - [Pinned Sun port contracts and astronomical reference cases](docs/SUN-PORT.md)
 - [System Log source contracts and stream acceptance cases](docs/SYSTEM-LOG-PORT.md)
+- [System Health provider and subscription port contracts](docs/SYSTEM-HEALTH-PORT.md)
 - [Repairs and issue registry port contracts](docs/REPAIRS-PORT.md)
+- [Config subentries, native flow callbacks and lifecycle contracts](docs/CONFIG-SUBENTRIES-PORT.md)
 - [Exhaustive upstream integration and subsystem parity](docs/PARITY.md)
 - [Module contracts and ownership](docs/CONTRACT.md)
 - [Shared entity identity, provider leases and lifecycle](crates/hass-entity/README.md)
@@ -99,6 +102,7 @@ cargo test --workspace --locked
 - [Native tag collection, scan callbacks and automation triggers](crates/hass-tag/README.md)
 - [Native logger policy, filters and persisted controls](crates/hass-logger/README.md)
 - [Native System Log capture, raw streams and failure diagnostics](crates/hass-system-log/README.md)
+- [Native issue registry, repair handlers and fix flows](crates/hass-repairs/README.md)
 - [Native Sun calculations, entities and config-entry lifecycle](crates/hass-sun/README.md)
 - [Config entries, native drivers, and core settings](crates/hass-config/README.md)
 - [Supported configuration example](examples/configuration.yaml)
@@ -107,3 +111,7 @@ cargo test --workspace --locked
 - [Apache 2.0 license](LICENSE.md)
 
 Baseline source: `home-assistant/core` at `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf` (1,565 integration manifests; 20,410 Python files). Those counts describe upstream scope, not completed ports. Home Assistant names identify compatibility targets; this fork is not an official Home Assistant release.
+
+## Repairs registry implementation checkpoint
+
+The pinned registry corrections are implemented in `crates/hass-repairs/src/registry.rs`, the built-in constructor/subentry resolver in `lib.rs`, and the nullable-fixability guard in `flows.rs`. Refresh matching and keep/defer/cancel behavior now follow the pinned source semantics; startup migrates documents with a missing storage minor version and validates linked issues against real config-subentry IDs; public create validates nonempty CALVER values using the pinned AwesomeVersion 25.8.0 strategy. Restored nonpersistent shells retain `is_fixable: null`, while active draft and list values remain booleans. Acceptance checks passed: `cargo test -p hass-repairs --locked` (23 tests), `cargo clippy -p hass-repairs --all-targets --locked -- -D warnings`, and `cargo fmt -p hass-repairs -- --check`. See the [pinned registry contract](docs/PORTING.md#active-repairs-registry-correction-contract).

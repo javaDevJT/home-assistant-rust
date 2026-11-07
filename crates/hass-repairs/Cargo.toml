@@ -1,0 +1,21 @@
+[package]
+name = "hass-repairs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+hass-core.workspace = true
+hass-config.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+hass-storage.workspace = true
+tempfile.workspace = true

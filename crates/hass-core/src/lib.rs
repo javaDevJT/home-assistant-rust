@@ -24,6 +24,12 @@ pub enum Error {
     /// The supplied value does not meet the runtime's input contract.
     #[error("invalid input: {0}")]
     InvalidInput(String),
+    /// A data-entry submission failed field-level schema validation.
+    #[error("invalid data")]
+    InvalidData {
+        /// Validation messages keyed by field, preserving native JSON values.
+        schema_errors: Map<String, Value>,
+    },
     /// A requested entity or service does not exist.
     #[error("not found: {0}")]
     NotFound(String),

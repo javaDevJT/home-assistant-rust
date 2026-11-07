@@ -178,18 +178,21 @@ startup may sequence `ConfigEntries::new` before Repairs loading because its
 persisted entries are available synchronously, as long as no linked row is
 pruned earlier.
 
-The native dependency is real: current Rust `ConfigEntry` has only
-`supported_subentry_types` and reports `num_subentries: 0`; there is no stored
-subentry map or subentry-flow manager. Current `ConfigEntries::remove_entry`
-and `disable_entry` also have no Repairs cleanup/refresh callback
-([current entry surface](../crates/hass-config/src/lib.rs#L41-L84),
-[remove and disable](../crates/hass-config/src/lib.rs#L833-L930),
-[public entry fragment](../crates/hass-config/src/lib.rs#L115-L140)). Full
-linked-subentry and chained-subentry-flow parity depends on that native config
-entry work. Entry removal should clear issues only after unload/remove succeeds
-and removal is persisted; because config and issue documents are separate
-metadata writes, do not claim a cross-document transaction. Startup orphan
-cleanup is the recovery path if the second write fails.
+Native `ConfigEntries` now stores actual subentries and independent typed child
+flows. The app retains a pointer-owned lifecycle observer that clears registry
+and issue metadata for committed parent/child removals, and refreshes issue
+visibility on parent disable/enable. Parent and child cleanup precede their
+removal/update announcement; callbacks run outside manager locks. See the
+[native config contract](CONFIG-SUBENTRIES-PORT.md) and
+[app lifecycle owner](../crates/hass/src/repairs.rs).
+
+Entry removal clears issues only after unload/remove succeeds and removal is
+persisted. Config, registry and issue documents use separate metadata writes;
+there is no cross-document transaction. Observer failures are reported as
+post-commit failures. Repairs startup prunes linked orphan issues, but there is
+no durable registry-cleanup replay journal yet; retrying an already removed
+config record does not repeat its observer. Do not claim automatic recovery of
+every registry write failure.
 
 ## Repair flows and protocol contract
 
@@ -242,23 +245,30 @@ and match-all event listeners; this type is not in the pinned match-all
 exclusion set ([issue event definition and emitters](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/helpers/issue_registry.py#L26-L48),
 [match-all exclusions](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/core.py#L169-L172),
 [internal event bus dispatch](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/core.py#L1655-L1746)).
-The native runtime's `dispatch_signal` instead sends an unrecorded private feed
-that public `subscribe_events` deliberately cannot see
-([private signal API](../crates/hass-core/src/lib.rs#L901-L932),
-[public event subscriptions](../crates/hass-api/src/subscriptions.rs#L273-L292)).
-`Runtime::fire_event` is not a parity shortcut because it records a public
-event. This visibility difference is an explicit open compatibility gap: keep
-issue data off event payloads, do not invent a `repairs/subscribe` command (the
-pinned Repairs adapter has none), and resolve event visibility at the Runtime
-event boundary if generic public event subscribers must see this internal
-notification.
+The native Repairs implementation calls `Runtime::fire_event` after its
+metadata write succeeds. Generic `Runtime::subscribe()` receivers therefore
+observe create/update/remove notifications, and `event_history_query` reads the
+same minimal records back. Each payload contains only `action`, `domain`, and
+`issue_id`; issue `data` and config-entry IDs remain absent. This matches the
+upstream listener visibility without inventing a `repairs/subscribe` command.
+The pinned Recorder subscribes to `MATCH_ALL` and queues these events unless
+the user excludes their type; `async_fire_internal` does not imply an
+unrecorded event. Native history readback therefore does not itself establish
+a Repairs recording mismatch. The native boundary does couple event-log
+persistence to publication, whereas upstream Recorder queues asynchronously
+([pinned Recorder listener](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/recorder/core.py#L286-L318)).
+Registry metadata and the event log are separate native Runtime writes: an
+event-log failure after metadata commit leaves the issue change durable while
+the manager reports the notification error. Do not hide these public updates
+or invent a Repairs-specific subscription to address that failure boundary.
 
 The exact Repairs protocol has a list snapshot command but no Repairs-specific
 subscription or initial replay. Generic Rust `subscribe_events` also starts at
-subscription time without a snapshot. If a future native private feed is added,
-make its snapshot/subscription ordering explicit; do not represent a new
-subscription as upstream parity. `TagManager::snapshot_and_subscribe` is the
-local atomic snapshot-plus-private-delta precedent
+subscription time without a snapshot. The current Repairs implementation uses
+that generic public event path, so clients receive only subsequent events and
+must use `repairs/list_issues` for the snapshot. Do not represent a new
+Repairs-specific subscription as upstream parity. `TagManager::snapshot_and_subscribe`
+is the local atomic snapshot-plus-private-delta precedent
 ([implementation](../crates/hass-tag/src/lib.rs#L634-L650)), but it is not the
 pinned Repairs API.
 
@@ -296,9 +306,12 @@ internal `IssueEntry` wholesale. See the implementation checkpoint in
 
 ## Focused acceptance falsifiers
 
-These are the high-value failures to target when implementation starts; they
-are based on the pinned tests below. They were inspected, not run for this
-read-only port-contract task.
+These remain high-value source-backed falsifiers for the isolated native
+implementation and its later API wiring. The crate-local tests now exercise
+storage migration, mutation ordering, refresh overlap, config links, native
+fix-flow completion, and generic public event visibility/readback. The HTTP and
+WebSocket route authorization/serialization checks remain with the root API
+owner. The cases below cite the pinned upstream tests.
 
 1. **Persistence/migration:** restart with both persistent and session issues.
    A persistent record loses any field or becomes inactive; a session record
@@ -340,11 +353,12 @@ read-only port-contract task.
    [flow authorization](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/tests/components/repairs/test_websocket_api.py#L599-L679),
    [list/visibility](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/tests/components/repairs/test_websocket_api.py#L684-L877),
    and [flow completion/data tests](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/tests/components/repairs/test_websocket_api.py#L332-L406).
-6. **Event visibility/security:** a Repairs update enters event history or
-   public subscription semantics are claimed without implementation; the
-   notification carries issue `data`; or a new Repairs subscription is added
-   without upstream protocol evidence. Keep the private/public event mismatch
-   explicit until the Runtime event boundary is resolved.
+6. **Event visibility/security:** a native Repairs update does not reach generic
+   public event subscribers; its payload includes issue `data`; upstream
+   recorder parity is claimed even though native `Runtime::fire_event` stores
+   public events in history; or a new Repairs subscription is added without
+   upstream protocol evidence. The native history difference is documented
+   above.
 
 ## Remaining limits
 

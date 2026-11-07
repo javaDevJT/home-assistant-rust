@@ -221,6 +221,165 @@ automation:
 }
 
 #[tokio::test]
+async fn real_process_repairs_sdk_storage_events_confirm_and_restart() {
+    use futures_util::{SinkExt, StreamExt};
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(&config, "recorder:\n  db_path: state.sqlite\n").unwrap();
+    let database = directory.path().join("state.sqlite");
+    // A native SDK producer seeds a persistent fixture through the actual
+    // registry and SQLite writer, before handing the database to the child.
+    // No issue-creation endpoint or production provider activity is invented.
+    tokio::task::spawn_blocking(move || {
+        let runtime = hass_core::Runtime::new(std::sync::Arc::new(
+            hass_storage::SqliteStore::open(database).unwrap(),
+        ))
+        .unwrap();
+        let entries = hass_config::ConfigEntries::new(runtime.clone()).unwrap();
+        let owner =
+            hass_repairs::RepairsIntegration::start(runtime, entries, "2026.12.0.dev0").unwrap();
+        let mut issue = hass_repairs::IssueDraft::new(
+            "tag",
+            "sdk_process_fixture",
+            true,
+            "warning",
+            "sdk_fixture",
+        );
+        issue.is_persistent = true;
+        issue.data = Some(serde_json::Map::from_iter([(
+            "record".into(),
+            json!("tempdir test"),
+        )]));
+        issue.translation_placeholders = Some(serde_json::Map::from_iter([(
+            "name".into(),
+            json!("Fixture"),
+        )]));
+        owner.manager().create_issue(issue).unwrap();
+    })
+    .await
+    .unwrap();
+
+    let mut server = Server::start(&config).await;
+    let mut socket = authenticated_socket(&server).await;
+    let listed = ws_command(&mut socket, json!({"id":1,"type":"repairs/list_issues"})).await;
+    assert_eq!(listed["success"], true, "{listed}");
+    assert_eq!(
+        listed["result"]["issues"][0]["issue_id"],
+        "sdk_process_fixture"
+    );
+    assert_eq!(
+        ws_command(
+            &mut socket,
+            json!({"id":2,"type":"subscribe_events","event_type":"repairs_issue_registry_updated"})
+        )
+        .await["success"],
+        true
+    );
+    socket.send(tokio_tungstenite::tungstenite::Message::Text(json!({"id":3,"type":"repairs/ignore_issue","domain":"tag","issue_id":"sdk_process_fixture","ignore":true}).to_string().into())).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut acknowledged = false;
+        let mut notified = false;
+        while !acknowledged || !notified {
+            let frame = socket.next().await.unwrap().unwrap();
+            let message: Value = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+            if message["type"] == "result" && message["id"] == 3 {
+                assert_eq!(message["success"], true, "{message}");
+                acknowledged = true;
+            } else {
+                assert_eq!(message["type"], "event", "{message}");
+                assert_eq!(message["id"], 2, "{message}");
+                assert_eq!(
+                    message["event"]["data"],
+                    json!({"action":"update","domain":"tag","issue_id":"sdk_process_fixture"})
+                );
+                notified = true;
+            }
+        }
+    })
+    .await
+    .expect("ignore acknowledgement and its actual registry event must arrive");
+    socket.close(None).await.unwrap();
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
+
+    let history_database = directory.path().join("state.sqlite");
+    tokio::task::spawn_blocking(move || {
+        let store = hass_storage::SqliteStore::open(history_database).unwrap();
+        let events = hass_core::Store::event_history_query(
+            &store,
+            &hass_core::EventHistoryQuery {
+                start: chrono::Utc::now() - chrono::Duration::minutes(1),
+                end: chrono::Utc::now() + chrono::Duration::seconds(1),
+                event_types: Some(vec!["repairs_issue_registry_updated".into()]),
+            },
+        )
+        .unwrap();
+        assert!(events.iter().any(|event| {
+            event.data
+                == serde_json::Map::from_iter([
+                    ("action".into(), json!("update")),
+                    ("domain".into(), json!("tag")),
+                    ("issue_id".into(), json!("sdk_process_fixture")),
+                ])
+        }));
+        assert!(events.iter().all(|event| !event.data.contains_key("data")));
+    })
+    .await
+    .unwrap();
+
+    let mut restarted = Server::start(&config).await;
+    let mut socket = authenticated_socket(&restarted).await;
+    let listed = ws_command(&mut socket, json!({"id":1,"type":"repairs/list_issues"})).await;
+    assert_eq!(
+        listed["result"]["issues"][0]["dismissed_version"], "2026.12.0.dev0",
+        "{listed}"
+    );
+    assert_eq!(listed["result"]["issues"][0]["ignored"], true, "{listed}");
+    let base = "/api/repairs/issues/fix";
+    let form: Value = restarted
+        .post(
+            base,
+            json!({"handler":"tag","issue_id":"sdk_process_fixture"}),
+        )
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(form["type"], "form", "{form}");
+    assert_eq!(form["data_schema"], json!([]), "{form}");
+    assert_eq!(form["description_placeholders"], json!({"name":"Fixture"}));
+    let flow_path = format!("{base}/{}", form["flow_id"].as_str().unwrap());
+    let finished: Value = restarted
+        .post(&flow_path, json!({}))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(finished["type"], "create_entry", "{finished}");
+    assert_eq!(
+        restarted.get(&flow_path).await.status(),
+        StatusCode::NOT_FOUND
+    );
+    let listed = ws_command(&mut socket, json!({"id":2,"type":"repairs/list_issues"})).await;
+    assert_eq!(listed["result"]["issues"], json!([]), "{listed}");
+    socket.close(None).await.unwrap();
+    restarted.child.kill().await.unwrap();
+    restarted.child.wait().await.unwrap();
+
+    let mut final_start = Server::start(&config).await;
+    let mut socket = authenticated_socket(&final_start).await;
+    let listed = ws_command(&mut socket, json!({"id":1,"type":"repairs/list_issues"})).await;
+    assert_eq!(
+        listed["result"]["issues"],
+        json!([]),
+        "completed repair stays deleted: {listed}"
+    );
+    socket.close(None).await.unwrap();
+    final_start.child.kill().await.unwrap();
+    final_start.child.wait().await.unwrap();
+}
+
+#[tokio::test]
 async fn real_process_raw_log_stream_does_not_echo_its_own_frames() {
     use futures_util::{SinkExt, StreamExt};
     let directory = tempfile::tempdir().unwrap();

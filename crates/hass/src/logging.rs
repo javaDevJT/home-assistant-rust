@@ -32,6 +32,10 @@ pub fn catalog() -> IntegrationCatalog {
         ("persistent_notification", &["hass_notifications"]),
         ("person", &["hass_person", "hass::persons"]),
         ("recorder", &["hass::recorder", "hass_storage"]),
+        (
+            "repairs",
+            &["hass_repairs", "hass_api::repairs", "hass::repairs"],
+        ),
         ("rest", &["hass_rest"]),
         ("rest_command", &["hass_rest::command"]),
         ("scene", &["hass_script::scene"]),

@@ -1,6 +1,39 @@
 # Validation evidence
 
-The frozen 27-crate Sun/System Log tree passes **578 tests across 71 targets**, zero failed/ignored, formatting, strict locked all-target Clippy, optimized build and optimized example CLI validation on 2026-11-06. Optimized macOS executable SHA-256: `16acb74232a8dd6f01cb30b97ea1b1e187923ba92640011faf63aeb0527cd485`. Source publication and its exact Linux CI receipt follow this local gate. The new Repairs implementation remains outside this checkpoint and workspace.
+## Accepted 28-crate Repairs and configuration-subentry source
+
+The frozen workspace passes **617 tests across 75 targets**, with zero failed or
+ignored tests, `cargo fmt --all -- --check` and strict locked all-target Clippy
+on 2026-11-06. The locked optimized build and optimized example CLI `--check`
+also pass. Optimized macOS executable SHA-256:
+`2fbc9762b76a6f94536953cc1f124062b9cda2e36c8c2666c2a814fc4090ac51`.
+A source SHA and exact Linux CI receipt follow publication.
+The isolated System Health SDK and its nested API draft are outside this gate.
+
+Repairs has 23 package cases covering storage migration, restored identity shells,
+actual parent/child validation, scoped refresh/keep/defer/cancel ordering,
+dismissal, native callbacks and independent terminal child-flow metadata.
+Real HTTP/WS fixtures verify minimal public updates, field privacy, authentication,
+source 401 administrator checks and inherited authenticated DELETE. The compiled
+process checks temporary SQLite issue storage, public event history, dismissal,
+confirmation and deletion across three hard starts. Two app host cases verify
+disable visibility, parent/child cleanup, sibling and foreign-state isolation,
+and observer teardown before restart.
+
+Configuration has 18 cases, including actual generated subentry IDs, per-parent
+unique IDs, persisted private data, native create/reconfigure flows and lifecycle
+observer lock/reentry boundaries. The real subentry API fixture verifies role
+checks, public list/title-only update/delete, typed schema errors with successful
+retry, independent sibling flows and store reopen after graceful teardown. All
+32 registry cases pass, including exact parent/child cleanup and tombstone rules.
+Parent and child cleanup precede their removal/update announcement; observer
+failures are reported after commit. There is no cross-document transaction or
+durable registry-cleanup replay journal. Exhaustive pinned-source acceptance and
+the full rewrite remain open; no production deployment occurred.
+
+## Published 27-crate source receipt
+
+Published 27-crate Sun/System Log source `d58d19af5eca3fd5f1dd686ffa0d1826f6f33626` passes **578 local tests across 71 targets**, zero failed/ignored, formatting, strict locked all-target Clippy, optimized build and optimized example CLI validation on 2026-11-06, followed by [green Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42327563748). Optimized macOS executable SHA-256: `16acb74232a8dd6f01cb30b97ea1b1e187923ba92640011faf63aeb0527cd485`. Later Repairs/config-subentry work is outside this immutable receipt.
 
 ## Accepted 27-crate Sun and System Log source
 

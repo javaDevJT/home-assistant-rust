@@ -88,6 +88,9 @@ pub struct EntityEntry {
     pub unit_of_measurement: Option<String>,
     #[serde(default)]
     pub has_entity_name: bool,
+    /// Time this deleted entity became orphaned from a config entry/subentry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphaned_timestamp: Option<DateTime<Utc>>,
 }
 
 impl EntityEntry {
@@ -301,6 +304,12 @@ pub struct DeviceEntry {
     pub sw_version: Option<String>,
     #[serde(default)]
     pub via_device_id: Option<String>,
+    /// Domain remembered for an orphaned deleted device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// Time this deleted device became orphaned from a config entry/subentry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orphaned_timestamp: Option<DateTime<Utc>>,
 }
 
 impl DeviceEntry {
@@ -353,6 +362,25 @@ impl DeviceEntry {
             "via_device_id": self.via_device_id,
         })
     }
+}
+
+/// Counts produced while clearing registry records for one config subentry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ConfigSubentryCleanup {
+    pub entities_removed: usize,
+    pub devices_removed: usize,
+    pub entity_tombstones_orphaned: usize,
+    pub device_tombstones_orphaned: usize,
+}
+
+/// Counts produced while clearing registry records for one config entry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ConfigEntryCleanup {
+    pub entities_removed: usize,
+    pub devices_removed: usize,
+    pub entity_tombstones_orphaned: usize,
+    pub device_tombstones_orphaned: usize,
+    pub devices_updated: usize,
 }
 
 /// Split members of a removed pre-migration composite device.
@@ -998,6 +1026,7 @@ impl Registries {
                 translation_key: registration.translation_key.clone(),
                 unit_of_measurement: registration.unit_of_measurement.clone(),
                 has_entity_name: registration.has_entity_name,
+                orphaned_timestamp: None,
             };
             data.entities.push(entry.clone());
             Ok((
@@ -1128,50 +1157,22 @@ impl Registries {
 
     /// Remove an entity entry. Its unique-ID identity is retained for restoration.
     pub fn remove_entity(&self, entity_id: &str) -> Result<()> {
-        self.transact(|data| {
-            let index = data
-                .entities
-                .iter()
-                .position(|entry| entry.entity_id == entity_id)
-                .ok_or_else(|| Error::NotFound(format!("entity {entity_id}")))?;
-            let removed = data.entities.remove(index);
-            data.deleted_entities
-                .retain(|entry| !entity_identity_matches_entry(entry, &removed));
-            data.deleted_entities.push(removed.clone());
-            let mut events = vec![RegistryEvent::item(
-                "entity_registry_updated",
-                "remove",
-                "entity_id",
-                &removed.entity_id,
-            )];
-            for area in &mut data.areas {
-                let mut changed = false;
-                if area.humidity_entity_id.as_deref() == Some(entity_id) {
-                    area.humidity_entity_id = None;
-                    changed = true;
-                }
-                if area.temperature_entity_id.as_deref() == Some(entity_id) {
-                    area.temperature_entity_id = None;
-                    changed = true;
-                }
-                if changed {
-                    area.modified_at = Utc::now();
-                    events.push(RegistryEvent::item(
-                        "area_registry_updated",
-                        "update",
-                        "area_id",
-                        &area.id,
-                    ));
-                }
-            }
-            Ok(((), events))
-        })
+        self.transact(|data| Ok(((), remove_entity_from_data(data, entity_id)?)))
     }
 
     /// Get or create a device by an identifier or connection pair.
     pub fn get_or_create_device(&self, registration: DeviceRegistration) -> Result<DeviceEntry> {
         validate_device_registration(&registration)?;
         let resolver = self.inner.config_entry_domain_resolver.clone();
+        let registration_domain =
+            registration
+                .config_entry_id
+                .as_deref()
+                .and_then(|config_entry_id| {
+                    resolver
+                        .as_deref()
+                        .and_then(|resolver| resolver(config_entry_id))
+                });
         self.transact(move |data| {
             let mut registration = registration;
             if let Some(via_device_id) = registration.via_device_id.clone() {
@@ -1291,7 +1292,14 @@ impl Registries {
                 .iter()
                 .enumerate()
                 .filter_map(|(index, entry)| {
-                    if !device_in_config_entry(entry, registration.config_entry_id.as_deref()) {
+                    let owned_by_entry =
+                        device_in_config_entry(entry, registration.config_entry_id.as_deref());
+                    let orphaned_from_same_domain =
+                        registration_domain.as_deref().is_some_and(|domain| {
+                            entry.orphaned_timestamp.is_some()
+                                && entry.domain.as_deref() == Some(domain)
+                        });
+                    if !owned_by_entry && !orphaned_from_same_domain {
                         return None;
                     }
                     let identifier_match = entry
@@ -1314,6 +1322,8 @@ impl Registries {
                 let mut entry = data.deleted_devices.remove(index);
                 entry.identifiers.extend(registration.identifiers.clone());
                 entry.connections.extend(registration.connections.clone());
+                entry.domain = None;
+                entry.orphaned_timestamp = None;
                 if entry.config_entry_id.is_none() {
                     entry.config_entry_id = registration.config_entry_id.clone();
                 }
@@ -1419,6 +1429,8 @@ impl Registries {
                 has_composite_identifiers: false,
                 sw_version: registration.sw_version.clone(),
                 via_device_id: registration.via_device_id.clone(),
+                domain: None,
+                orphaned_timestamp: None,
             };
             let id = entry.id.clone();
             data.devices.push(entry.clone());
@@ -1509,67 +1521,166 @@ impl Registries {
 
     /// Remove a device and clear entity and parent-device references to it.
     pub fn remove_device(&self, device_id: &str) -> Result<()> {
+        self.transact(|data| Ok(((), remove_device_from_data(data, device_id)?)))
+    }
+
+    /// Clear device and entity registry ownership for one config subentry.
+    ///
+    /// Device and entity changes are committed as one registry snapshot. Device
+    /// removal notifications precede entity notifications, matching the core
+    /// config-entry cleanup sequence. Deleted entity tombstones intentionally
+    /// match by subentry ID alone, as in the pinned entity registry helper.
+    pub fn clear_config_subentry(
+        &self,
+        config_entry_id: &str,
+        config_subentry_id: &str,
+    ) -> Result<ConfigSubentryCleanup> {
+        let domain = self
+            .inner
+            .config_entry_domain_resolver
+            .as_deref()
+            .and_then(|resolver| resolver(config_entry_id));
+        let now = Utc::now();
         self.transact(|data| {
-            if data
+            let mut cleanup = ConfigSubentryCleanup::default();
+            let mut events = Vec::new();
+
+            // The pinned device registry selects active devices by their owning
+            // config entry and primary config_subentry_id. Keep other entries and
+            // additional legacy subentry-map memberships untouched.
+            let device_ids = data
                 .devices
                 .iter()
-                .any(|entry| entry.composite_device_id.as_deref() == Some(device_id))
-            {
-                return Err(Error::NotAllowed("Cannot remove a composite device".into()));
+                .filter(|device| {
+                    device_in_config_entry(device, Some(config_entry_id))
+                        && device.config_subentry_id.as_deref() == Some(config_subentry_id)
+                })
+                .map(|device| device.id.clone())
+                .collect::<Vec<_>>();
+            for device_id in device_ids {
+                events.extend(remove_device_from_data(data, &device_id)?);
+                cleanup.devices_removed += 1;
             }
-            let index = data
-                .devices
+
+            // A removed device can have produced a tombstone above, so perform
+            // orphaning after the active-device removal pass.
+            let deleted_device_ids = data
+                .deleted_devices
                 .iter()
-                .position(|entry| entry.id == device_id)
-                .ok_or_else(|| Error::NotFound(format!("device {device_id}")))?;
-            let removed = data.devices.remove(index);
-            data.deleted_devices.retain(|entry| entry.id != device_id);
-            data.deleted_devices.push(removed.clone());
-            let mut events = vec![RegistryEvent {
-                event_type: "device_registry_updated",
-                action: "remove",
-                id_key: Some("device_id"),
-                id: Some(device_id.to_owned()),
-                changes: None,
-                extra: Some(("device", removed.websocket_value())),
-            }];
-            for entity in &mut data.entities {
-                if entity.device_id.as_deref() == Some(device_id) {
-                    entity.device_id = None;
-                    entity.modified_at = Utc::now();
-                    events.push(RegistryEvent::changed(
-                        "entity_registry_updated",
-                        "entity_id",
-                        &entity.entity_id,
-                        json!({"device_id": device_id}),
-                    ));
+                .filter(|device| {
+                    device.config_entry_id.as_deref() == Some(config_entry_id)
+                        && device.config_subentry_id.as_deref() == Some(config_subentry_id)
+                })
+                .map(|device| device.id.clone())
+                .collect::<Vec<_>>();
+            for device_id in deleted_device_ids {
+                if orphan_deleted_device(data, &device_id, domain.as_deref(), now) {
+                    cleanup.device_tombstones_orphaned += 1;
                 }
             }
+
+            let entity_ids = data
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.config_entry_id.as_deref() == Some(config_entry_id)
+                        && entity.config_subentry_id.as_deref() == Some(config_subentry_id)
+                })
+                .map(|entity| entity.entity_id.clone())
+                .collect::<Vec<_>>();
+            for entity_id in entity_ids {
+                events.extend(remove_entity_from_data(data, &entity_id)?);
+                cleanup.entities_removed += 1;
+            }
+
+            // The source helper deliberately matches deleted entities globally
+            // by subentry ID, even when a tombstone still names another parent.
             for entity in &mut data.deleted_entities {
-                if entity.device_id.as_deref() == Some(device_id) {
-                    entity.device_id = None;
-                    entity.modified_at = Utc::now();
+                if entity.config_subentry_id.as_deref() != Some(config_subentry_id) {
+                    continue;
                 }
+                entity.orphaned_timestamp = Some(now);
+                entity.config_entry_id = None;
+                entity.config_subentry_id = None;
+                cleanup.entity_tombstones_orphaned += 1;
             }
+
+            Ok((cleanup, events))
+        })
+    }
+
+    /// Clear device and entity registry ownership for a removed config entry.
+    ///
+    /// The domain is supplied by the removal observer because the config entry
+    /// has already been committed out of the config-entry registry by the time
+    /// this method runs. No Runtime states are removed by registry cleanup.
+    pub fn clear_config_entry(
+        &self,
+        config_entry_id: &str,
+        domain: &str,
+    ) -> Result<ConfigEntryCleanup> {
+        validate_nonempty(domain, "config entry domain")?;
+        let domain = domain.to_owned();
+        let now = Utc::now();
+        self.transact(|data| {
+            let mut cleanup = ConfigEntryCleanup::default();
+            let mut events = Vec::new();
+
+            let device_ids = data
+                .devices
+                .iter()
+                .filter(|device| device_in_config_entry(device, Some(config_entry_id)))
+                .map(|device| device.id.clone())
+                .collect::<Vec<_>>();
+            for device_id in device_ids {
+                events.extend(remove_device_from_data(data, &device_id)?);
+                cleanup.devices_removed += 1;
+            }
+
+            // Split devices retain this former-primary owner for old composite
+            // aliases. Once the owner is gone, clear only that dangling pointer.
             for device in &mut data.devices {
-                if device.via_device_id.as_deref() == Some(device_id) {
-                    device.via_device_id = None;
-                    device.modified_at = Utc::now();
-                    events.push(RegistryEvent::changed(
-                        "device_registry_updated",
-                        "device_id",
-                        &device.id,
-                        json!({"via_device_id": device_id}),
-                    ));
+                if device.composite_primary_config_entry.as_deref() == Some(config_entry_id) {
+                    device.composite_primary_config_entry = None;
+                    cleanup.devices_updated += 1;
                 }
             }
-            for device in &mut data.deleted_devices {
-                if device.via_device_id.as_deref() == Some(device_id) {
-                    device.via_device_id = None;
-                    device.modified_at = Utc::now();
+
+            let deleted_device_ids = data
+                .deleted_devices
+                .iter()
+                .filter(|device| device.config_entry_id.as_deref() == Some(config_entry_id))
+                .map(|device| device.id.clone())
+                .collect::<Vec<_>>();
+            for device_id in deleted_device_ids {
+                if orphan_deleted_device(data, &device_id, Some(&domain), now) {
+                    cleanup.device_tombstones_orphaned += 1;
                 }
             }
-            Ok(((), events))
+
+            let entity_ids = data
+                .entities
+                .iter()
+                .filter(|entity| entity.config_entry_id.as_deref() == Some(config_entry_id))
+                .map(|entity| entity.entity_id.clone())
+                .collect::<Vec<_>>();
+            for entity_id in entity_ids {
+                events.extend(remove_entity_from_data(data, &entity_id)?);
+                cleanup.entities_removed += 1;
+            }
+
+            // Config-entry cleanup preserves the entity tombstone's historical
+            // subentry ID, matching async_clear_config_entry in core.
+            for entity in &mut data.deleted_entities {
+                if entity.config_entry_id.as_deref() != Some(config_entry_id) {
+                    continue;
+                }
+                entity.orphaned_timestamp = Some(now);
+                entity.config_entry_id = None;
+                cleanup.entity_tombstones_orphaned += 1;
+            }
+
+            Ok((cleanup, events))
         })
     }
 
@@ -2135,6 +2246,147 @@ impl Registries {
         }
         Ok(result)
     }
+}
+
+fn remove_entity_from_data(data: &mut RegistryData, entity_id: &str) -> Result<Vec<RegistryEvent>> {
+    let index = data
+        .entities
+        .iter()
+        .position(|entry| entry.entity_id == entity_id)
+        .ok_or_else(|| Error::NotFound(format!("entity {entity_id}")))?;
+    let removed = data.entities.remove(index);
+    data.deleted_entities
+        .retain(|entry| !entity_identity_matches_entry(entry, &removed));
+    data.deleted_entities.push(removed.clone());
+    let mut events = vec![RegistryEvent::item(
+        "entity_registry_updated",
+        "remove",
+        "entity_id",
+        &removed.entity_id,
+    )];
+    for area in &mut data.areas {
+        let mut changed = false;
+        if area.humidity_entity_id.as_deref() == Some(entity_id) {
+            area.humidity_entity_id = None;
+            changed = true;
+        }
+        if area.temperature_entity_id.as_deref() == Some(entity_id) {
+            area.temperature_entity_id = None;
+            changed = true;
+        }
+        if changed {
+            area.modified_at = Utc::now();
+            events.push(RegistryEvent::item(
+                "area_registry_updated",
+                "update",
+                "area_id",
+                &area.id,
+            ));
+        }
+    }
+    Ok(events)
+}
+
+fn remove_device_from_data(data: &mut RegistryData, device_id: &str) -> Result<Vec<RegistryEvent>> {
+    if data
+        .devices
+        .iter()
+        .any(|entry| entry.composite_device_id.as_deref() == Some(device_id))
+    {
+        return Err(Error::NotAllowed("Cannot remove a composite device".into()));
+    }
+    let index = data
+        .devices
+        .iter()
+        .position(|entry| entry.id == device_id)
+        .ok_or_else(|| Error::NotFound(format!("device {device_id}")))?;
+    let removed = data.devices.remove(index);
+    data.deleted_devices.retain(|entry| entry.id != device_id);
+    data.deleted_devices.push(removed.clone());
+    let mut events = vec![RegistryEvent {
+        event_type: "device_registry_updated",
+        action: "remove",
+        id_key: Some("device_id"),
+        id: Some(device_id.to_owned()),
+        changes: None,
+        extra: Some(("device", removed.websocket_value())),
+    }];
+    for entity in &mut data.entities {
+        if entity.device_id.as_deref() == Some(device_id) {
+            entity.device_id = None;
+            entity.modified_at = Utc::now();
+            events.push(RegistryEvent::changed(
+                "entity_registry_updated",
+                "entity_id",
+                &entity.entity_id,
+                json!({"device_id": device_id}),
+            ));
+        }
+    }
+    for entity in &mut data.deleted_entities {
+        if entity.device_id.as_deref() == Some(device_id) {
+            entity.device_id = None;
+            entity.modified_at = Utc::now();
+        }
+    }
+    for device in &mut data.devices {
+        if device.via_device_id.as_deref() == Some(device_id) {
+            device.via_device_id = None;
+            device.modified_at = Utc::now();
+            events.push(RegistryEvent::changed(
+                "device_registry_updated",
+                "device_id",
+                &device.id,
+                json!({"via_device_id": device_id}),
+            ));
+        }
+    }
+    for device in &mut data.deleted_devices {
+        if device.via_device_id.as_deref() == Some(device_id) {
+            device.via_device_id = None;
+            device.modified_at = Utc::now();
+        }
+    }
+    Ok(events)
+}
+
+fn orphan_deleted_device(
+    data: &mut RegistryData,
+    device_id: &str,
+    domain: Option<&str>,
+    now: DateTime<Utc>,
+) -> bool {
+    if let Some(domain) = domain
+        && let Some(removed) = data
+            .deleted_devices
+            .iter()
+            .find(|entry| entry.id == device_id)
+    {
+        let identifiers = removed.identifiers.clone();
+        let connections = removed.connections.clone();
+        data.deleted_devices.retain(|existing| {
+            existing.id == device_id
+                || existing.orphaned_timestamp.is_none()
+                || existing.domain.as_deref() != Some(domain)
+                || (existing.identifiers.is_disjoint(&identifiers)
+                    && existing.connections.is_disjoint(&connections))
+        });
+    }
+
+    let Some(entry) = data
+        .deleted_devices
+        .iter_mut()
+        .find(|entry| entry.id == device_id)
+    else {
+        return false;
+    };
+    entry.config_entry_id = None;
+    entry.config_entries.clear();
+    entry.config_entries_subentries.clear();
+    entry.config_subentry_id = None;
+    entry.domain = domain.map(str::to_owned);
+    entry.orphaned_timestamp = Some(now);
+    true
 }
 
 // Helpers used by websocket adapters and registry mutations.

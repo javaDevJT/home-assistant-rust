@@ -38,6 +38,30 @@ flow result fields. The WebSocket dispatcher accepts the upstream entry
 commands (`config_entries/get`, `get_single`, `update`, `disable`, `subscribe`,
 flow progress/subscribe) and the core config get/update commands.
 
+`ConfigEntries::active_flow(flow_type, flow_id)` returns a typed
+`ConfigFlowInfo` snapshot only when the requested flow type matches the active
+session. It includes the cached public result and owning integration domain.
+Active form/abort results retain config context (including a linked
+`context.entry_id` when present); options flow results use the owning entry ID
+as `handler` and in `context.entry_id`. Subentry results use
+`handler: [entry_id, subentry_type]`.
+
+Native subentries use persistent typed `ConfigSubentry` records and the
+`create_subentry`, `get_subentry`, `list_subentries`, `update_subentry`, and
+`remove_subentry` manager methods. Drivers register supported subentry types
+and implement `supported_subentry_types` plus `subentry_flow` for native flow
+steps. Adapters start creation/reconfigure with `init_subentry_flow` and
+continue using `submit_flow`; unsupported types fail explicitly.
+`ConfigEntries::subentry_exists` validates an exact persisted parent/child
+identity. Pointer-owned `ConfigLifecycleObserver`s receive committed parent
+removal, parent disable/enable, and child removal events after manager locks
+are released. `observe_lifecycle` returns a `ConfigLifecycleObserverGuard` that
+unregisters only its exact observer when dropped. Parent removal events carry
+the removed entry's original `domain`, which remains available after the
+entry is gone. Parent and child cleanup precede their removal/update
+announcement; disable visibility refresh follows the entry update. See
+[the pinned-source and Repairs contract](../../docs/CONFIG-SUBENTRIES-PORT.md).
+
 ## Persistence and secret handling
 
 Entries, private `data`/`options`, lifecycle/retry/reauth/reload state, and core
@@ -65,6 +89,11 @@ debug output also redacts those maps. Trusted driver callbacks and typed
 - Core configuration validates the location, IANA time zone, unit system, and
   optional HTTP(S) URLs. It seeds from YAML only until a persisted API update
   exists, and applies the saved time zone to Runtime.
+- Config subentry `data` is private and omitted from ordinary listing fragments.
+  Older config records that predate subentries load with an empty subentry set.
+- Lifecycle observer errors are reported after the config mutation is durable;
+  observers run outside manager locks and cannot roll back that committed
+  mutation. Failed registry cleanup has no durable replay journal yet.
 - Successful core updates emit `core_config_updated` after persistence, with
   accepted request fields and no WebSocket envelope fields. Invalid or
   unsupported fields produce no update event. The app uses this event to

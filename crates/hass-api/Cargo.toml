@@ -25,6 +25,7 @@ hass-webhook.workspace = true
 hass-tag.workspace = true
 hass-logger.workspace = true
 hass-system-log.workspace = true
+hass-repairs.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true

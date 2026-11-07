@@ -63,6 +63,7 @@ impl From<CoreError> for ApiError {
     fn from(error: CoreError) -> Self {
         match error {
             CoreError::InvalidInput(message) => Self::invalid(message),
+            CoreError::InvalidData { .. } => Self::invalid("Invalid data"),
             CoreError::NotFound(message) => Self::not_found(message),
             CoreError::HomeAssistant(message) => Self::invalid(message),
             CoreError::NotAllowed(message) => Self {
@@ -135,10 +136,31 @@ pub(crate) async fn authenticate(
                 )
                 .await;
             }
+            // These source flow views own their administrator check and use
+            // 401 for failed checks. Their inherited DELETE is auth-only.
+            let source_flow_collections = [
+                "/api/repairs/issues/fix",
+                "/api/config/config_entries/subentries/flow",
+            ];
+            let is_source_flow_resource = source_flow_collections.iter().any(|prefix| {
+                request
+                    .uri()
+                    .path()
+                    .strip_prefix(prefix)
+                    .and_then(|suffix| suffix.strip_prefix('/'))
+                    .is_some_and(|flow_id| !flow_id.is_empty() && !flow_id.contains('/'))
+            });
+            let is_source_flow_submission = request.method() == axum::http::Method::POST
+                && (source_flow_collections.contains(&request.uri().path())
+                    || is_source_flow_resource);
+            let is_authenticated_flow_abort =
+                request.method() == axum::http::Method::DELETE && is_source_flow_resource;
             if identity.read_only
                 && !matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS")
                 && !(request.method() == axum::http::Method::POST
                     && request.uri().path() == "/api/image/upload")
+                && !is_authenticated_flow_abort
+                && !is_source_flow_submission
             {
                 return (StatusCode::FORBIDDEN, Json(json!({"message":"Forbidden"})))
                     .into_response();

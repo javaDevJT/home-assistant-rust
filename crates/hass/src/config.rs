@@ -375,6 +375,7 @@ impl Config {
             "tag",
             "logger",
             "system_log",
+            "repairs",
             "sun",
             "webhook",
             "time_date",

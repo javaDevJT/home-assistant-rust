@@ -913,13 +913,17 @@
     {
       "area": "Startup, configuration, loader and config-entry lifecycle",
       "coverage_status": "partial_or_unported",
-      "gap": "Native config entries execute real registered setup/unload/retry/migration/config/options callbacks with persistent state and HTTP adapters. Manifest-aware loading, complete dependency ordering, remaining discovery/subentry/platform flows and exhaustive rollback/reload contracts remain open.",
+      "gap": "Native config entries execute real registered setup/unload/retry/migration/config/options callbacks with persistent state and HTTP adapters. Typed subentry records now have stable parent-scoped identities, private data, source-compatible migration, registered native flows and post-commit lifecycle observers; focused HTTP/WebSocket fixtures cover the public subset and persisted children. Manifest-aware loading, complete dependency ordering, remaining discovery/platform flows, exhaustive pinned subentry acceptance and rollback/reload contracts remain open.",
       "id": "loader_setup_config_entries",
       "local_evidence_paths": [
         "crates/hass/src/config.rs",
-        "crates/hass/src/main.rs"
+        "crates/hass/src/main.rs",
+        "crates/hass-config/src/lib.rs",
+        "crates/hass-api/src/config_subentries.rs",
+        "crates/hass-api/tests/config_subentries_protocol.rs",
+        "crates/hass/src/repairs.rs"
       ],
-      "next_acceptance": "Port manifest-aware validation and setup, config-entry/data-flow state machines, deterministic dependency order, rollback, reload/unload, and failure/retry behavior before adding integration waves.",
+      "next_acceptance": "Finish exhaustive pinned subentry migration, flow, lifecycle, privacy, role and error acceptance; then port manifest-aware setup, config-entry/data-flow state machines, deterministic dependency order, rollback, reload/unload, and failure/retry behavior before adding integration waves.",
       "pinned_upstream_sources": [
         "homeassistant/config.py",
         "homeassistant/loader.py",
@@ -1017,12 +1021,16 @@
     {
       "area": "HTTP server, REST API, proxy trust and request safety",
       "coverage_status": "partial_or_unported",
-      "gap": "Native REST and WebSocket transports cover state/services/events/history/templates/auth and config flows with origin/proxy/local-only policy. Remaining endpoints, IP bans, CORS, middleware/header and exact error parity stay open.",
+      "gap": "Native REST and WebSocket transports cover state/services/events/history/templates/auth and config flows with origin/proxy/local-only policy. Repairs fix-flow and config-subentry flow routes now have focused HTTP fixtures, alongside WebSocket adapters for their supported commands. Remaining endpoints, IP bans, CORS, middleware/header, exact error and fine-grained permission parity stay open.",
       "id": "http_rest_and_proxy_security",
       "local_evidence_paths": [
         "crates/hass-api/src/http.rs",
         "crates/hass-api/src/lib.rs",
-        "crates/hass/src/main.rs"
+        "crates/hass/src/main.rs",
+        "crates/hass-api/src/repairs.rs",
+        "crates/hass-api/src/config_subentries.rs",
+        "crates/hass-api/tests/repairs_protocol.rs",
+        "crates/hass-api/tests/config_subentries_protocol.rs"
       ],
       "next_acceptance": "Port each endpoint and middleware from pinned source; exercise trusted/untrusted proxy, invalid auth, rate/ban, body limits, status/error shapes, CORS and headers with local HTTP fixtures.",
       "pinned_upstream_sources": [
@@ -1040,16 +1048,20 @@
     {
       "area": "WebSocket auth, command channels, subscriptions and payload contracts",
       "coverage_status": "partial_or_unported",
-      "gap": "System Log list/raw commands now have native adapters and a focused transport fixture, but only a command subset is available; remaining command families, per-feature authorization, flow lifecycle, message validation, subscription fan-out and exact event/result envelopes remain open.",
+      "gap": "System Log list/raw commands, Repairs issue/list/data/ignore commands, and config-subentry list/update/delete commands have native adapters and focused transport fixtures. Repairs changes use the ordinary public event path and native event history; subentry responses omit private data. Only command subsets are available; remaining command families, per-feature authorization, flow lifecycle, message validation, subscription fan-out, exact event/result envelopes and exhaustive pinned acceptance remain open.",
       "id": "websocket_api",
       "local_evidence_paths": [
         "crates/hass-api/src/websocket.rs",
         "crates/hass-api/src/login.rs",
         "crates/hass-system-log/src/lib.rs",
         "crates/hass-api/tests/system_log_protocol.rs",
+        "crates/hass-api/src/repairs.rs",
+        "crates/hass-api/src/config_subentries.rs",
+        "crates/hass-api/tests/repairs_protocol.rs",
+        "crates/hass-api/tests/config_subentries_protocol.rs",
         "crates/hass/tests/end_to_end.rs"
       ],
-      "next_acceptance": "Enumerate every pinned command decorator/channel, implement authorization and envelopes, then test malformed/duplicate IDs, auth expiry, flow commands, subscriptions, shutdown and cleanup.",
+      "next_acceptance": "Finish pinned Repairs and subentry command authorization, field, error and flow-lifecycle cases; then enumerate every remaining pinned command/channel, implement authorization and envelopes, and test malformed/duplicate IDs, auth expiry, subscriptions, shutdown and cleanup.",
       "pinned_upstream_sources": [
         "homeassistant/components/websocket_api/auth.py",
         "homeassistant/components/websocket_api/commands.py",
@@ -1854,16 +1866,22 @@
     {
       "area": "Backup, repairs, diagnostics, onboarding and system-level services",
       "coverage_status": "partial_or_unported",
-      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. System Log list/write/raw-stream support is partial; its LLM consumers, coercion parity, observable overflow, reader-backed backlog and complete pinned acceptance remain open. Backup/restore, repairs, diagnostics and remaining system/frontend operating workflows are unported.",
+      "gap": "Native onboarding/password/MFA/login workflows and local persistence have fixtures. System Log list/write/raw-stream support is partial; its LLM consumers, coercion parity, observable overflow, reader-backed backlog and complete pinned acceptance remain open. Repairs now has a partial native registry/fix-flow manager, HTTP/WebSocket subset, post-commit host lifecycle and actual-process persistence/event/confirmation/restart evidence. Cross-document cleanup is not atomic and has no durable registry replay journal; fine-grained POLICY_EDIT, exhaustive pinned acceptance, frontend/translations, Python loader, and real provider activity remain open. Backup/restore, diagnostics and remaining system/frontend operating workflows are unported.",
       "id": "backup_repairs_diagnostics_and_system_services",
       "local_evidence_paths": [
         "crates/hass/src/main.rs",
         "crates/hass-storage/src/lib.rs",
         "crates/hass-system-log/src/lib.rs",
         "crates/hass-api/tests/system_log_protocol.rs",
+        "crates/hass-repairs/src/lib.rs",
+        "crates/hass-repairs/src/registry.rs",
+        "crates/hass-repairs/src/flows.rs",
+        "crates/hass-api/src/repairs.rs",
+        "crates/hass-api/tests/repairs_protocol.rs",
+        "crates/hass/src/repairs.rs",
         "crates/hass/tests/end_to_end.rs"
       ],
-      "next_acceptance": "Finish System Log LLM/coercion/dedup/overflow/backlog parity and pinned acceptance; then port remaining system-service families with failure-safe persistence, authorization, restore/rollback and pinned API/test shape.",
+      "next_acceptance": "Complete the pinned Repairs storage, lifecycle, authorization, HTTP/WebSocket and failure acceptance; exercise recovery after explicit post-commit cross-document cleanup failures, and finish System Log LLM/coercion/dedup/overflow/backlog parity. Then port backup/restore, diagnostics and remaining system-service families with failure-safe persistence, authorization, restore/rollback and pinned API/test shape.",
       "pinned_upstream_sources": [
         {
           "path_count": 23,
@@ -12588,7 +12606,13 @@
       "domain": "api",
       "local_evidence_paths": [
         "crates/hass-api/src/http.rs",
-        "crates/hass-api/src/websocket.rs"
+        "crates/hass-api/src/websocket.rs",
+        "crates/hass-api/src/lib.rs",
+        "crates/hass-api/src/config_subentries.rs",
+        "crates/hass-api/tests/config_subentries_protocol.rs",
+        "crates/hass-api/src/repairs.rs",
+        "crates/hass-api/tests/repairs_protocol.rs",
+        "crates/hass/tests/end_to_end.rs"
       ],
       "manifest": {
         "codeowners": [
@@ -12605,7 +12629,7 @@
       },
       "manifest_blob_oid": "bdadbef32797d22b4cf39f27846abde8309e7815",
       "manifest_path": "homeassistant/components/api/manifest.json",
-      "outstanding_acceptance": "Only the implemented REST/WebSocket subset is covered; API endpoint, error, auth, subscription, and history semantics still require complete pinned-source acceptance.",
+      "outstanding_acceptance": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The config-subentry API test passes through graceful fixture teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, and history semantics require complete acceptance.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -26376,7 +26400,11 @@
       "domain": "config",
       "local_evidence_paths": [
         "crates/hass-registry/src/lib.rs",
-        "crates/hass-api/src/websocket.rs"
+        "crates/hass-api/src/websocket.rs",
+        "crates/hass-config/src/lib.rs",
+        "crates/hass-api/src/config_subentries.rs",
+        "crates/hass-api/tests/config_subentries_protocol.rs",
+        "crates/hass/src/repairs.rs"
       ],
       "manifest": {
         "codeowners": [
@@ -26393,7 +26421,7 @@
       },
       "manifest_blob_oid": "32aacff2c6fc2096829df4a1270b2f8346e28e31",
       "manifest_path": "homeassistant/components/config/manifest.json",
-      "outstanding_acceptance": "Registry storage and command handling cover part of config APIs; config-entry CRUD/flow/migration and full registry event/command parity remain open.",
+      "outstanding_acceptance": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation, and a focused HTTP/WebSocket subset now have evidence. The subentry API test passes through graceful fixture teardown. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -115745,7 +115773,17 @@
       "component_directory": "homeassistant/components/repairs/",
       "config_flow_classes": [],
       "domain": "repairs",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-repairs/src/lib.rs",
+        "crates/hass-repairs/src/registry.rs",
+        "crates/hass-repairs/src/flows.rs",
+        "crates/hass-api/src/repairs.rs",
+        "crates/hass-api/src/websocket.rs",
+        "crates/hass-api/src/lib.rs",
+        "crates/hass-api/tests/repairs_protocol.rs",
+        "crates/hass/src/repairs.rs",
+        "crates/hass/tests/end_to_end.rs"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -115762,10 +115800,10 @@
       },
       "manifest_blob_oid": "218bea3555e25d5c7b2b48dc408d5a9443b77a70",
       "manifest_path": "homeassistant/components/repairs/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "A native Repairs SDK/registry/fix-flow manager, limited HTTP/WebSocket adapters, post-commit config lifecycle hooks, and actual-process persistence/event/confirmation/restart evidence now exist. Session issues restore as inactive identity shells with is_fixable null. The manager is weakly owned; source-style minimal updates use the ordinary public event bus and appear in native event history. Parent/child cleanup precedes issue removal/update announcements, disable visibility refresh follows committed entry changes, and terminal Repairs results leave linked next flows independent. This remains partial: cross-document config/registry issue writes are not atomic; post-commit cleanup errors are explicit but have no durable registry replay journal; fine-grained POLICY_EDIT is unavailable; exhaustive pinned storage/lifecycle/API/error/auth acceptance, frontend/translations, Python loader, real provider activity, and complete parity remain open. Repairs has no Python bridge or LLM behavior.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "15_cloud_http_auth_webhook",
       "protocol_families": [
         "cloud_http_auth_webhook"
@@ -155080,7 +155118,11 @@
         "crates/hass-api/src/websocket.rs",
         "crates/hass-api/src/login.rs",
         "crates/hass-api/src/tags.rs",
-        "crates/hass-api/tests/tags_protocol.rs"
+        "crates/hass-api/tests/tags_protocol.rs",
+        "crates/hass-api/src/config_subentries.rs",
+        "crates/hass-api/tests/config_subentries_protocol.rs",
+        "crates/hass-api/tests/repairs_protocol.rs",
+        "crates/hass/tests/end_to_end.rs"
       ],
       "manifest": {
         "codeowners": [
@@ -155097,7 +155139,7 @@
       },
       "manifest_blob_oid": "315411ea4cf88f1fddfc571ccbe3742826cbc63c",
       "manifest_path": "homeassistant/components/websocket_api/manifest.json",
-      "outstanding_acceptance": "Tag list/create/update/delete and its private subscription feed now have actual-transport evidence for scalar parsing, role boundaries, strict fields, and private events. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, and feature event payloads remain open.",
+      "outstanding_acceptance": "Repairs list/get-data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce their typed fields, privacy and role boundaries; focused actual-transport fixtures for both subsets pass. The Tag private subscription feed also has actual-transport evidence. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -167794,9 +167836,32 @@
               "shutdown_signal_closes_idle_websocket",
               "shutdown_signal_closes_socket_waiting_for_auth"
             ]
+          },
+          {
+            "path": "crates/hass-api/src/config_subentries.rs",
+            "public_functions": []
+          },
+          {
+            "path": "crates/hass-api/src/repairs.rs"
+          },
+          {
+            "path": "crates/hass-api/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/config_subentries_protocol.rs",
+            "test_functions_present": [
+              "config_subentry_http_and_websocket_protocol_uses_native_flows_and_persisted_children"
+            ]
+          },
+          {
+            "path": "crates/hass-api/tests/repairs_protocol.rs",
+            "test_functions_present": [
+              "repairs_websocket_commands_are_authenticated_and_events_are_minimal",
+              "repairs_http_flow_routes_enforce_policy_and_return_terminal_next_flow_metadata"
+            ]
           }
         ],
-        "remaining": "Only the implemented REST/WebSocket subset is covered; API endpoint, error, auth, subscription, and history semantics still require complete pinned-source acceptance.",
+        "remaining": "Native HTTP/WebSocket fixtures now cover config-subentry flows and list/update/delete plus Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The config-subentry protocol fixture passes with graceful teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, and history semantics require complete acceptance.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
@@ -167934,9 +167999,37 @@
               "shutdown_signal_closes_idle_websocket",
               "shutdown_signal_closes_socket_waiting_for_auth"
             ]
+          },
+          {
+            "path": "crates/hass-config/src/lib.rs",
+            "test_functions_present": [
+              "subentry_crud_preserves_identity_uniqueness_and_secret_redaction",
+              "registered_native_subentry_flow_creates_reconfigures_and_rejects_duplicates",
+              "parent_create_callback_can_launch_a_registered_subentry_flow",
+              "lifecycle_observers_receive_committed_events_outside_manager_locks",
+              "failed_persistence_never_notifies_lifecycle_observers",
+              "old_config_store_migrates_absent_and_legacy_empty_subentry_fields",
+              "subentries_survive_sqlite_runtime_restart_with_stable_private_data"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/config_subentries.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/config_subentries_protocol.rs",
+            "test_functions_present": [
+              "config_subentry_http_and_websocket_protocol_uses_native_flows_and_persisted_children"
+            ]
+          },
+          {
+            "path": "crates/hass/src/repairs.rs",
+            "test_functions_present": [
+              "committed_entry_and_subentry_changes_update_actual_issue_visibility_and_cleanup",
+              "dropping_host_unregisters_its_observer_before_same_manager_restart"
+            ]
           }
         ],
-        "remaining": "Registry storage and command handling cover part of config APIs; config-entry CRUD/flow/migration and full registry event/command parity remain open.",
+        "remaining": "Native typed config-subentry records, stable IDs and parent-scoped unique IDs, migration and Runtime persistence, callback flows, private-data redaction, post-commit lifecycle observation, and a focused HTTP/WebSocket subset now have evidence. The subentry protocol fixture passes with graceful teardown. Full config-entry setup/unload/retry/discovery, complete CRUD/options/data-flow behavior, registry event/command coverage, and exhaustive pinned API/error/role acceptance remain open.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
@@ -168449,6 +168542,106 @@
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
       {
+        "domain": "repairs",
+        "local_evidence": [
+          {
+            "path": "crates/hass-repairs/src/lib.rs",
+            "public_functions": [
+              "start",
+              "start_with_resolvers",
+              "manager"
+            ]
+          },
+          {
+            "path": "crates/hass-repairs/src/registry.rs",
+            "public_functions": [
+              "create_issue",
+              "get_issue",
+              "get_issue_data",
+              "list_issues",
+              "ignore_issue",
+              "delete_issue",
+              "keep_issue",
+              "refresh_issues",
+              "clear_config_entry",
+              "clear_config_subentry",
+              "config_entry_disabled_by_changed",
+              "register_platform",
+              "unregister_platform"
+            ],
+            "test_functions_present": [
+              "migrations_canonicalize_session_shells_and_unknown_fields",
+              "every_supported_minor_version_migrates_and_duplicate_keys_keep_order",
+              "missing_minor_version_defaults_to_one_and_startup_saves_migration",
+              "persistence_preserves_order_and_scope_identity",
+              "public_create_validates_nonempty_calver_without_revalidating_stored_rows",
+              "session_issue_restarts_inactive_and_recreation_keeps_identity_and_dismissal",
+              "persistence_failure_does_not_publish_or_notify",
+              "no_op_ignore_and_recreation_do_not_emit_and_changed_update_preserves_created",
+              "refresh_selection_overlap_cancel_and_deferred_delete",
+              "refresh_keep_respects_its_scope_and_generation",
+              "deferred_delete_is_owned_by_the_latest_untouched_refresh",
+              "builtin_start_uses_actual_config_subentries_for_validation_and_pruning",
+              "disabled_linked_issue_is_hidden_and_missing_parent_is_rejected",
+              "list_dto_hides_data_and_config_ids_and_invalid_data_is_rejected"
+            ]
+          },
+          {
+            "path": "crates/hass-repairs/src/flows.rs",
+            "public_functions": [
+              "start_fix_flow",
+              "init_fix_flow",
+              "flow_result",
+              "submit_step",
+              "abort_flow"
+            ],
+            "test_functions_present": [
+              "registered_fix_flow_receives_issue_data_and_success_removes_issue",
+              "terminal_create_links_real_options_flow_and_keeps_child_independent",
+              "default_confirmation_completes_on_any_submission_and_preserves_placeholders",
+              "immediate_terminal_flows_are_returned_but_not_retained",
+              "terminal_create_with_config_flow_uses_context_entry_and_null_for_new_entry",
+              "terminal_abort_keeps_real_subentry_flow_independent_and_links_parent_entry",
+              "mismatched_manager_is_unknown_and_outer_abort_does_not_abort_child",
+              "processing_guard_serializes_callbacks_and_owner_drop_closes_after_inflight_work",
+              "owner_drop_closes_manager_and_platform_unregister_is_scoped"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/repairs.rs"
+          },
+          {
+            "path": "crates/hass-api/src/websocket.rs"
+          },
+          {
+            "path": "crates/hass-api/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/repairs_protocol.rs",
+            "test_functions_present": [
+              "repairs_websocket_commands_are_authenticated_and_events_are_minimal",
+              "repairs_http_flow_routes_enforce_policy_and_return_terminal_next_flow_metadata"
+            ]
+          },
+          {
+            "path": "crates/hass/src/repairs.rs",
+            "test_functions_present": [
+              "committed_entry_and_subentry_changes_update_actual_issue_visibility_and_cleanup",
+              "dropping_host_unregisters_its_observer_before_same_manager_restart"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_repairs_sdk_storage_events_confirm_and_restart"
+            ]
+          }
+        ],
+        "remaining": "A native Repairs SDK/registry, scoped refresh lifecycle, typed fix-flow manager, HTTP/WebSocket subset, post-commit config lifecycle hooks, and actual-process persistence/event/confirmation/restart evidence now exist. Session issues restore as inactive identity shells with is_fixable null. The manager is weakly owned; source-style minimal updates use the ordinary public event bus and appear in native event history. Parent/child cleanup precedes issue removal/update announcements, disable visibility refresh follows committed entry changes, and terminal Repairs results leave linked next flows independent. This remains partial: cross-document config/registry issue writes are not atomic; post-commit cleanup errors are explicit but have no durable registry replay journal; fine-grained POLICY_EDIT is unavailable; exhaustive pinned storage/lifecycle/API/error/auth acceptance, frontend/translations, Python loader, real provider activity, and complete parity remain open. Repairs has no Python bridge or LLM behavior.",
+        "status": "partial",
+        "verification": "Root reports the frozen 28-crate gate passed formatting, strict locked all-target Clippy, 617 tests across 75 targets, release build, and optimized CLI validation. Focused Repairs and actual-process receipts are included in that gate. This inventory writer did not run tests; complete pinned Repairs parity remains open."
+      },
+      {
         "domain": "rest",
         "local_evidence": [
           {
@@ -168903,9 +169096,31 @@
             "test_functions_present": [
               "tag_list_and_subscribe_are_readable_but_crud_is_admin_only"
             ]
+          },
+          {
+            "path": "crates/hass-api/src/config_subentries.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/config_subentries_protocol.rs",
+            "test_functions_present": [
+              "config_subentry_http_and_websocket_protocol_uses_native_flows_and_persisted_children"
+            ]
+          },
+          {
+            "path": "crates/hass-api/tests/repairs_protocol.rs",
+            "test_functions_present": [
+              "repairs_websocket_commands_are_authenticated_and_events_are_minimal",
+              "repairs_http_flow_routes_enforce_policy_and_return_terminal_next_flow_metadata"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_repairs_sdk_storage_events_confirm_and_restart"
+            ]
           }
         ],
-        "remaining": "Tag list/create/update/delete and its private subscription feed have actual-transport evidence for scalar parsing, role boundaries, strict fields, and private events. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, and feature event payloads remain open.",
+        "remaining": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused transport fixtures cover both subsets. The config-subentry fixture now passes with graceful teardown. The Tag private subscription feed also has actual-transport evidence. Only supported command/channel subsets are implemented; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
         "status": "partial",
         "verification": "source_inspected; this inventory writer did not run tests; primary acceptance is tracked separately"
       },
@@ -168936,10 +169151,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 36,
+    "partial": 37,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1529
+    "unported": 1528
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

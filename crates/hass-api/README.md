@@ -200,3 +200,49 @@ records do not echo into the raw stream. Command handling stays outside that
 span, preserving real DEBUG records emitted by **system_log.write**. The
 protocol fixture exercises this with logger level **NOTSET**, a WebSocket
 DEBUG write, and a 1.2-second quiet-stream window.
+
+## Repairs
+
+When `ApiFeatures.repairs` is provided, the authenticated WebSocket API exposes
+`repairs/list_issues`, `repairs/get_issue_data`, and `repairs/ignore_issue`.
+These commands follow the pinned authenticated-WebSocket boundary without an
+extra admin requirement. List items omit issue data and config-entry IDs;
+issue data returned by `get_issue_data` is producer-supplied user-visible data.
+
+Fix flows use `POST /api/repairs/issues/fix` to start and
+`/api/repairs/issues/fix/{flow_id}` with GET, POST, or DELETE to read progress,
+submit a step, or abort. The current auth model maps `POLICY_EDIT` to an
+administrator who is not read-only for flow creation and GET/POST. DELETE
+keeps the inherited authenticated-route behavior. Failed administrator checks
+return source HTTP 401; the generic read-only mutation gate defers to these
+flow handlers. Responses contain the typed
+flow progress DTO. A completed create or abort may include terminal `next_flow`
+metadata; the child then continues through the existing config-entry routes,
+not through the Repairs flow ID. Linked config entries are serialized through
+their public fragment; private entry data and options are not returned. Repairs updates use
+the ordinary `repairs_issue_registry_updated` event with action, domain, and
+issue ID only; there is no Repairs-specific subscription command.
+
+`tests/repairs_protocol.rs` exercises ordinary and read-only WebSocket access,
+the minimal public update event, hidden linked issues, restart persistence,
+admin/edit flow checks, authenticated DELETE, terminal next-flow metadata,
+independent config-options continuation, and public-entry redaction. It also verifies that the no-platform confirmation form
+has an empty schema and completes with `{}`. The API stores only the manager's
+weak handle; requests fail after the owning Repairs integration is dropped.
+The native identity model has no separate `POLICY_EDIT` permission, so the
+administrator mapping is the closest available policy boundary.
+
+### Repairs API checkpoint (2026-11-06)
+
+The protocol adapter and fixture implement the Repairs contract pinned to
+`cbf2c02c9bff331537c19bff69da8dc11c3fbfbf`. The authenticated-only flow DELETE
+is permitted for read-only identities by a route-scoped exception in the
+authentication middleware; anonymous requests and other read-only writes
+retain the existing policy. API validation passed with:
+
+- `cargo fmt --check -p hass-api`
+- `cargo test -p hass-api --test repairs_protocol` (2 passed)
+- `cargo clippy -p hass-api --all-targets -- -D warnings`
+
+The workspace-wide 28-crate gate and compiled app-host persistence fixture are
+owned by the primary integration pass.

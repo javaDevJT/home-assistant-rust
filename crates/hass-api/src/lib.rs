@@ -9,6 +9,7 @@
 //! an idle client cannot hold that drain open indefinitely.
 
 mod config_entries;
+mod config_subentries;
 mod extensions;
 mod history;
 mod http;
@@ -17,6 +18,7 @@ mod logger;
 mod login;
 pub mod network;
 mod persons;
+mod repairs;
 mod subscriptions;
 mod tags;
 mod webhooks;
@@ -63,6 +65,7 @@ pub struct ApiFeatures {
     pub logger: Option<hass_logger::LoggerManager>,
     pub logger_catalog: Option<hass_logger::IntegrationCatalogProvider>,
     pub system_log: Option<hass_system_log::SystemLogManager>,
+    pub repairs: Option<hass_repairs::RepairsManager>,
 }
 
 #[derive(Clone)]
@@ -155,6 +158,16 @@ fn build_router(
             get(config_entries::flow_handlers),
         )
         .route(
+            "/api/config/config_entries/subentries/flow",
+            post(config_subentries::post_flow),
+        )
+        .route(
+            "/api/config/config_entries/subentries/flow/{flow_id}",
+            get(config_subentries::get_flow)
+                .post(config_subentries::submit_flow)
+                .delete(config_subentries::delete_flow),
+        )
+        .route(
             "/api/config/config_entries/options/flow",
             post(config_entries::init_options_flow),
         )
@@ -163,6 +176,13 @@ fn build_router(
             get(config_entries::get_flow)
                 .post(config_entries::submit_flow)
                 .delete(config_entries::abort_flow),
+        )
+        .route("/api/repairs/issues/fix", post(repairs::create_fix_flow))
+        .route(
+            "/api/repairs/issues/fix/{flow_id}",
+            get(repairs::get_fix_flow)
+                .post(repairs::submit_fix_flow)
+                .delete(repairs::abort_fix_flow),
         )
         .route("/api/", get(http::api_root))
         .route("/api/config", get(http::get_config))
