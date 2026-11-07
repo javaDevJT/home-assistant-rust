@@ -25,7 +25,13 @@ workspace all-target Clippy, formatting, optimized workspace build and CLI
 validation pass. The optimized macOS binary SHA-256 is
 `98e4f4a2e30ce750d6b5b83805c0649d399a5768afcbe84fb54e24abf55d7da3`.
 No live USB tree, physical serial port, IOKit inventory or device command was
-exercised. Source publication and exact-head Linux CI are the next checks.
+exercised. USB source `eb4f8da2e331ae6a83c036ef14eb514fd8eb3a39` is published;
+[exact Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42380709474)
+passes, including native temporary-tree inotify tests. Hardware work is not
+part of that immutable receipt. Root resolved all 554 partial-row evidence
+paths and 304 symbol references, confirmed only USB's three integration-row
+fields changed, and reconciled the stale policy summary to all 43 partial
+domains (1,522 unported; zero complete).
 
 Completed USB owners and reviewers are released. Hardware source/dependency
 audit owns only `docs/HARDWARE-PORT.md`; its separate SDK owner writes only

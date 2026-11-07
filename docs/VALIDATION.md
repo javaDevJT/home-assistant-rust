@@ -27,7 +27,11 @@ device command was exercised. Linux-only watcher code and fixtures pass a
 conditional cross-target Clippy check with the installed Rustup 1.92 compiler
 and manifest MSRV override; this is supplementary compile evidence, separate
 from the workspace's Rust 1.99 checks and pending native Linux CI execution.
-The new source is awaiting publication and exact-head CI.
+USB source `eb4f8da2e331ae6a83c036ef14eb514fd8eb3a39` is published on the fork.
+[Exact-head Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42380709474)
+passes formatting, strict all-target workspace Clippy, all tests including the
+native temporary-tree inotify cases, and CLI validation. This receipt excludes
+the subsequent Hardware work.
 
 ## Accepted local DHCP source (35 crates)
 
