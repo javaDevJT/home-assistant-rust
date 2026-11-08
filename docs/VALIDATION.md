@@ -1,6 +1,36 @@
 # Validation evidence
 
-## Native media and service candidate (44 crates)
+## Native sensor platform candidate (46 crates)
+
+The current workspace passes **1,186 tests across 134 targets**, zero failures
+or ignored tests, formatting and strict locked offline all-target Clippy. The
+optimized workspace build and ten isolated CLI cases pass. The CLI accepts a
+device trigger with mapping duration and rejects an unknown device type and
+string duration, as required by the pinned device schema; the seven prior
+general/credentials cases still pass without extra files, databases or secret
+echoes. Optimized macOS binary SHA-256:
+`9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e`.
+
+The new SDKs publish actual Sun, time/date and uptime entities through the shared
+lifecycle. Focused evidence includes four binary SDK cases, two sensor table
+plus 11 projection cases, 26 Sun cases, 15 system-sensor cases and 47 automation
+cases. The reduced-feature system-sensor build passes another 11 cases.
+Compiled-process coverage now includes 21 end-to-end cases, including device
+YAML trigger/condition/template action and second-precision clock restoration;
+the in-place WebSocket/HTTP restart case remains green. Device fixtures are
+synthetic; no real sensor/device/account traffic was generated.
+
+Source comparison corrected an erroneous contract assertion that enum options
+were mandatory. Regressions preserve the actual early return for missing values,
+integer/boolean state strings, 16 independent built-in float-format vectors,
+all 57 native-unit rules and 13 native-unit spelling aliases. Raw provider units
+remain available independently of the compatible display spelling.
+
+Publication and exact-source Linux CI remain pending. Isolated switch SDK work
+is outside this 46-crate receipt. The following receipt remains the last
+published and Linux-accepted implementation.
+
+## Accepted native media and services (44 crates)
 
 The current candidate passes **1,158 tests across 129 targets**, with zero
 failures or ignored tests, workspace formatting and strict locked offline

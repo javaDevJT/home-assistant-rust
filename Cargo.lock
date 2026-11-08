@@ -1004,6 +1004,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-binary-sensor"
+version = "0.1.0"
+dependencies = [
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hass-config"
 version = "0.1.0"
 dependencies = [
@@ -1364,6 +1375,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-sensor"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hass-spotify"
 version = "0.1.0"
 dependencies = [
@@ -1416,12 +1439,15 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "futures-util",
+ "hass-binary-sensor",
  "hass-config",
  "hass-core",
  "hass-entity",
  "hass-registry",
+ "hass-sensor",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1461,11 +1487,13 @@ dependencies = [
  "hass-core",
  "hass-entity",
  "hass-registry",
+ "hass-sensor",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

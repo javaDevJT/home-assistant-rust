@@ -1928,7 +1928,9 @@ sensor:
         .unwrap();
     let setup_time =
         chrono::DateTime::parse_from_rfc3339(uptime["state"].as_str().unwrap()).unwrap();
-    assert!(setup_time >= before_setup && setup_time <= chrono::Utc::now());
+    assert!(setup_time.timestamp() >= before_setup.timestamp() && setup_time <= chrono::Utc::now());
+    assert_eq!(setup_time.timestamp_subsec_nanos(), 0);
+    assert!(uptime["state"].as_str().unwrap().ends_with("+00:00"));
     assert_eq!(uptime["attributes"]["device_class"], "uptime");
     let entry_sensor: Value = server
         .get("/api/states/sensor.date_time_utc")
@@ -1964,6 +1966,15 @@ sensor:
     std::fs::write(&config, yaml.replace(
         "  - platform: time_date\n    entity_namespace: office\n    display_options: [time]\n    scan_interval: \"00:02:00\"\n", "",
     )).unwrap();
+    // Source uptime states have whole-second precision. Cross an observed
+    // second boundary so a fresh setup can be distinguished from stale data.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while chrono::Utc::now().timestamp() <= setup_time.timestamp() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("clock did not advance beyond the first setup second");
     let mut restarted = Server::start(&config).await;
     assert_eq!(
         restarted
@@ -2106,4 +2117,71 @@ async fn sigterm_exits_with_an_authenticated_websocket_open() {
         .expect("SIGTERM must exit even with an upgraded socket open")
         .unwrap();
     assert!(status.success());
+}
+
+#[tokio::test]
+async fn real_process_binary_device_yaml_automation_executes_condition_and_action() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = directory.path().join("configuration.yaml");
+    std::fs::write(
+        &config,
+        r#"
+homeassistant:
+  time_zone: UTC
+input_text:
+  device_result:
+    initial: waiting
+automation:
+  - id: synthetic_binary_device
+    triggers:
+      - platform: device
+        domain: binary_sensor
+        device_id: synthetic-device-metadata
+        entity_id: binary_sensor.synthetic_fixture
+        type: turned_on
+    conditions:
+      - condition: device
+        domain: binary_sensor
+        device_id: unrelated-source-metadata
+        entity_id: binary_sensor.synthetic_fixture
+        type: is_on
+    actions:
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.device_result
+        data:
+          value: "{{ trigger.platform }}"
+"#,
+    )
+    .unwrap();
+    let mut server = Server::start(&config).await;
+    let public: Value = server.get("/api/config").await.json().await.unwrap();
+    for component in ["sensor", "binary_sensor"] {
+        assert!(
+            public["components"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(component))
+        );
+    }
+    server
+        .wait_state("input_text.device_result", "waiting")
+        .await;
+    for state in ["off", "on"] {
+        assert!(
+            server
+                .post(
+                    "/api/states/binary_sensor.synthetic_fixture",
+                    json!({"state":state,"attributes":{"fixture":"synthetic"}})
+                )
+                .await
+                .status()
+                .is_success()
+        );
+    }
+    server
+        .wait_state("input_text.device_result", "device")
+        .await;
+    server.child.kill().await.unwrap();
+    server.child.wait().await.unwrap();
 }

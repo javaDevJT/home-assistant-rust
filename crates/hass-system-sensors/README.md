@@ -38,7 +38,13 @@ current `Runtime::time_zone()` result. With the `runtime` feature,
 `TimeDateIntegration` registers descriptors through the lifecycle's
 provider-scoped batch API, publishes the initial state, schedules minute or
 local-midnight updates, and listens for `core_config_updated` to refresh
-immediately and recompute deadlines. YAML callers supply a stable provider ID;
+immediately and recompute deadlines. Time/date and uptime integrations keep
+their native sensor SDK descriptors beside their lifecycle handles; descriptor
+projection supplies each published snapshot while the lifecycle continues to
+own entity IDs, registry overrides, disabled entities, and state persistence.
+Projection failures use the provider error path, and SDK metadata warnings go
+to the provider's `hass_system_sensors` tracing target. YAML callers supply a
+stable provider ID;
 config-entry providers are scoped automatically as `time_date:<entry_id>`. An
 empty config reconciles that provider's stale entities, and shutdown/drop
 release only its namespace. Entity registry IDs are assigned by the shared
@@ -63,7 +69,9 @@ setup, following `homeassistant/components/uptime/sensor.py:32`; `at` accepts an
 explicit timestamp for deterministic tests and host setup coordination. The
 state remains that setup-time UTC timestamp and never advances. It represents
 the Home Assistant provider setup time, not operating-system boot time or an
-elapsed duration.
+elapsed duration. The provider passes the aware UTC instant through the native
+sensor SDK's `uptime` device-class projection, which publishes ISO seconds with
+the `+00:00` offset.
 
 The sensor uses device class `uptime`, is non-polling, has no unit, uses the
 config entry ID as its unique ID, and identifies a service device by
@@ -82,6 +90,8 @@ time, flow defaults, state format, entity identity, and
 device metadata follow `tests/components/uptime/test_sensor.py`,
 `tests/components/uptime/test_config_flow.py`, and the pinned
 `tests/components/uptime/snapshots/test_sensor.ambr`.
+Runtime fixtures also verify SDK projection, provider identity, and the
+UTC-second uptime state using fixed timestamps; they do not read host telemetry.
 
 The crate inherits package metadata and dependencies from the root workspace.
 The app owns workspace membership and provider/config-flow wiring.

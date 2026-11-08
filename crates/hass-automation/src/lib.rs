@@ -1,9 +1,10 @@
 //! A strict, bounded native Home Assistant automation engine.
 //!
 //! YAML may be deserialized as `Vec<Automation>`, validated, and run against
-//! [`hass_core::Runtime`]. The engine supports state, numeric-state, template,
-//! time, time-pattern, lifecycle, event, and native MQTT signal triggers;
-//! state, numeric-state, template, and nested conditions; and action sequences
+//! [`hass_core::Runtime`]. The engine supports state, numeric-state,
+//! binary-sensor device, template, time, time-pattern, lifecycle, event, and
+//! native MQTT signal triggers; state, numeric-state, binary-sensor device,
+//! template, and nested conditions; and action sequences
 //! through the shared `hass-script` executor. Unknown or unsupported options
 //! are rejected. See the crate README for examples and limits.
 //!
@@ -63,6 +64,76 @@ const MAX_LINEAGE_ENTRIES: usize = 4096;
 const LINEAGE_TTL: Duration = Duration::from_secs(5 * 60);
 const AUTOMATION_ENABLED_PREFIX: &str = "automation.enabled.";
 const PERSISTENT_NOTIFICATION_SIGNAL: &str = "persistent_notifications_updated";
+
+// These pairs mirror the pinned binary_sensor device automation tables. The
+// runtime adapter intentionally accepts the union of each table, like Core's
+// schema, while the class column documents which options Core offers for each
+// binary-sensor class.
+const BINARY_SENSOR_CONDITION_TYPES: &[(&str, &str, &str)] = &[
+    ("battery", "is_bat_low", "is_not_bat_low"),
+    ("battery_charging", "is_charging", "is_not_charging"),
+    ("carbon_monoxide", "is_co", "is_no_co"),
+    ("cold", "is_cold", "is_not_cold"),
+    ("connectivity", "is_connected", "is_not_connected"),
+    ("door", "is_open", "is_not_open"),
+    ("garage_door", "is_open", "is_not_open"),
+    ("gas", "is_gas", "is_no_gas"),
+    ("glass_break", "is_glass_break", "is_no_glass_break"),
+    ("heat", "is_hot", "is_not_hot"),
+    ("light", "is_light", "is_no_light"),
+    ("lock", "is_not_locked", "is_locked"),
+    ("moisture", "is_moist", "is_not_moist"),
+    ("motion", "is_motion", "is_no_motion"),
+    ("moving", "is_moving", "is_not_moving"),
+    ("occupancy", "is_occupied", "is_not_occupied"),
+    ("opening", "is_open", "is_not_open"),
+    ("plug", "is_plugged_in", "is_not_plugged_in"),
+    ("power", "is_powered", "is_not_powered"),
+    ("presence", "is_present", "is_not_present"),
+    ("problem", "is_problem", "is_no_problem"),
+    ("running", "is_running", "is_not_running"),
+    ("safety", "is_unsafe", "is_not_unsafe"),
+    ("smoke", "is_smoke", "is_no_smoke"),
+    ("sound", "is_sound", "is_no_sound"),
+    ("tamper", "is_tampered", "is_not_tampered"),
+    ("update", "is_update", "is_no_update"),
+    ("vibration", "is_vibration", "is_no_vibration"),
+    ("window", "is_open", "is_not_open"),
+    ("none", "is_on", "is_off"),
+];
+
+const BINARY_SENSOR_TRIGGER_TYPES: &[(&str, &str, &str)] = &[
+    ("battery", "bat_low", "not_bat_low"),
+    ("battery_charging", "charging", "not_charging"),
+    ("carbon_monoxide", "co", "no_co"),
+    ("cold", "cold", "not_cold"),
+    ("connectivity", "connected", "not_connected"),
+    ("door", "opened", "not_opened"),
+    ("garage_door", "opened", "not_opened"),
+    ("gas", "gas", "no_gas"),
+    ("glass_break", "glass_break", "no_glass_break"),
+    ("heat", "hot", "not_hot"),
+    ("light", "light", "no_light"),
+    ("lock", "not_locked", "locked"),
+    ("moisture", "moist", "not_moist"),
+    ("motion", "motion", "no_motion"),
+    ("moving", "moving", "not_moving"),
+    ("occupancy", "occupied", "not_occupied"),
+    ("opening", "opened", "not_opened"),
+    ("plug", "plugged_in", "not_plugged_in"),
+    ("power", "powered", "not_powered"),
+    ("presence", "present", "not_present"),
+    ("problem", "problem", "no_problem"),
+    ("running", "running", "not_running"),
+    ("safety", "unsafe", "not_unsafe"),
+    ("smoke", "smoke", "no_smoke"),
+    ("sound", "sound", "no_sound"),
+    ("tamper", "tampered", "not_tampered"),
+    ("update", "update", "no_update"),
+    ("vibration", "vibration", "no_vibration"),
+    ("window", "opened", "not_opened"),
+    ("none", "turned_on", "turned_off"),
+];
 
 /// A configured automation. All fields are strict: unrecognized YAML keys
 /// produce a deserialization error instead of being ignored.
@@ -136,6 +207,17 @@ pub enum Trigger {
         not_to: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attribute: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        r#for: Option<DelayValue>,
+    },
+    /// Match a binary-sensor device trigger by its configured state semantic.
+    /// The entity registry resolves UUID references once when the engine starts.
+    Device {
+        domain: String,
+        device_id: String,
+        entity_id: String,
+        #[serde(rename = "type")]
+        device_type: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         r#for: Option<DelayValue>,
     },
@@ -399,6 +481,15 @@ enum TriggerRepr {
         #[serde(default)]
         r#for: Option<DelayValue>,
     },
+    Device {
+        domain: String,
+        device_id: String,
+        entity_id: String,
+        #[serde(rename = "type")]
+        device_type: String,
+        #[serde(default)]
+        r#for: Option<DelayValue>,
+    },
     NumericState {
         entity_id: EntityIds,
         #[serde(default)]
@@ -517,6 +608,19 @@ impl From<TriggerRepr> for Trigger {
                 not_from,
                 not_to,
                 attribute,
+                r#for,
+            },
+            TriggerRepr::Device {
+                domain,
+                device_id,
+                entity_id,
+                device_type,
+                r#for,
+            } => Self::Device {
+                domain,
+                device_id,
+                entity_id,
+                device_type,
                 r#for,
             },
             TriggerRepr::NumericState {
@@ -826,6 +930,17 @@ pub enum Condition {
         state: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         attribute: Option<String>,
+    },
+    /// Evaluate a Home Assistant binary_sensor device condition through its
+    /// native state condition semantics.
+    Device {
+        domain: String,
+        device_id: String,
+        entity_id: String,
+        #[serde(rename = "type")]
+        device_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        r#for: Option<DelayValue>,
     },
     /// Require a numeric state to be strictly above and/or below its bounds.
     NumericState {
@@ -1142,6 +1257,30 @@ pub fn validate(automations: &[Automation]) -> Result<()> {
                             .map_err(Error::InvalidInput)?;
                     }
                 }
+                Trigger::Device {
+                    domain,
+                    device_id,
+                    entity_id,
+                    device_type,
+                    r#for,
+                } => {
+                    if domain != "binary_sensor"
+                        || device_id.trim().is_empty()
+                        || !valid_device_entity_reference(entity_id)
+                        || binary_sensor_trigger_state(device_type).is_none()
+                    {
+                        return Err(Error::InvalidInput(format!(
+                            "automation `{}` has an invalid binary_sensor device trigger",
+                            automation.id
+                        )));
+                    }
+                    validate_binary_sensor_for(r#for.as_ref(), MAX_TRIGGER_FOR).map_err(|error| {
+                        Error::InvalidInput(format!(
+                            "automation `{}` has an invalid binary_sensor device trigger: {error}",
+                            automation.id
+                        ))
+                    })?;
+                }
                 Trigger::NumericState {
                     entity_id,
                     above,
@@ -1323,6 +1462,28 @@ fn validate_condition(automation_id: &str, condition: &Condition) -> Result<()> 
                 "automation `{automation_id}` has an invalid state condition entity_id"
             )))
         }
+        Condition::Device {
+            domain,
+            device_id,
+            entity_id,
+            device_type,
+            r#for,
+        } => {
+            if domain != "binary_sensor"
+                || device_id.trim().is_empty()
+                || !valid_device_entity_reference(entity_id)
+                || binary_sensor_condition_state(device_type).is_none()
+            {
+                return Err(Error::InvalidInput(format!(
+                    "automation `{automation_id}` has an invalid binary_sensor device condition"
+                )));
+            }
+            validate_binary_sensor_for(r#for.as_ref(), Duration::MAX).map_err(|error| {
+                Error::InvalidInput(format!(
+                    "automation `{automation_id}` has an invalid binary_sensor device condition: {error}"
+                ))
+            })
+        }
         Condition::NumericState {
             entity_id,
             above,
@@ -1404,6 +1565,115 @@ fn valid_entity_id(value: &str) -> bool {
             part.bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         })
+}
+
+fn valid_device_entity_reference(value: &str) -> bool {
+    valid_entity_id(value) || Uuid::parse_str(value).is_ok()
+}
+
+fn device_type_state(types: &[(&str, &str, &str)], device_type: &str) -> Option<&'static str> {
+    types.iter().find_map(|(_, on, off)| {
+        if *on == device_type {
+            Some("on")
+        } else if *off == device_type {
+            Some("off")
+        } else {
+            None
+        }
+    })
+}
+
+fn binary_sensor_condition_state(device_type: &str) -> Option<&'static str> {
+    device_type_state(BINARY_SENSOR_CONDITION_TYPES, device_type)
+}
+
+fn binary_sensor_trigger_state(device_type: &str) -> Option<&'static str> {
+    device_type_state(BINARY_SENSOR_TRIGGER_TYPES, device_type)
+}
+
+fn validate_binary_sensor_for(duration: Option<&DelayValue>, limit: Duration) -> Result<()> {
+    if let Some(duration) = duration {
+        if !matches!(duration, DelayValue::Parts(_)) {
+            return Err(Error::InvalidInput(
+                "binary_sensor device `for` must be a positive time-period mapping".into(),
+            ));
+        }
+        duration
+            .duration_with_limit(limit)
+            .map_err(Error::InvalidInput)?;
+    }
+    Ok(())
+}
+
+fn resolve_device_entity_reference(
+    entity_reference: &str,
+    registries: Option<&Registries>,
+) -> Result<String> {
+    // Core leaves entity IDs as-is and resolves only UUID references. Match
+    // that order, including for strings that happen to look UUID-like.
+    if valid_entity_id(entity_reference) {
+        return Ok(entity_reference.to_owned());
+    }
+    let registry_id = Uuid::parse_str(entity_reference)
+        .map(|id| id.simple().to_string())
+        .map_err(|_| {
+            Error::InvalidInput(format!(
+                "invalid binary_sensor device entity reference `{entity_reference}`"
+            ))
+        })?;
+    registries
+        .and_then(|registries| {
+            registries
+                .entities()
+                .into_iter()
+                .find(|entry| entry.id == registry_id)
+        })
+        .map(|entry| entry.entity_id)
+        .ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "unknown entity registry entry `{entity_reference}` in binary_sensor device automation"
+            ))
+        })
+}
+
+fn normalize_device_condition_entity_references(
+    condition: &mut Condition,
+    registries: Option<&Registries>,
+) -> Result<()> {
+    match condition {
+        Condition::Device { entity_id, .. } => {
+            *entity_id = resolve_device_entity_reference(entity_id, registries)?;
+        }
+        Condition::And { conditions } | Condition::Or { conditions } => {
+            for child in conditions {
+                normalize_device_condition_entity_references(child, registries)?;
+            }
+        }
+        Condition::Not { conditions } => {
+            if let Some(child) = conditions.first_mut() {
+                normalize_device_condition_entity_references(child, registries)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn normalize_device_entity_references(
+    automations: &mut [Automation],
+    registries: Option<&Registries>,
+) -> Result<()> {
+    for automation in automations {
+        for trigger in &mut automation.triggers {
+            if let Trigger::Device { entity_id, .. } = trigger {
+                *entity_id = resolve_device_entity_reference(entity_id, registries)?;
+            }
+        }
+        for condition in &mut automation.conditions {
+            normalize_device_condition_entity_references(condition, registries)?;
+        }
+    }
+    Ok(())
 }
 
 fn valid_event_type(value: &str) -> bool {
@@ -2096,6 +2366,8 @@ fn start_with_timezone_and_manager_and_registries(
     registries: Option<Registries>,
 ) -> Result<AutomationEngine> {
     validate(&automations)?;
+    let mut automations = automations;
+    normalize_device_entity_references(&mut automations, registries.as_ref())?;
     let timezone = timezone
         .as_ref()
         .parse::<Tz>()
@@ -3325,7 +3597,10 @@ async fn wait_for_trigger_for(
                 if changed.is_err() || *cancel_rx.borrow() { return Ok(false); }
             }
             event = events.recv() => match event {
-                Ok(_) => {
+                Ok(event) => {
+                    if device_trigger_event_invalidates_for(trigger, &event)? {
+                        return Ok(false);
+                    }
                     let active = trigger_for_still_matches(&runtime, trigger, variables)?;
                     if !active {
                         return Ok(false);
@@ -3342,6 +3617,29 @@ async fn wait_for_trigger_for(
             }
         }
     }
+}
+
+fn device_trigger_event_invalidates_for(trigger: &Trigger, event: &Event) -> Result<bool> {
+    let Trigger::Device {
+        entity_id,
+        device_type,
+        ..
+    } = trigger
+    else {
+        return Ok(false);
+    };
+    let Some(expected_state) = binary_sensor_trigger_state(device_type) else {
+        return Ok(true);
+    };
+    let (_old_state, new_state, changed_entity) = trigger_state_values(event)?;
+    if changed_entity.as_deref() != Some(entity_id.as_str()) {
+        return Ok(false);
+    }
+    Ok(new_state
+        .as_ref()
+        .and_then(|state| state_value(state, None))
+        .as_deref()
+        != Some(expected_state))
 }
 
 fn match_event_trigger(
@@ -3380,6 +3678,16 @@ fn match_event_trigger(
     let (matches, duration, entity_id) = match trigger {
         Trigger::State { r#for, .. } => {
             let entity = state_trigger_matches(trigger, event)?;
+            (entity.is_some(), r#for, entity)
+        }
+        Trigger::Device {
+            device_type, r#for, ..
+        } => {
+            let entity = if native_signal {
+                None
+            } else {
+                binary_sensor_device_trigger_matches(trigger, device_type, event)?
+            };
             (entity.is_some(), r#for, entity)
         }
         Trigger::NumericState { r#for, .. } => {
@@ -3561,6 +3869,7 @@ fn sun_elevation_trigger_match(
 fn trigger_platform_name(trigger: &Trigger) -> String {
     match trigger {
         Trigger::State { .. } => "state".into(),
+        Trigger::Device { .. } => "device".into(),
         Trigger::NumericState { .. } => "numeric_state".into(),
         Trigger::Template { .. } => "template".into(),
         Trigger::Time { .. } => "time".into(),
@@ -4565,6 +4874,29 @@ fn state_value(state: &State, attribute: Option<&str>) -> Option<String> {
     }
 }
 
+fn binary_sensor_device_trigger_matches(
+    trigger: &Trigger,
+    device_type: &str,
+    event: &Event,
+) -> Result<Option<String>> {
+    let Trigger::Device { entity_id, .. } = trigger else {
+        return Ok(None);
+    };
+    let Some(to_state) = binary_sensor_trigger_state(device_type) else {
+        return Ok(None);
+    };
+    let state_trigger = Trigger::State {
+        entity_id: EntityIds::One(entity_id.clone()),
+        from: None,
+        to: Some(to_state.to_owned()),
+        not_from: None,
+        not_to: None,
+        attribute: None,
+        r#for: None,
+    };
+    state_trigger_matches(&state_trigger, event)
+}
+
 fn state_trigger_matches(trigger: &Trigger, event: &Event) -> Result<Option<String>> {
     let Trigger::State {
         entity_id,
@@ -4782,6 +5114,30 @@ fn trigger_for_still_matches(
                     .as_ref()
                     .is_none_or(|forbidden| current_value.as_ref() != Some(forbidden)))
         }
+        Trigger::Device {
+            entity_id,
+            device_type,
+            ..
+        } => {
+            let Some(expected_state) = binary_sensor_trigger_state(device_type) else {
+                return Ok(false);
+            };
+            let Some(Value::Object(trigger_vars)) = variables.get("trigger") else {
+                return Ok(false);
+            };
+            if trigger_vars.get("entity_id").and_then(Value::as_str) != Some(entity_id.as_str()) {
+                return Ok(false);
+            }
+            let expected_event_state = trigger_vars
+                .get("to_state")
+                .and_then(|state| serde_json::from_value::<State>(state.clone()).ok())
+                .map(|state| state.state);
+            let Some(current) = runtime.get_state(entity_id) else {
+                return Ok(false);
+            };
+            Ok(expected_event_state.as_deref() == Some(expected_state)
+                && current.state == expected_state)
+        }
         Trigger::NumericState {
             above,
             below,
@@ -4878,6 +5234,32 @@ fn condition_matches_at(
                 current.state == *state
             }
         })),
+        Condition::Device {
+            entity_id,
+            device_type,
+            r#for,
+            ..
+        } => {
+            let Some(expected_state) = binary_sensor_condition_state(device_type) else {
+                return Ok(false);
+            };
+            let Some(current) = runtime.get_state(entity_id) else {
+                return Ok(false);
+            };
+            if current.state != expected_state {
+                return Ok(false);
+            }
+            let Some(duration) = r#for else {
+                return Ok(true);
+            };
+            let duration = duration
+                .duration_with_limit(Duration::MAX)
+                .map_err(Error::InvalidInput)?;
+            Ok(now
+                .signed_duration_since(current.last_changed)
+                .to_std()
+                .is_ok_and(|elapsed| elapsed > duration))
+        }
         Condition::NumericState {
             entity_id,
             above,
@@ -5236,7 +5618,7 @@ mod tests {
     use hass_core::{HomeContext, MemoryStore, ServiceResult};
     use hass_entity::EntityLifecycle;
     use hass_notifications::NotificationIntegration;
-    use hass_registry::Registries;
+    use hass_registry::{EntityRegistration, EntityUpdate, Registries};
     use hass_tag::TagIntegration;
     use hass_webhook::WebhookOrigin;
     use std::{
@@ -5303,6 +5685,513 @@ mod tests {
                 }),
             )
             .unwrap();
+    }
+
+    fn register_binary_sensor(
+        registries: &Registries,
+        object_id: &str,
+        device_class: &str,
+        disabled_by: Option<&str>,
+    ) -> hass_registry::EntityEntry {
+        let mut registration = EntityRegistration::new(
+            "binary_sensor",
+            "test",
+            format!("binary_sensor_{object_id}"),
+        );
+        registration.suggested_object_id = Some(object_id.to_owned());
+        registration.original_device_class = Some(device_class.to_owned());
+        registration.disabled_by = disabled_by.map(str::to_owned);
+        registries.get_or_create_entity(registration).unwrap()
+    }
+
+    #[test]
+    fn binary_sensor_device_types_match_pinned_class_semantics() {
+        for (_, on_type, off_type) in BINARY_SENSOR_CONDITION_TYPES {
+            assert_eq!(binary_sensor_condition_state(on_type), Some("on"));
+            assert_eq!(binary_sensor_condition_state(off_type), Some("off"));
+        }
+        for (_, on_type, off_type) in BINARY_SENSOR_TRIGGER_TYPES {
+            assert_eq!(binary_sensor_trigger_state(on_type), Some("on"));
+            assert_eq!(binary_sensor_trigger_state(off_type), Some("off"));
+        }
+        assert_eq!(binary_sensor_condition_state("is_not_locked"), Some("on"));
+        assert_eq!(binary_sensor_condition_state("is_locked"), Some("off"));
+        assert_eq!(binary_sensor_trigger_state("not_locked"), Some("on"));
+        assert_eq!(binary_sensor_trigger_state("locked"), Some("off"));
+        assert_eq!(binary_sensor_condition_state("unknown"), None);
+        assert_eq!(binary_sensor_trigger_state("unknown"), None);
+    }
+
+    #[test]
+    fn binary_sensor_device_condition_checks_state_and_strict_for_boundary() {
+        let runtime = runtime();
+        runtime
+            .set_state(
+                "binary_sensor.battery",
+                "on",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let condition: Condition = serde_yaml::from_str(
+            r#"
+condition: device
+domain: binary_sensor
+device_id: metadata-only
+entity_id: binary_sensor.battery
+type: is_bat_low
+for:
+  seconds: 5
+"#,
+        )
+        .unwrap();
+        validate_condition("battery_check", &condition).unwrap();
+        let current = runtime.get_state("binary_sensor.battery").unwrap();
+        let exact = current.last_changed + ChronoDuration::seconds(5);
+        assert!(!condition_matches_at(&runtime, &condition, &Map::new(), exact).unwrap());
+        assert!(
+            condition_matches_at(
+                &runtime,
+                &condition,
+                &Map::new(),
+                exact + ChronoDuration::nanoseconds(1),
+            )
+            .unwrap()
+        );
+
+        let wrong_semantic: Condition = serde_yaml::from_str(
+            r#"
+condition: device
+domain: binary_sensor
+device_id: metadata-only
+entity_id: binary_sensor.battery
+type: is_not_bat_low
+"#,
+        )
+        .unwrap();
+        assert!(
+            !condition_matches_at(&runtime, &wrong_semantic, &Map::new(), Utc::now(),).unwrap()
+        );
+        assert!(
+            !condition_matches_at(
+                &runtime,
+                &Condition::Device {
+                    domain: "binary_sensor".into(),
+                    device_id: "metadata-only".into(),
+                    entity_id: "binary_sensor.missing".into(),
+                    device_type: "is_on".into(),
+                    r#for: None,
+                },
+                &Map::new(),
+                Utc::now(),
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn binary_sensor_device_schema_rejects_unknown_types_and_non_mapping_for() {
+        let bad_type = config(
+            r#"
+- id: bad_device_type
+  triggers:
+    - platform: device
+      domain: binary_sensor
+      device_id: device-1
+      entity_id: binary_sensor.door
+      type: not_a_binary_sensor_trigger
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(validate(&bad_type).is_err());
+
+        let bad_for = config(
+            r#"
+- id: bad_device_for
+  triggers:
+    - platform: device
+      domain: binary_sensor
+      device_id: device-1
+      entity_id: binary_sensor.door
+      type: opened
+      for: "00:00:05"
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(validate(&bad_for).is_err());
+
+        let bad_condition = config(
+            r#"
+- id: bad_device_condition
+  triggers:
+    - trigger: event
+      event_type: check
+  conditions:
+    - condition: device
+      domain: binary_sensor
+      device_id: device-1
+      entity_id: binary_sensor.door
+      type: is_open
+      for: 5
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(validate(&bad_condition).is_err());
+
+        let unknown_field = serde_yaml::from_str::<Vec<Automation>>(
+            r#"
+- id: extra_device_field
+  triggers:
+    - platform: device
+      domain: binary_sensor
+      device_id: device-1
+      entity_id: binary_sensor.door
+      type: opened
+      invented: true
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(unknown_field.is_err());
+    }
+
+    #[tokio::test]
+    async fn binary_sensor_device_trigger_resolves_renamed_uuid_and_preserves_context() {
+        let runtime = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let entry = register_binary_sensor(&registries, "front_door", "door", Some("user"));
+        registries
+            .update_entity(
+                &entry.entity_id,
+                EntityUpdate {
+                    new_entity_id: Some("binary_sensor.front_door_renamed".into()),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        runtime
+            .set_state(
+                "binary_sensor.front_door_renamed",
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let automations = config(&format!(
+            r#"
+- id: front_door_opened
+  triggers:
+    - platform: device
+      domain: binary_sensor
+      device_id: metadata-does-not-match-owner
+      entity_id: {}
+      type: opened
+  actions:
+    - action: test.notify
+      data:
+        platform: "{{{{ trigger.platform }}}}"
+        entity_id: "{{{{ trigger.entity_id }}}}"
+        from_state: "{{{{ trigger.from_state.state }}}}"
+        to_state: "{{{{ trigger.to_state.state }}}}"
+"#,
+            entry.id
+        ));
+        let engine = start_with_features(
+            runtime.clone(),
+            automations,
+            AutomationFeatures {
+                registries: Some(registries),
+                ..AutomationFeatures::default()
+            },
+        )
+        .unwrap();
+        let event_context = Context {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            user_id: Some("door-user".into()),
+        };
+        runtime
+            .set_state(
+                "binary_sensor.front_door_renamed",
+                "on",
+                Map::new(),
+                event_context.clone(),
+                false,
+            )
+            .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["platform"], "device");
+        assert_eq!(call.data["entity_id"], "binary_sensor.front_door_renamed");
+        assert_eq!(call.data["from_state"], "off");
+        assert_eq!(call.data["to_state"], "on");
+        assert_eq!(
+            call.context.parent_id.as_deref(),
+            Some(event_context.id.as_str())
+        );
+        assert_eq!(call.context.user_id.as_deref(), Some("door-user"));
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binary_sensor_device_condition_resolves_uuid_and_fails_closed_for_missing_state() {
+        let runtime = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let entry = register_binary_sensor(&registries, "battery_low", "battery", Some("user"));
+        runtime
+            .set_state(
+                &entry.entity_id,
+                "on",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let automations = config(&format!(
+            r#"
+- id: battery_device_condition
+  triggers:
+    - trigger: event
+      event_type: check_binary_sensor
+  conditions:
+    - condition: device
+      domain: binary_sensor
+      device_id: metadata-does-not-match-owner
+      entity_id: {}
+      type: is_bat_low
+  actions:
+    - action: test.notify
+      data:
+        result: battery
+- id: missing_binary_sensor_condition
+  triggers:
+    - trigger: event
+      event_type: check_binary_sensor
+  conditions:
+    - condition: device
+      domain: binary_sensor
+      device_id: missing-device
+      entity_id: binary_sensor.not_registered
+      type: is_on
+  actions:
+    - action: test.notify
+      data:
+        result: missing
+"#,
+            entry.id
+        ));
+        let engine = start_with_features(
+            runtime.clone(),
+            automations,
+            AutomationFeatures {
+                registries: Some(registries),
+                ..AutomationFeatures::default()
+            },
+        )
+        .unwrap();
+        let event_context = Context {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            user_id: Some("condition-user".into()),
+        };
+        runtime
+            .fire_event("check_binary_sensor", Map::new(), event_context.clone())
+            .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["result"], "battery");
+        assert_eq!(
+            call.context.parent_id.as_deref(),
+            Some(event_context.id.as_str())
+        );
+        assert_eq!(call.context.user_id.as_deref(), Some("condition-user"));
+
+        runtime
+            .set_state(
+                &entry.entity_id,
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        runtime
+            .fire_event("check_binary_sensor", Map::new(), Context::default())
+            .unwrap();
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(100), receiver.recv())
+                .await
+                .is_err()
+        );
+        engine.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn binary_sensor_device_trigger_requires_registered_uuid() {
+        let runtime = runtime();
+        let missing_uuid = Uuid::new_v4().simple().to_string();
+        let automations = config(&format!(
+            r#"
+- id: missing_device_entity
+  triggers:
+    - platform: device
+      domain: binary_sensor
+      device_id: device-1
+      entity_id: {missing_uuid}
+      type: turned_on
+  actions:
+    - action: test.notify
+"#
+        ));
+        assert!(start_with_features(runtime, automations, AutomationFeatures::default()).is_err());
+    }
+
+    #[tokio::test]
+    async fn binary_sensor_device_trigger_for_cancels_on_state_exit_and_keeps_event_context() {
+        let runtime = runtime();
+        runtime
+            .set_state(
+                "binary_sensor.motion",
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: motion_stays_on
+  triggers:
+    - platform: device
+      domain: binary_sensor
+      device_id: ignored-device-id
+      entity_id: binary_sensor.motion
+      type: motion
+      for:
+        seconds: 0.12
+  actions:
+    - action: test.notify
+      data:
+        platform: "{{ trigger.platform }}"
+        entity_id: "{{ trigger.entity_id }}"
+        from_state: "{{ trigger.from_state.state }}"
+        to_state: "{{ trigger.to_state.state }}"
+"#,
+            ),
+        )
+        .unwrap();
+        let first_context = Context {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            user_id: Some("canceled-event".into()),
+        };
+        runtime
+            .set_state(
+                "binary_sensor.motion",
+                "on",
+                Map::new(),
+                first_context,
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        runtime
+            .set_state(
+                "binary_sensor.motion",
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        let sustained_context = Context {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            user_id: Some("sustained-event".into()),
+        };
+        runtime
+            .set_state(
+                "binary_sensor.motion",
+                "on",
+                Map::new(),
+                sustained_context.clone(),
+                false,
+            )
+            .unwrap();
+
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["platform"], "device");
+        assert_eq!(call.data["entity_id"], "binary_sensor.motion");
+        assert_eq!(call.data["from_state"], "off");
+        assert_eq!(call.data["to_state"], "on");
+        assert_eq!(
+            call.context.parent_id.as_deref(),
+            Some(sustained_context.id.as_str())
+        );
+        assert_eq!(call.context.user_id.as_deref(), Some("sustained-event"));
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        assert!(receiver.try_recv().is_err());
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn binary_sensor_device_trigger_for_is_canceled_on_engine_shutdown() {
+        let runtime = runtime();
+        runtime
+            .set_state(
+                "binary_sensor.motion",
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: pending_motion
+  triggers:
+    - platform: device
+      domain: binary_sensor
+      device_id: device-1
+      entity_id: binary_sensor.motion
+      type: motion
+      for:
+        seconds: 0.15
+  actions:
+    - action: test.notify
+"#,
+            ),
+        )
+        .unwrap();
+        runtime
+            .set_state(
+                "binary_sensor.motion",
+                "on",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        engine.shutdown().await.unwrap();
+        tokio::time::sleep(StdDuration::from_millis(180)).await;
+        assert!(receiver.try_recv().is_err());
     }
 
     #[tokio::test]

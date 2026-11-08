@@ -507,6 +507,8 @@ impl Config {
             "repairs",
             "system_health",
             "sun",
+            "sensor",
+            "binary_sensor",
             "webhook",
             "time_date",
             "uptime",
@@ -531,9 +533,6 @@ impl Config {
         }
         if !self.script.is_empty() {
             components.push("script");
-        }
-        if !self.sensor.is_empty() {
-            components.push("sensor");
         }
         if !self.scene.is_empty() {
             components.push("scene");

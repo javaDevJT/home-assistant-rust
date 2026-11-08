@@ -13,6 +13,7 @@ pub fn catalog() -> IntegrationCatalog {
     const TARGETS: &[(&str, &[&str])] = &[
         ("api", &["hass_api"]),
         ("auth", &["hass_auth"]),
+        ("binary_sensor", &["hass_binary_sensor"]),
         ("automation", &["hass_automation"]),
         ("config", &["hass_config"]),
         ("counter", &["hass::helpers::counter"]),
@@ -43,6 +44,7 @@ pub fn catalog() -> IntegrationCatalog {
         ("scene", &["hass_script::scene"]),
         ("schedule", &["hass_native::schedule"]),
         ("script", &["hass_script"]),
+        ("sensor", &["hass_sensor"]),
         ("spotify", &["hass_spotify", "hass::spotify"]),
         ("tag", &["hass_tag"]),
         ("sun", &["hass_sun"]),

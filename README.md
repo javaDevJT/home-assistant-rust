@@ -102,6 +102,8 @@ cargo test --workspace --locked
 - [Native media-player SDK and asynchronous provider lifecycle](crates/hass-media-player/README.md)
 - [Native Spotify wire client and loopback protocol fixtures](crates/hass-spotify/README.md)
 - [Sensor and binary-sensor projection and lifecycle source contracts](docs/SENSOR-PORT.md)
+- [Native binary-sensor descriptors, values and lifecycle checks](crates/hass-binary-sensor/README.md)
+- [Native sensor descriptors, readings and unit validation](crates/hass-sensor/README.md)
 - [Native Application Credentials SDK and private collection lifecycle](crates/hass-application-credentials/README.md)
 - [Native USB SDK and synthetic lifecycle checks](crates/hass-usb/README.md)
 - [Native serial backend provenance](crates/hass-usb-backend/THIRD-PARTY-NOTICES.md)

@@ -15923,7 +15923,16 @@
       "local_evidence_paths": [
         "crates/hass-automation/src/lib.rs",
         "crates/hass-tag/src/lib.rs",
-        "crates/hass/tests/end_to_end.rs"
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass-automation/src/lib.rs#binary_sensor_device_types_match_pinned_class_semantics",
+        "crates/hass-automation/src/lib.rs#binary_sensor_device_condition_checks_state_and_strict_for_boundary",
+        "crates/hass-automation/src/lib.rs#binary_sensor_device_schema_rejects_unknown_types_and_non_mapping_for",
+        "crates/hass-automation/src/lib.rs#binary_sensor_device_trigger_resolves_renamed_uuid_and_preserves_context",
+        "crates/hass-automation/src/lib.rs#binary_sensor_device_condition_resolves_uuid_and_fails_closed_for_missing_state",
+        "crates/hass-automation/src/lib.rs#binary_sensor_device_trigger_requires_registered_uuid",
+        "crates/hass-automation/src/lib.rs#binary_sensor_device_trigger_for_cancels_on_state_exit_and_keeps_event_context",
+        "crates/hass-automation/src/lib.rs#binary_sensor_device_trigger_for_is_canceled_on_engine_shutdown",
+        "crates/hass/tests/end_to_end.rs#real_process_binary_device_yaml_automation_executes_condition_and_action"
       ],
       "manifest": {
         "after_dependencies": [
@@ -15945,7 +15954,7 @@
       },
       "manifest_blob_oid": "a22abbee3b2f49d086c535bfb4144cd8106c9ced",
       "manifest_path": "homeassistant/components/automation/manifest.json",
-      "outstanding_acceptance": "Native tag_scanned triggers use the Tag callback with event context and metadata; a focused test covers legacy composite device-ID expansion. Remaining upstream trigger/condition/action constructs, modes, tracing, automation config lifecycle, and exhaustive acceptance remain open. The separate composite-builder review corrections are not accepted.",
+      "outstanding_acceptance": "Binary-sensor device conditions/triggers now require device_id as metadata, resolve a registered entity UUID to its current binary_sensor entity once, and follow the pinned behavior without ownership, device-class, or disabled-registry gates. Trigger for-durations preserve event context and cancel on state exit or engine shutdown. Device enumeration is not implemented. Other upstream conditions/triggers/actions, modes, tracing, automation config lifecycle, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -18493,7 +18502,16 @@
       "component_directory": "homeassistant/components/binary_sensor/",
       "config_flow_classes": [],
       "domain": "binary_sensor",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-binary-sensor/src/lib.rs",
+        "crates/hass-binary-sensor/src/lib.rs#device_classes_match_the_pinned_source_values_and_meanings",
+        "crates/hass-binary-sensor/src/lib.rs#lifecycle_publishes_binary_values_context_metadata_and_availability",
+        "crates/hass-binary-sensor/src/lib.rs#lifecycle_tracks_registry_rename_disable_and_release",
+        "crates/hass-binary-sensor/src/lib.rs#releasing_generated_binary_sensor_removes_its_provider_state",
+        "crates/hass-sun/src/integration.rs",
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass/tests/end_to_end.rs#real_process_binary_device_yaml_automation_executes_condition_and_action"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -18506,10 +18524,10 @@
       },
       "manifest_blob_oid": "48a7c337dc331a1a3f7886701f5f325dc6d10fb7",
       "manifest_path": "homeassistant/components/binary_sensor/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "The native binary-sensor SDK implements the pinned device-class meanings, state/availability projection, generated entity lifecycle, and cleanup subset; Sun and device automation consume it. Full upstream platform setup/storage, provider catalog, UI/WebSocket behavior, and device enumeration remain open. No physical sensors, host telemetry, or real account traffic have been tested.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -122416,7 +122434,28 @@
       "component_directory": "homeassistant/components/sensor/",
       "config_flow_classes": [],
       "domain": "sensor",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-sensor/src/lib.rs",
+        "crates/hass-sensor/src/unit_tables.rs",
+        "crates/hass-sensor/src/unit_tables.rs#covers_every_pinned_sensor_device_class_and_only_source_unruled_classes",
+        "crates/hass-sensor/src/unit_tables.rs#preserves_explicit_null_rules_and_native_units_distinct_from_converter_units",
+        "crates/hass-sensor/tests/projection.rs",
+        "crates/hass-sensor/tests/projection.rs#text_date_timestamp_unknown_and_unavailable_remain_distinct",
+        "crates/hass-sensor/tests/projection.rs#pinned_enum_optional_options_and_unknown_numeric_validation_order",
+        "crates/hass-sensor/tests/projection.rs#integer_counters_and_booleans_keep_source_native_state_strings",
+        "crates/hass-sensor/tests/projection.rs#float_state_format_matches_builtin_python_golden_values",
+        "crates/hass-sensor/tests/projection.rs#full_native_unit_rules_apply_to_projection_including_explicit_no_unit",
+        "crates/hass-sensor/tests/projection.rs#native_unit_aliases_keep_raw_metadata_and_publish_compatible_spelling",
+        "crates/hass-sensor/tests/projection.rs#unit_selection_obeys_priority_and_converts_only_matching_classes",
+        "crates/hass-sensor/tests/projection.rs#common_pressure_length_energy_and_power_conversions_are_class_gated",
+        "crates/hass-sensor/tests/projection.rs#warning_only_mismatches_and_value_errors_are_separate",
+        "crates/hass-sensor/tests/projection.rs#enum_options_are_validated_only_for_enum_class",
+        "crates/hass-sensor/tests/projection.rs#lifecycle_publishes_projected_values_across_rename_disable_and_unload",
+        "crates/hass-sensor/PROVENANCE/UNIT-TABLES.md",
+        "crates/hass-sun/src/integration.rs",
+        "crates/hass-system-sensors/src/lib.rs",
+        "crates/hass/src/system_sensors.rs"
+      ],
       "manifest": {
         "after_dependencies": [
           "recorder"
@@ -122432,10 +122471,10 @@
       },
       "manifest_blob_oid": "f2531f6d3ccc2eb1c730ac1c9d58fdc31d3cac50",
       "manifest_path": "homeassistant/components/sensor/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "The shared native sensor SDK implements source-ordered enum/optional validation, exact integer/u64/bool state handling, Python-compatible float formatting (16 golden values), native projection, and all 57 pinned unit rules across 270 unit entries and 62 classes. Thirteen native unit spelling aliases retain raw source metadata while publishing compatible spellings. Sun and system-sensor consumers use the SDK. Conversion families remain partial; complete platform setup/storage/provider catalog, statistics/history restore, UI/WebSocket consumers, and exhaustive pinned fixtures remain open. No physical sensors, host telemetry, or real account traffic have been tested.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -133548,7 +133587,9 @@
         "crates/hass-automation/src/lib.rs",
         "crates/hass-script/src/lib.rs",
         "crates/hass/src/config.rs",
-        "crates/hass/tests/end_to_end.rs"
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass-sensor/src/lib.rs",
+        "crates/hass-binary-sensor/src/lib.rs"
       ],
       "manifest": {
         "categories": [
@@ -141716,7 +141757,31 @@
         "crates/hass-system-sensors/README.md",
         "crates/hass/src/system_sensors.rs",
         "crates/hass/src/config.rs",
-        "crates/hass/tests/end_to_end.rs"
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass-sensor/src/lib.rs",
+        "crates/hass-system-sensors/src/lib.rs#config_entry_providers_are_scoped_and_release_only_their_entities",
+        "crates/hass-system-sensors/src/lib.rs#core_timezone_update_refreshes_state_without_waiting_for_minute_tick",
+        "crates/hass-system-sensors/src/lib.rs#time_date_descriptors_keep_provider_and_registry_identity",
+        "crates/hass-system-sensors/src/lib.rs#pinned_option_inventory_excludes_stale_beat_translation",
+        "crates/hass-system-sensors/src/lib.rs#pinned_utc_values_match_component_test_expectations",
+        "crates/hass-system-sensors/src/lib.rs#pinned_timezone_values_match_new_york_and_prague_expectations",
+        "crates/hass-system-sensors/src/lib.rs#sensor_snapshot_reads_the_current_timezone_each_time",
+        "crates/hass-system-sensors/src/lib.rs#source_minute_boundaries_use_the_next_utc_minute",
+        "crates/hass-system-sensors/src/lib.rs#pinned_local_date_boundaries_include_dst_short_and_long_days",
+        "crates/hass-system-sensors/src/lib.rs#local_midnight_resolution_matches_zoneinfo_gaps_and_folds",
+        "crates/hass-system-sensors/src/lib.rs#yaml_flow_and_timezone_validation_follow_pinned_schemas",
+        "crates/hass-system-sensors/src/lib.rs#ordinary_sensor_constructors_read_the_real_clock",
+        "crates/hass-system-sensors/src/lib.rs#time_date_entity_metadata_matches_upstream_identity_and_icons",
+        "crates/hass/src/system_sensors.rs#yaml_platform_is_tagged_and_rejects_unknown_or_unsupported_fields",
+        "crates/hass/src/system_sensors.rs#time_date_flow_creates_entry_and_duplicate_option_aborts",
+        "crates/hass/src/system_sensors.rs#yaml_platforms_share_one_provider_and_shutdown_removes_generated_states",
+        "crates/hass/src/system_sensors.rs#failed_yaml_start_leaves_no_stale_driver_and_can_retry",
+        "crates/hass/src/system_sensors.rs#partial_driver_registration_failure_closes_the_installed_driver",
+        "crates/hass/src/system_sensors.rs#drop_unregisters_owned_callbacks_and_allows_host_restart",
+        "crates/hass/src/system_sensors.rs#duplicate_host_start_fails_before_changing_yaml_provider_state",
+        "crates/hass/src/system_sensors.rs#retained_config_entry_driver_cannot_reactivate_after_host_shutdown",
+        "crates/hass/src/system_sensors.rs#concurrent_entry_unload_and_host_shutdown_keep_the_runtime_responsive",
+        "crates/hass/tests/end_to_end.rs#real_process_clock_yaml_and_config_entries_use_actual_time_and_restore_identity"
       ],
       "manifest": {
         "categories": [
@@ -141735,7 +141800,7 @@
       },
       "manifest_blob_oid": "09c9ac8e1b8eca05ef72c32b962841ed01ec139e",
       "manifest_path": "homeassistant/components/time_date/manifest.json",
-      "outstanding_acceptance": "Seven source clock formats, UTC/local minute and DST midnight scheduling, YAML/config-entry setup, live timezone refresh, stable identity and hard restart have native fixtures. Complete sensor/platform semantics, localized naming, upstream storage/config-entry import and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "Seven source clock formats, UTC/local minute and DST-midnight scheduling, YAML/config-entry setup, live timezone refresh, stable identity, whole-second precision, and hard restart have focused native evidence through the system-sensor SDK. Complete component/platform semantics, localized naming, upstream storage/config-entry import, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [
         {
           "path": "const.py",
@@ -148800,7 +148865,22 @@
         "crates/hass-system-sensors/README.md",
         "crates/hass/src/system_sensors.rs",
         "crates/hass-registry/src/tests.rs",
-        "crates/hass/tests/end_to_end.rs"
+        "crates/hass/tests/end_to_end.rs",
+        "crates/hass-sensor/src/lib.rs",
+        "crates/hass-system-sensors/src/lib.rs#config_entry_providers_are_scoped_and_release_only_their_entities",
+        "crates/hass-system-sensors/src/lib.rs#uptime_provider_projects_setup_time_as_utc_seconds",
+        "crates/hass-system-sensors/src/lib.rs#uptime_flow_and_setup_snapshot_match_pinned_semantics",
+        "crates/hass-system-sensors/src/lib.rs#ordinary_sensor_constructors_read_the_real_clock",
+        "crates/hass/src/system_sensors.rs#yaml_platform_is_tagged_and_rejects_unknown_or_unsupported_fields",
+        "crates/hass/src/system_sensors.rs#yaml_platforms_share_one_provider_and_shutdown_removes_generated_states",
+        "crates/hass/src/system_sensors.rs#failed_yaml_start_leaves_no_stale_driver_and_can_retry",
+        "crates/hass/src/system_sensors.rs#partial_driver_registration_failure_closes_the_installed_driver",
+        "crates/hass/src/system_sensors.rs#drop_unregisters_owned_callbacks_and_allows_host_restart",
+        "crates/hass/src/system_sensors.rs#duplicate_host_start_fails_before_changing_yaml_provider_state",
+        "crates/hass/src/system_sensors.rs#uptime_flow_is_single_instance_and_registers_service_device",
+        "crates/hass/src/system_sensors.rs#retained_config_entry_driver_cannot_reactivate_after_host_shutdown",
+        "crates/hass/src/system_sensors.rs#concurrent_entry_unload_and_host_shutdown_keep_the_runtime_responsive",
+        "crates/hass/tests/end_to_end.rs#real_process_clock_yaml_and_config_entries_use_actual_time_and_restore_identity"
       ],
       "manifest": {
         "categories": [
@@ -148820,7 +148900,7 @@
       },
       "manifest_blob_oid": "06306603cd7abb7c849f2d8e27925393a550bbae",
       "manifest_path": "homeassistant/components/uptime/manifest.json",
-      "outstanding_acceptance": "Actual fixed setup-time UTC state, singleton config flow, registry-linked service device, stable identity, unload and hard restart have native fixtures. Complete sensor/device naming and translation, upstream storage/config-entry import and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "The setup-time UTC uptime snapshot, singleton flow, registry-linked service device, stable identity, unload, and hard restart have focused native evidence through the system-sensor SDK. Periodic uptime drift suppression is not implemented or accepted. Complete sensor/device naming and translation, upstream storage/config-entry import, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [
         {
           "path": "const.py",
@@ -169027,13 +169107,53 @@
               "sun_elevation_crossing_ignores_creation_and_cancels_for_on_exit",
               "sun_scheduler_delivers_legacy_trigger_data_through_shared_action_runner",
               "sun_registry_polar_and_hour_triggers_schedule_native_crossings",
-              "sun_registry_conditions_use_live_location_and_unrounded_solar_helpers"
+              "sun_registry_conditions_use_live_location_and_unrounded_solar_helpers",
+              "binary_sensor_device_types_match_pinned_class_semantics",
+              "binary_sensor_device_condition_checks_state_and_strict_for_boundary",
+              "binary_sensor_device_schema_rejects_unknown_types_and_non_mapping_for",
+              "binary_sensor_device_trigger_resolves_renamed_uuid_and_preserves_context",
+              "binary_sensor_device_condition_resolves_uuid_and_fails_closed_for_missing_state",
+              "binary_sensor_device_trigger_requires_registered_uuid",
+              "binary_sensor_device_trigger_for_cancels_on_state_exit_and_keeps_event_context",
+              "binary_sensor_device_trigger_for_is_canceled_on_engine_shutdown"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_binary_device_yaml_automation_executes_condition_and_action"
             ]
           }
         ],
-        "remaining": "Native Sun conditions, calculated-event scheduling, and rounded-state elevation changed/crossed cancellation have focused tests, alongside tag_scanned callback/context coverage. Remaining upstream trigger/condition/action constructs, modes, tracing, automation config lifecycle, full Sun feature review, and exhaustive acceptance remain open. Composite-builder review corrections are not accepted.",
+        "remaining": "Binary-sensor device conditions/triggers now require device_id as metadata, resolve a registered entity UUID to its current binary_sensor entity once, and follow the pinned behavior without ownership, device-class, or disabled-registry gates. Trigger for-durations preserve event context and cancel on state exit or engine shutdown. Device enumeration is not implemented. Other upstream conditions/triggers/actions, modes, tracing, automation config lifecycle, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Root reports 35 current-worktree automation cases passing; this inventory writer did not run tests. The actual-UTC compiled-process Sun checks are root-reported separately."
+        "verification": "Root reports 47 automation cases passing with strict checks, including the binary-sensor device condition/trigger cases. The compiled-process binary-device YAML condition/action fixture and clock YAML/config-entry restore fixture passed. This inventory writer did not run tests; current 46-worktree tests, strict Clippy, formatting, and optimized build passed. Ten optimized CLI checks passed, including valid and invalid binary-device trigger for-duration cases. Optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e. Publication and exact-source Linux CI remain pending."
+      },
+      {
+        "domain": "binary_sensor",
+        "local_evidence": [
+          {
+            "path": "crates/hass-binary-sensor/src/lib.rs",
+            "test_functions_present": [
+              "device_classes_match_the_pinned_source_values_and_meanings",
+              "lifecycle_publishes_binary_values_context_metadata_and_availability",
+              "lifecycle_tracks_registry_rename_disable_and_release",
+              "releasing_generated_binary_sensor_removes_its_provider_state"
+            ]
+          },
+          {
+            "path": "crates/hass-sun/src/integration.rs"
+          },
+          {
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_binary_device_yaml_automation_executes_condition_and_action"
+            ]
+          }
+        ],
+        "remaining": "Full upstream binary_sensor platform setup/storage, provider catalog, UI/WebSocket behavior, and device enumeration remain open. No physical sensors, host telemetry, or real account traffic were used.",
+        "status": "partial",
+        "verification": "Root reports four binary-sensor SDK tests and the real-process binary-device YAML condition/action case passing. The related automation condition/trigger behavior is covered by focused device tests. No physical sensors, host telemetry, or real account traffic were used. This inventory writer did not run tests; 46-worktree tests, strict Clippy, formatting, optimized build, and ten optimized CLI checks passed. Optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e. Publication and exact-source Linux CI remain pending."
       },
       {
         "domain": "config",
@@ -170262,6 +170382,52 @@
         "verification": "Root reports 18 hass-script cases passed in the 44-crate local workspace run; strict all-target Clippy and formatting also pass. Root reports 1,158 tests across 129 targets (zero failures or ignored cases) in the 44-crate local workspace run, plus strict all-target Clippy, formatting, optimized build, and seven optimized CLI checks. Optimized macOS binary SHA-256 is 8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f. Published source 90fd6b15e01c176ce2e65ceb992705843da2b089 passes exact-source Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045 (formatting, strict all-target Clippy, full tests and CLI); this inventory writer did not run tests. Full script and Sun feature acceptance remain open."
       },
       {
+        "domain": "sensor",
+        "local_evidence": [
+          {
+            "path": "crates/hass-sensor/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-sensor/src/unit_tables.rs",
+            "test_functions_present": [
+              "covers_every_pinned_sensor_device_class_and_only_source_unruled_classes",
+              "preserves_explicit_null_rules_and_native_units_distinct_from_converter_units"
+            ]
+          },
+          {
+            "path": "crates/hass-sensor/tests/projection.rs",
+            "test_functions_present": [
+              "text_date_timestamp_unknown_and_unavailable_remain_distinct",
+              "pinned_enum_optional_options_and_unknown_numeric_validation_order",
+              "integer_counters_and_booleans_keep_source_native_state_strings",
+              "float_state_format_matches_builtin_python_golden_values",
+              "full_native_unit_rules_apply_to_projection_including_explicit_no_unit",
+              "native_unit_aliases_keep_raw_metadata_and_publish_compatible_spelling",
+              "unit_selection_obeys_priority_and_converts_only_matching_classes",
+              "common_pressure_length_energy_and_power_conversions_are_class_gated",
+              "warning_only_mismatches_and_value_errors_are_separate",
+              "enum_options_are_validated_only_for_enum_class",
+              "lifecycle_publishes_projected_values_across_rename_disable_and_unload"
+            ]
+          },
+          {
+            "path": "crates/hass-sensor/PROVENANCE/UNIT-TABLES.md"
+          },
+          {
+            "path": "crates/hass-sun/src/integration.rs"
+          },
+          {
+            "path": "crates/hass-system-sensors/src/lib.rs"
+          },
+          {
+            "path": "crates/hass/src/system_sensors.rs"
+          }
+        ],
+        "remaining": "Statistics/history restore, UI/WebSocket consumers, additional conversion families, complete platform setup/storage, the full provider catalog, and exhaustive pinned fixtures remain open. No physical sensors, host telemetry, or real account traffic were used.",
+        "status": "partial",
+        "verification": "Root reports two unit-table tests and 11 projection tests passing. Static source validation confirms all 57 pinned unit rules across 270 entries and 62 classes; 13 native unit spelling aliases preserve raw source metadata, and 16 float-format golden values pass. Sun and system-sensor consumers use the SDK. Conversion families remain partial. No physical sensors, host telemetry, or real account traffic were used. This inventory writer did not run tests; 46-worktree tests, strict Clippy, formatting, optimized build, and ten optimized CLI checks passed. Optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e. Publication and exact-source Linux CI remain pending."
+      },
+      {
         "domain": "spotify",
         "local_evidence": [
           {
@@ -170599,11 +170765,17 @@
               "real_process_sun_flow_enable_location_history_and_restart",
               "real_process_sunrise_offset_runs_on_actual_clock"
             ]
+          },
+          {
+            "path": "crates/hass-sensor/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-binary-sensor/src/lib.rs"
           }
         ],
         "remaining": "Exhaustive pinned Sun fixtures and typed timedelta template methods remain open. Bounded host and time-event/condition reviews are complete with passing enable/restart, selector/unit, short/fractional offset and trigger metadata corrections. SunIntegration::Drop is best-effort; joined cleanup uses shutdown().await.",
         "status": "partial",
-        "verification": "The owner reports 39 automation and 10 script cases with strict checks. Root reports 26 Sun cases and both compiled-process checks passing, including trigger id/idx/alias through actual UTC actions. Local workspace formatting, strict Clippy and 578 tests/71 targets pass; release/CLI/publication receipts remain separate. This inventory writer did not run tests."
+        "verification": "The owner reports 39 automation and 10 script cases with strict checks. Root reports 26 Sun cases and both compiled-process checks passing, including trigger id/idx/alias through actual UTC actions. Local workspace formatting, strict Clippy and 578 tests/71 targets pass; release/CLI/publication receipts remain separate. This inventory writer did not run tests. Root reports 26 Sun cases passing in the current 46-worktree focused run after shared sensor and binary-sensor SDK adoption; optimized build and ten optimized CLI checks pass; optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e; publication and exact-source Linux CI remain pending."
       },
       {
         "domain": "system_health",
@@ -170830,24 +171002,56 @@
         "domain": "time_date",
         "local_evidence": [
           {
-            "path": "crates/hass-system-sensors/src/lib.rs"
+            "path": "crates/hass-system-sensors/src/lib.rs",
+            "test_functions_present": [
+              "config_entry_providers_are_scoped_and_release_only_their_entities",
+              "core_timezone_update_refreshes_state_without_waiting_for_minute_tick",
+              "time_date_descriptors_keep_provider_and_registry_identity",
+              "pinned_option_inventory_excludes_stale_beat_translation",
+              "pinned_utc_values_match_component_test_expectations",
+              "pinned_timezone_values_match_new_york_and_prague_expectations",
+              "sensor_snapshot_reads_the_current_timezone_each_time",
+              "source_minute_boundaries_use_the_next_utc_minute",
+              "pinned_local_date_boundaries_include_dst_short_and_long_days",
+              "local_midnight_resolution_matches_zoneinfo_gaps_and_folds",
+              "yaml_flow_and_timezone_validation_follow_pinned_schemas",
+              "ordinary_sensor_constructors_read_the_real_clock",
+              "time_date_entity_metadata_matches_upstream_identity_and_icons"
+            ]
           },
           {
             "path": "crates/hass-system-sensors/README.md"
           },
           {
-            "path": "crates/hass/src/system_sensors.rs"
+            "path": "crates/hass/src/system_sensors.rs",
+            "test_functions_present": [
+              "yaml_platform_is_tagged_and_rejects_unknown_or_unsupported_fields",
+              "time_date_flow_creates_entry_and_duplicate_option_aborts",
+              "yaml_platforms_share_one_provider_and_shutdown_removes_generated_states",
+              "failed_yaml_start_leaves_no_stale_driver_and_can_retry",
+              "partial_driver_registration_failure_closes_the_installed_driver",
+              "drop_unregisters_owned_callbacks_and_allows_host_restart",
+              "duplicate_host_start_fails_before_changing_yaml_provider_state",
+              "retained_config_entry_driver_cannot_reactivate_after_host_shutdown",
+              "concurrent_entry_unload_and_host_shutdown_keep_the_runtime_responsive"
+            ]
           },
           {
             "path": "crates/hass/src/config.rs"
           },
           {
-            "path": "crates/hass/tests/end_to_end.rs"
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_clock_yaml_and_config_entries_use_actual_time_and_restore_identity"
+            ]
+          },
+          {
+            "path": "crates/hass-sensor/src/lib.rs"
           }
         ],
         "remaining": "Seven source clock formats, UTC/local minute and DST midnight scheduling, YAML/config-entry setup, live timezone refresh, stable identity and hard restart have native fixtures. Complete sensor/platform semantics, localized naming, upstream storage/config-entry import and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Primary actual transport/process acceptance and ongoing full-wave checks are recorded in docs/PORTING.md; published immutable full-workspace receipts are in docs/VALIDATION.md."
+        "verification": "Root reports 15 default-feature system-sensor tests and 11 no-default-feature tests passing with strict checks. The compiled-process clock YAML/config-entry precision and restore check passed. This inventory writer did not run tests; current 46-worktree tests, strict Clippy, formatting, and optimized build passed. Ten optimized CLI checks passed, including three binary-device trigger cases: a valid for-duration mapping is accepted, while an invalid type and string duration are rejected. The seven general/credential CLI checks remain green without extra files, database creation, or fixture-secret echo. Optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e. Publication and exact-source Linux CI remain pending."
       },
       {
         "domain": "timer",
@@ -170881,24 +171085,47 @@
         "domain": "uptime",
         "local_evidence": [
           {
-            "path": "crates/hass-system-sensors/src/lib.rs"
+            "path": "crates/hass-system-sensors/src/lib.rs",
+            "test_functions_present": [
+              "config_entry_providers_are_scoped_and_release_only_their_entities",
+              "uptime_provider_projects_setup_time_as_utc_seconds",
+              "uptime_flow_and_setup_snapshot_match_pinned_semantics",
+              "ordinary_sensor_constructors_read_the_real_clock"
+            ]
           },
           {
             "path": "crates/hass-system-sensors/README.md"
           },
           {
-            "path": "crates/hass/src/system_sensors.rs"
+            "path": "crates/hass/src/system_sensors.rs",
+            "test_functions_present": [
+              "yaml_platform_is_tagged_and_rejects_unknown_or_unsupported_fields",
+              "yaml_platforms_share_one_provider_and_shutdown_removes_generated_states",
+              "failed_yaml_start_leaves_no_stale_driver_and_can_retry",
+              "partial_driver_registration_failure_closes_the_installed_driver",
+              "drop_unregisters_owned_callbacks_and_allows_host_restart",
+              "duplicate_host_start_fails_before_changing_yaml_provider_state",
+              "uptime_flow_is_single_instance_and_registers_service_device",
+              "retained_config_entry_driver_cannot_reactivate_after_host_shutdown",
+              "concurrent_entry_unload_and_host_shutdown_keep_the_runtime_responsive"
+            ]
           },
           {
             "path": "crates/hass-registry/src/tests.rs"
           },
           {
-            "path": "crates/hass/tests/end_to_end.rs"
+            "path": "crates/hass/tests/end_to_end.rs",
+            "test_functions_present": [
+              "real_process_clock_yaml_and_config_entries_use_actual_time_and_restore_identity"
+            ]
+          },
+          {
+            "path": "crates/hass-sensor/src/lib.rs"
           }
         ],
         "remaining": "Actual fixed setup-time UTC state, singleton config flow, registry-linked service device, stable identity, unload and hard restart have native fixtures. Complete sensor/device naming and translation, upstream storage/config-entry import and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Primary actual transport/process acceptance and ongoing full-wave checks are recorded in docs/PORTING.md; published immutable full-workspace receipts are in docs/VALIDATION.md."
+        "verification": "Root reports 15 default-feature system-sensor tests and 11 no-default-feature tests passing with strict checks. The compiled-process clock YAML/config-entry precision and restore check passed. Periodic uptime drift suppression remains open. This inventory writer did not run tests; current 46-worktree tests, strict Clippy, formatting, and optimized build passed. Ten optimized CLI checks passed, including three binary-device trigger cases: a valid for-duration mapping is accepted, while an invalid type and string duration are rejected. The seven general/credential CLI checks remain green without extra files, database creation, or fixture-secret echo. Optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e. Publication and exact-source Linux CI remain pending."
       },
       {
         "domain": "usb",
@@ -171377,10 +171604,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 47,
+    "partial": 49,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1518
+    "unported": 1516
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

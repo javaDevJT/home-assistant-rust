@@ -42,9 +42,48 @@ unsupported trigger platforms are rejected.
         entity_id: light.entry
 ```
 
-Triggers include state, numeric state, template, local `time`, `time_pattern`,
-Home Assistant startup/shutdown, event, tag scans, MQTT message signals, and
-persistent notification changes. Tag triggers accept a scalar or list of
+Binary-sensor device triggers and conditions use the pinned device automation
+type names and delegate to native state matching. Replace the example registry
+UUID with the entity entry ID from the shared registry:
+
+```yaml
+- id: front_door_opened
+  triggers:
+    - platform: device
+      domain: binary_sensor
+      device_id: door-device-id
+      entity_id: 00000000-0000-4000-8000-000000000001
+      type: opened
+      for:
+        seconds: 5
+  conditions:
+    - condition: device
+      domain: binary_sensor
+      device_id: door-device-id
+      entity_id: binary_sensor.front_door
+      type: is_open
+  actions:
+    - action: light.turn_on
+      target:
+        entity_id: light.entry
+```
+
+The `entity_id` accepts a registry UUID or a direct entity ID. UUIDs are
+resolved once when the engine starts, so a registry rename is followed by the
+stable UUID; an unknown UUID fails startup. The adapter requires `device_id`
+but, like the pinned Core implementation, does not recheck entity ownership at
+runtime. Device classes retain their source meanings (`opened`/`not_opened`,
+`not_locked`/`locked`, and the matching condition type pairs); classless sensors
+use `turned_on`/`turned_off` and `is_on`/`is_off`. Device trigger `for` values
+are positive time-period mappings up to the engine's 24-hour limit; leaving the
+target state cancels the pending run. Device condition `for` checks that the
+matching state is older than the configured duration. The accepted type tables
+follow Core `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf` in
+`components/binary_sensor/device_condition.py` and `device_trigger.py`.
+
+Triggers include state, numeric state, binary-sensor device, template, local
+`time`, `time_pattern`, Home Assistant startup/shutdown, event, tag scans, MQTT
+message signals, and persistent notification changes. Tag triggers accept a scalar or list of
 `tag_id` values and an optional scalar or list of `device_id` values. They
 listen for public `tag_scanned` events emitted by tag providers; the trigger
 variables include the event, `description: "Tag scanned"`, and the configured
@@ -104,7 +143,7 @@ follows Home Assistant Core `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf`
 `helpers/trigger/models.py`.
 
 Verification checkpoint: `cargo test -p hass-automation --locked --offline`
-passed all 39 tests; strict package Clippy and formatting checks passed. Sun
+passed all 47 tests; strict package Clippy and formatting checks passed. Sun
 regressions include `legacy_and_registry_sun_trigger_yaml_use_pinned_names`,
 `sun_trigger_and_condition_offsets_accept_clocks_and_preserve_microseconds`,
 `sun_offset_string_matches_python_timedelta_format_and_precision`,
@@ -114,11 +153,14 @@ regressions include `legacy_and_registry_sun_trigger_yaml_use_pinned_names`,
 `sun_elevation_changed_uses_sun_state_attribute_transitions`,
 `sun_elevation_crossing_ignores_creation_and_cancels_for_on_exit`, and
 `sun_scheduler_delivers_legacy_trigger_data_through_shared_action_runner`.
+Binary-sensor coverage includes class-semantic type mapping, strict condition
+duration boundaries, UUID resolution after registry rename, disabled/missing
+state behavior, event context, trigger cancellation, and shutdown cleanup.
 The root-owned compiled-process sunrise fixture passed before this correction
 pass; the root owner will rerun it after integration.
 
-Conditions include state, numeric-state, template, Sun elevation, and nested
-`and`, `or`, and `not`. Automation and trigger variables are available to the
+Conditions include state, numeric-state, binary-sensor device, template, Sun
+elevation, and nested `and`, `or`, and `not`. Automation and trigger variables are available to the
 shared template renderer. Actions are validated and executed by `hass-script`'s
 shared sequence runner, including its service, delay, condition, choose, repeat,
 and variable actions. Each automation has at most 16 triggers, 16 conditions,

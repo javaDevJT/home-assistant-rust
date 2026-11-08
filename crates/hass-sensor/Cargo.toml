@@ -1,0 +1,18 @@
+[package]
+name = "hass-sensor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed native sensor descriptors and state projection for Home Assistant"
+
+[dependencies]
+chrono.workspace = true
+hass-core.workspace = true
+hass-entity.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hass-registry.workspace = true
+tokio.workspace = true

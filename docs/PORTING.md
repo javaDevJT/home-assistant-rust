@@ -8,7 +8,56 @@ The primary owns the workspace manifest/dependencies, app configuration and inte
 
 ## Current wave contracts
 
-### Native media players and asynchronous services (2026-11-07)
+### Sensor platform continuation (after the accepted 44-crate source)
+
+Root has enrolled the released binary-sensor SDK as member 45, normalized its
+manifest and removed its generated standalone lockfile. Sun's rising descriptor
+and value publication now use the typed SDK with the existing identity and
+registry metadata. Root fixed explicit JSON null extras to survive projection;
+`None` still removes a builder attribute, and the shared lifecycle already omits
+dynamic attributes while unavailable. The focused gate passes four binary SDK
+and 26 Sun cases, plus strict all-target Clippy for both packages.
+Numeric v151 and system-adapter v153 are released. Root has enrolled sensor as
+member 46 and added runtime-feature-scoped sensor/tracing dependencies for
+system sensors. Time/date and uptime now publish typed SDK projections, passing
+15 default and 11 no-default-feature cases plus strict lint. Sun retains its
+eight numeric descriptors alongside actual handles and publishes event times
+and positions through the SDK; all 26 Sun cases pass. Root's seventh SDK case
+verifies exact source ordering: enum options are optional, unknown readings
+skip later numeric-unit checks, integer text stays integer and f64 keeps `.0`.
+The eighth covers native unsigned counters, booleans and integer text beyond
+i64 without floating-point string loss, including valid underscore separators.
+The ninth checks 16 independent built-in float-format golden values, including
+scientific boundaries, signed zero, subnormal/extreme values and nonfinite
+plain values; formatting uses Python-style exponent signs and padding.
+v156 released the complete native-unit table: 57 rules / 270 entries over 62
+classes, source-AST compared with exact source hashes. Root wired it into actual
+projection, removed unsupported-table warnings, and added valid/no-unit/invalid
+warning regressions. All 13 native-unit spelling aliases are applied before
+validation/publication, with raw provider units retained. Sensor now has two
+unit-table and 11 projection cases; Sun remains green. Binary device automation
+v155 is released with 47 cases and strict lint; the compiled YAML condition,
+trigger and template-to-helper path passes, along with the clock/restart case.
+The 46-member workspace passes 1,186 tests in 134 targets, zero failures or
+ignored cases, strict all-target Clippy and formatting. The optimized build and
+ten owned-temp CLI cases pass, including device mapping/type/duration checks;
+binary SHA-256 is
+`9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e`.
+Publication/exact-source Linux CI remain pending. v150 owns
+only the parity Markdown/JSON for sensor/binary partial evidence. v157 owns only isolated `hass-switch/**` and
+`SWITCH-PORT.md` for the next SDK; it remains outside this workspace gate.
+The compiled clock fixture now validates UTC whole-second output and waits for
+an observed second boundary before proving a fresh restart timestamp.
+Read-only v154's concerns were rejected against the actual pinned
+`sensor/entity.py:574-732`; the source contract's enum wording was corrected.
+SDK warnings are logged without changing valid publication; projection errors
+use the existing provider error path. Actual loaded platform names are exposed
+in config/logger catalogs. v155 owns only `hass-automation` source/tests/README
+for binary device conditions/triggers, reusing state semantics and source UUID
+resolution; device_id is metadata and adds no invented ownership check. No new
+platform inventory status or full 46-member receipt is claimed yet.
+
+### Accepted native media and asynchronous services (44 crates)
 
 The next independent platform work is outside this 44-member receipt: v151
 owns only isolated `crates/hass-sensor/**`; v152 owns only isolated

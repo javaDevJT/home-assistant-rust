@@ -6,9 +6,7 @@
 //! configuration; it must publish these snapshots through that lifecycle
 //! rather than allocating entity IDs here.
 
-use chrono::{
-    DateTime, Duration, NaiveDateTime, NaiveTime, Offset, SecondsFormat, TimeZone, Timelike, Utc,
-};
+use chrono::{DateTime, Duration, NaiveDateTime, NaiveTime, Offset, SecondsFormat, TimeZone, Utc};
 use chrono_tz::{GapInfo, Tz};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -472,12 +470,9 @@ fn next_local_midnight(now: DateTime<Utc>, zone: Tz) -> Result<DateTime<Utc>, Co
     }
 }
 
-/// Timestamp state with Python `datetime.isoformat()` precision and UTC offset.
+/// Timestamp state with ISO seconds and an explicit UTC offset.
 pub fn format_utc_timestamp(value: DateTime<Utc>) -> String {
-    let microsecond_value = value
-        .with_nanosecond(value.timestamp_subsec_micros() * 1_000)
-        .unwrap_or(value);
-    microsecond_value.to_rfc3339_opts(SecondsFormat::AutoSi, false)
+    value.to_rfc3339_opts(SecondsFormat::Secs, false)
 }
 
 /// Metadata needed by the shared entity lifecycle for one time/date sensor.
@@ -530,6 +525,7 @@ impl TimeDateSensor {
         }
     }
 
+    #[cfg(feature = "runtime")]
     fn provider_key(&self) -> String {
         match self.entity_namespace.as_deref() {
             Some(namespace) => format!("{namespace}:{}", self.option.key()),
@@ -722,8 +718,9 @@ pub fn time_date_attributes(option: DisplayOption) -> Map<String, Value> {
 mod runtime {
     use super::*;
     use hass_core::{Context, Error as CoreError, Event, Runtime};
-    use hass_entity::{EntityHandle, EntityLifecycle, EntitySnapshot, EntitySpec};
+    use hass_entity::{EntityHandle, EntityLifecycle, EntitySpec};
     use hass_registry::ProviderEntityInfo;
+    use hass_sensor::{SensorDescriptor, SensorDeviceClass, SensorProjectionError, SensorReading};
     use std::collections::BTreeMap;
     use std::time::Duration as StdDuration;
     use tokio::sync::{broadcast, watch};
@@ -736,6 +733,8 @@ mod runtime {
         Config(#[from] ConfigError),
         #[error(transparent)]
         Runtime(#[from] CoreError),
+        #[error(transparent)]
+        SensorProjection(#[from] SensorProjectionError),
         #[error("joining time/date update task failed: {0}")]
         Join(#[from] tokio::task::JoinError),
     }
@@ -746,6 +745,7 @@ mod runtime {
     /// cache remain inside `EntityLifecycle` and `EntityHandle`.
     pub struct TimeDateIntegration {
         sensors: Vec<TimeDateSensor>,
+        descriptors: Vec<SensorDescriptor>,
         handles: Vec<EntityHandle>,
         lifecycle: EntityLifecycle,
         provider_id: String,
@@ -796,14 +796,18 @@ mod runtime {
                 })?)
             };
             let provider_id = provider_id.into();
-            let specs = time_date_entity_specs(&sensors, &provider_id);
+            let descriptors = time_date_sensor_descriptors(&sensors, &provider_id)?;
+            let specs = descriptors
+                .iter()
+                .map(SensorDescriptor::entity_spec)
+                .collect();
             // Subscribe before entity registration so a concurrent core config
             // update cannot be missed between the initial state and task launch.
             let events = runtime.subscribe();
             let handles = lifecycle.register_provider_batch(&provider_id, specs)?;
             let now = Utc::now();
-            for (sensor, handle) in sensors.iter().zip(&handles) {
-                if let Err(error) = publish_time_date(sensor, handle, now, &zone_name) {
+            for ((sensor, descriptor), handle) in sensors.iter().zip(&descriptors).zip(&handles) {
+                if let Err(error) = publish_time_date(sensor, descriptor, handle, now, &zone_name) {
                     let _ = lifecycle.register_provider_batch(&provider_id, Vec::new());
                     return Err(error);
                 }
@@ -812,11 +816,13 @@ mod runtime {
             let task = if let Some(spawn_handle) = spawn_handle {
                 let worker_runtime = runtime.clone();
                 let worker_sensors = sensors.clone();
+                let worker_descriptors = descriptors.clone();
                 let worker_handles = handles.clone();
                 Some(spawn_handle.spawn(async move {
                     time_date_update_loop(
                         worker_runtime,
                         worker_sensors,
+                        worker_descriptors,
                         worker_handles,
                         events,
                         cancel_rx,
@@ -828,6 +834,7 @@ mod runtime {
             };
             Ok(Self {
                 sensors,
+                descriptors,
                 handles,
                 lifecycle: lifecycle.clone(),
                 provider_id,
@@ -847,6 +854,11 @@ mod runtime {
         /// Return the configured sensors in the same order as their handles.
         pub fn sensors(&self) -> &[TimeDateSensor] {
             &self.sensors
+        }
+
+        /// Return the native SDK descriptors paired with the configured sensors.
+        pub fn descriptors(&self) -> &[SensorDescriptor] {
+            &self.descriptors
         }
 
         /// Stop and join the update task, then release each entity lease.
@@ -883,6 +895,7 @@ mod runtime {
     /// A registered, fixed-at-setup `uptime` sensor.
     pub struct UptimeIntegration {
         sensor: UptimeSensor,
+        descriptor: SensorDescriptor,
         lifecycle: EntityLifecycle,
         provider_id: String,
         handle: Option<EntityHandle>,
@@ -915,15 +928,19 @@ mod runtime {
             .with_device_id(device_id.to_owned())
             .with_suggested_object_id(metadata.suggested_object_id)
             .with_info(info);
+            let descriptor =
+                SensorDescriptor::new(spec)?.with_device_class(SensorDeviceClass::Uptime);
             let provider_id = format!("{UPTIME_DOMAIN}:{}", metadata.config_entry_id);
-            let mut handles = lifecycle.register_provider_batch(&provider_id, vec![spec])?;
+            let mut handles =
+                lifecycle.register_provider_batch(&provider_id, vec![descriptor.entity_spec()])?;
             let handle = handles.pop().expect("one uptime entity was registered");
-            if let Err(error) = publish_uptime(&sensor, &handle) {
+            if let Err(error) = publish_uptime(&sensor, &descriptor, &handle) {
                 let _ = lifecycle.register_provider_batch(&provider_id, Vec::new());
                 return Err(error);
             }
             Ok(Self {
                 sensor,
+                descriptor,
                 lifecycle: lifecycle.clone(),
                 provider_id,
                 handle: Some(handle),
@@ -946,6 +963,10 @@ mod runtime {
 
         pub fn sensor(&self) -> &UptimeSensor {
             &self.sensor
+        }
+
+        pub fn descriptor(&self) -> &SensorDescriptor {
+            &self.descriptor
         }
 
         pub fn entity_id(&self) -> Option<String> {
@@ -972,11 +993,14 @@ mod runtime {
         }
     }
 
-    fn time_date_entity_specs(sensors: &[TimeDateSensor], provider_id: &str) -> Vec<EntitySpec> {
+    fn time_date_sensor_descriptors(
+        sensors: &[TimeDateSensor],
+        provider_id: &str,
+    ) -> Result<Vec<SensorDescriptor>, ProviderError> {
         let mut occurrences = BTreeMap::<String, usize>::new();
         sensors
             .iter()
-            .map(|sensor| {
+            .map(|sensor| -> Result<SensorDescriptor, ProviderError> {
                 let metadata = sensor.metadata();
                 let identity = sensor.provider_key();
                 let occurrence = occurrences.entry(identity.clone()).or_default();
@@ -1007,41 +1031,64 @@ mod runtime {
                 if let Some(entry_id) = metadata.config_entry_id {
                     spec = spec.with_config_entry_id(entry_id);
                 }
-                spec
+                SensorDescriptor::new(spec).map_err(ProviderError::from)
             })
             .collect()
     }
 
     fn publish_time_date(
         sensor: &TimeDateSensor,
+        descriptor: &SensorDescriptor,
         handle: &EntityHandle,
         now: DateTime<Utc>,
         time_zone: &str,
     ) -> Result<(), ProviderError> {
         let snapshot = sensor.snapshot_at(now, time_zone)?;
-        let _ = handle.publish(EntitySnapshot {
-            state: Some(snapshot.state),
-            available: true,
-            attributes: snapshot.attributes,
-            context: Context::default(),
-        })?;
-        Ok(())
+        let reading = snapshot.attributes.into_iter().fold(
+            SensorReading::new(snapshot.state).with_context(Context::default()),
+            |reading, (name, value)| reading.with_attribute(name, value),
+        );
+        publish_sensor_reading(descriptor, handle, reading)
     }
 
-    fn publish_uptime(sensor: &UptimeSensor, handle: &EntityHandle) -> Result<(), ProviderError> {
-        let snapshot = sensor.snapshot();
-        let _ = handle.publish(EntitySnapshot {
-            state: Some(snapshot.state),
-            available: true,
-            attributes: snapshot.attributes,
-            context: Context::default(),
-        })?;
+    fn publish_uptime(
+        sensor: &UptimeSensor,
+        descriptor: &SensorDescriptor,
+        handle: &EntityHandle,
+    ) -> Result<(), ProviderError> {
+        let reading = SensorReading::new(sensor.setup_time())
+            .with_attribute(
+                "friendly_name",
+                Value::String(UPTIME_ENTRY_TITLE.to_owned()),
+            )
+            .with_context(Context::default());
+        publish_sensor_reading(descriptor, handle, reading)
+    }
+
+    fn publish_sensor_reading(
+        descriptor: &SensorDescriptor,
+        handle: &EntityHandle,
+        reading: SensorReading,
+    ) -> Result<(), ProviderError> {
+        let projection = descriptor.project(reading)?;
+        let entity_spec = descriptor.entity_spec();
+        for warning in &projection.warnings {
+            tracing::warn!(
+                target: "hass_system_sensors",
+                provider_id = %entity_spec.provider_id,
+                provider_key = %entity_spec.provider_key,
+                ?warning,
+                "sensor metadata warning"
+            );
+        }
+        let _ = handle.publish(projection.snapshot)?;
         Ok(())
     }
 
     async fn time_date_update_loop(
         runtime: Runtime,
         sensors: Vec<TimeDateSensor>,
+        descriptors: Vec<SensorDescriptor>,
         handles: Vec<EntityHandle>,
         mut events: broadcast::Receiver<Event>,
         mut cancel: watch::Receiver<bool>,
@@ -1075,7 +1122,13 @@ mod runtime {
                     zone = runtime.time_zone();
                     for index in 0..sensors.len() {
                         if deadlines[index] <= update_time {
-                            publish_time_date(&sensors[index], &handles[index], update_time, &zone)?;
+                            publish_time_date(
+                                &sensors[index],
+                                &descriptors[index],
+                                &handles[index],
+                                update_time,
+                                &zone,
+                            )?;
                             deadlines[index] = next_time_date_update(sensors[index].option(), update_time, &zone)?;
                         }
                     }
@@ -1085,7 +1138,13 @@ mod runtime {
                         Ok(event) if event.event_type == "core_config_updated" => {
                             let update_time = Utc::now();
                             zone = runtime.time_zone();
-                            refresh_all_time_date(&sensors, &handles, update_time, &zone)?;
+                            refresh_all_time_date(
+                                &sensors,
+                                &descriptors,
+                                &handles,
+                                update_time,
+                                &zone,
+                            )?;
                             deadlines = calculate_deadlines(&sensors, update_time, &zone)?;
                         }
                         Ok(_) => {}
@@ -1094,7 +1153,13 @@ mod runtime {
                             // refresh and recalculate from current runtime config.
                             let update_time = Utc::now();
                             zone = runtime.time_zone();
-                            refresh_all_time_date(&sensors, &handles, update_time, &zone)?;
+                            refresh_all_time_date(
+                                &sensors,
+                                &descriptors,
+                                &handles,
+                                update_time,
+                                &zone,
+                            )?;
                             deadlines = calculate_deadlines(&sensors, update_time, &zone)?;
                         }
                         Err(broadcast::error::RecvError::Closed) => return Ok(()),
@@ -1119,12 +1184,13 @@ mod runtime {
 
     fn refresh_all_time_date(
         sensors: &[TimeDateSensor],
+        descriptors: &[SensorDescriptor],
         handles: &[EntityHandle],
         now: DateTime<Utc>,
         time_zone: &str,
     ) -> Result<(), ProviderError> {
-        for (sensor, handle) in sensors.iter().zip(handles) {
-            publish_time_date(sensor, handle, now, time_zone)?;
+        for ((sensor, descriptor), handle) in sensors.iter().zip(descriptors).zip(handles) {
+            publish_time_date(sensor, descriptor, handle, now, time_zone)?;
         }
         Ok(())
     }
@@ -1212,6 +1278,79 @@ mod runtime {
             .expect("timezone event should refresh the state promptly");
 
             integration.shutdown().await.unwrap();
+            lifecycle.shutdown().await.unwrap();
+        }
+
+        #[test]
+        fn time_date_descriptors_keep_provider_and_registry_identity() {
+            let yaml_sensors = TimeDateYamlConfig::parse(&json!({
+                "display_options": "time",
+                "entity_namespace": "office"
+            }))
+            .unwrap()
+            .sensors(None);
+            let yaml_descriptor = time_date_sensor_descriptors(&yaml_sensors, "time_date:yaml")
+                .unwrap()
+                .remove(0);
+            let yaml_spec = yaml_descriptor.entity_spec();
+            assert_eq!(yaml_spec.provider_id, "time_date:yaml");
+            assert_eq!(yaml_spec.provider_key, "office:time");
+            assert_eq!(yaml_spec.unique_id, None);
+            assert_eq!(
+                yaml_spec.suggested_object_id.as_deref(),
+                Some("office time")
+            );
+            assert_eq!(yaml_spec.info.original_icon.as_deref(), Some("mdi:clock"));
+            assert_eq!(yaml_spec.info.translation_key.as_deref(), Some("time"));
+
+            let entry_sensors = vec![TimeDateSensor::new(DisplayOption::Date, Some("entry-a"))];
+            let entry_descriptor =
+                time_date_sensor_descriptors(&entry_sensors, "time_date:entry-a")
+                    .unwrap()
+                    .remove(0);
+            let entry_spec = entry_descriptor.entity_spec();
+            assert_eq!(entry_spec.provider_id, "time_date:entry-a");
+            assert_eq!(entry_spec.provider_key, "date");
+            assert_eq!(entry_spec.unique_id.as_deref(), Some("date"));
+            assert_eq!(entry_spec.config_entry_id.as_deref(), Some("entry-a"));
+        }
+
+        #[tokio::test]
+        async fn uptime_provider_projects_setup_time_as_utc_seconds() {
+            use hass_registry::DeviceRegistration;
+            use std::collections::BTreeSet;
+
+            let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+            let registries = Registries::new(runtime.clone()).unwrap();
+            let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+            let entry_id = "entry-uptime-projection";
+            let device = registries
+                .get_or_create_device(DeviceRegistration {
+                    config_entry_id: Some(entry_id.to_owned()),
+                    identifiers: BTreeSet::from([(UPTIME_DOMAIN.to_owned(), entry_id.to_owned())]),
+                    name: Some(UPTIME_ENTRY_TITLE.to_owned()),
+                    entry_type: Some(UPTIME_DEVICE_ENTRY_TYPE.to_owned()),
+                    ..DeviceRegistration::default()
+                })
+                .unwrap();
+            let sensor = UptimeSensor::at(
+                entry_id,
+                UPTIME_ENTRY_TITLE,
+                DateTime::from_timestamp(1_646_092_800, 0).unwrap(),
+            );
+            let integration = UptimeIntegration::start(&lifecycle, sensor, &device.id).unwrap();
+            assert_eq!(
+                integration.descriptor().device_class(),
+                Some(SensorDeviceClass::Uptime)
+            );
+            let entity_id = integration.entity_id().unwrap();
+            let state = runtime.get_state(&entity_id).unwrap();
+
+            assert_eq!(state.state, "2022-03-01T00:00:00+00:00");
+            assert_eq!(state.attributes["device_class"], UPTIME_DEVICE_CLASS);
+            assert_eq!(state.attributes["friendly_name"], UPTIME_ENTRY_TITLE);
+
+            integration.shutdown().unwrap();
             lifecycle.shutdown().await.unwrap();
         }
     }
@@ -1595,7 +1734,7 @@ mod tests {
         assert_eq!(sensor.snapshot().attributes["friendly_name"], "Uptime");
         assert_eq!(
             format_utc_timestamp(DateTime::from_timestamp(1_646_092_800, 123_456_789).unwrap()),
-            "2022-03-01T00:00:00.123456+00:00"
+            "2022-03-01T00:00:00+00:00"
         );
     }
 

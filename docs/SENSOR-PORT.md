@@ -40,8 +40,9 @@ layer does not convert or validate sensor values. See
   availability flag independently produces `unavailable`.
 - Date values use ISO date text. `timestamp` and `uptime` values require a
   timezone, normalize to UTC, and serialize to seconds. `uptime` also suppresses
-  small clock drift. The `enum` class requires enum options and validates a
-  nonempty option list against the state. These branches are in the pinned
+  small clock drift. Enum options may be absent or empty; a nonempty option
+  list validates membership, and providing options on a non-enum class is an
+  error. These branches are in the pinned
   [state projector](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/sensor/entity.py#L574-L639)
   and the [device-class definitions](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/sensor/const.py#L105-L145).
 - Core expects a numeric value when numeric metadata calls for one, including a
@@ -63,6 +64,11 @@ layer does not convert or validate sensor values. See
   state-class unit. These are not interchangeable validations. See the pinned
   [`DEVICE_CLASS_UNITS`, `DEVICE_CLASS_STATE_CLASSES`, and `STATE_CLASS_UNITS`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/sensor/const.py#L651-L907)
   and [validation paths](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/sensor/entity.py#L547-L573).
+  Ordering matters: available `None` returns before numeric coercion, device-unit
+  warnings and state-class-unit rejection. Those latter checks run only after a
+  value successfully enters the numeric path; see
+  [the early return](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/sensor/entity.py#L574-L580)
+  and [unit validation](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/sensor/entity.py#L690-L732).
 - Supported state classes are `measurement`, `measurement_angle`, `total`,
   and `total_increasing`; they describe recorder semantics, not merely a
   numeric-looking state. `last_reset` is only emitted for `total`; other state

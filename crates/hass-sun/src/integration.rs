@@ -399,6 +399,13 @@ impl SunHostState {
         };
 
         let specs = entity_specs(&entry.entry_id, &device.id);
+        let sensor_descriptors = specs
+            .iter()
+            .filter(|spec| spec.domain == "sensor")
+            .cloned()
+            .map(hass_sensor::SensorDescriptor::new)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| Error::Service(format!("Sun sensor descriptor: {error}")))?;
         let handles = match self.lifecycle.register_batch(specs) {
             Ok(handles) => handles,
             Err(Error::InvalidInput(message)) => {
@@ -423,7 +430,7 @@ impl SunHostState {
                 });
             }
         };
-        let entities = match SunEntities::from_handles(handles) {
+        let entities = match SunEntities::from_handles(handles, sensor_descriptors) {
             Ok(entities) => entities,
             Err(error) => {
                 if let Err(cleanup) =
@@ -905,23 +912,43 @@ impl ConfigEntryDriver for SunConfigEntryDriver {
     }
 }
 
+fn publish_sensor(
+    handle: &EntityHandle,
+    descriptor: &hass_sensor::SensorDescriptor,
+    reading: hass_sensor::SensorReading,
+) -> Result<(), Error> {
+    let projection = descriptor
+        .project(reading)
+        .map_err(|error| Error::Service(format!("Sun sensor projection: {error}")))?;
+    for warning in &projection.warnings {
+        tracing::warn!(?warning, "Sun sensor metadata warning");
+    }
+    let _ = handle.publish(projection.snapshot)?;
+    Ok(())
+}
+
 #[derive(Clone)]
 struct SunEntities {
     main: EntityHandle,
     events: Vec<EntityHandle>,
     positions: Vec<EntityHandle>,
     rising: EntityHandle,
+    sensor_descriptors: Vec<hass_sensor::SensorDescriptor>,
 }
 
 impl SunEntities {
-    fn from_handles(handles: Vec<EntityHandle>) -> Result<Self, Error> {
-        if handles.len() != 10 {
+    fn from_handles(
+        handles: Vec<EntityHandle>,
+        sensor_descriptors: Vec<hass_sensor::SensorDescriptor>,
+    ) -> Result<Self, Error> {
+        if handles.len() != 10 || sensor_descriptors.len() != 8 {
             for handle in &handles {
                 let _ = handle.release();
             }
             return Err(Error::Service(format!(
-                "Sun entity batch returned {} handles, expected 10",
-                handles.len()
+                "Sun entity batch returned {} handles and {} sensor descriptors, expected 10 and 8",
+                handles.len(),
+                sensor_descriptors.len()
             )));
         }
         let mut handles = handles.into_iter();
@@ -940,6 +967,7 @@ impl SunEntities {
             events,
             positions,
             rising,
+            sensor_descriptors,
         })
     }
 
@@ -974,40 +1002,34 @@ impl SunEntities {
             snapshot.next_rising,
             snapshot.next_setting,
         ];
-        for (handle, value) in self.events.iter().zip(values) {
-            let _ = handle.publish(EntitySnapshot {
-                state: Some(format_utc(value)),
-                available: true,
-                attributes: Map::new(),
-                context: Context::default(),
-            })?;
+        for ((handle, descriptor), value) in self
+            .events
+            .iter()
+            .zip(&self.sensor_descriptors[..6])
+            .zip(values)
+        {
+            publish_sensor(handle, descriptor, hass_sensor::SensorReading::new(value))?;
         }
         Ok(())
     }
 
     fn publish_positions(&self, snapshot: &SunSnapshot) -> Result<(), Error> {
-        for (handle, value) in self
+        for ((handle, descriptor), value) in self
             .positions
             .iter()
+            .zip(&self.sensor_descriptors[6..])
             .zip([snapshot.solar_elevation, snapshot.solar_azimuth])
         {
-            let _ = handle.publish(EntitySnapshot {
-                state: Some(json!(value).to_string()),
-                available: true,
-                attributes: Map::new(),
-                context: Context::default(),
-            })?;
+            publish_sensor(handle, descriptor, hass_sensor::SensorReading::new(value))?;
         }
         Ok(())
     }
 
     fn publish_rising(&self, snapshot: &SunSnapshot) -> Result<(), Error> {
-        let _ = self.rising.publish(EntitySnapshot {
-            state: Some(if snapshot.rising { "on" } else { "off" }.into()),
-            available: true,
-            attributes: Map::new(),
-            context: Context::default(),
-        })?;
+        let _ = self.rising.publish(
+            hass_binary_sensor::BinarySensorSnapshot::new(Some(snapshot.rising))
+                .into_entity_snapshot(),
+        )?;
         Ok(())
     }
 
@@ -1365,8 +1387,13 @@ fn sun_child_spec(
         "solar_rising" => "Solar rising",
         _ => description.key,
     };
-    EntitySpec::new(description.domain, DOMAIN, provider_id, description.key)
-        .with_unique_id(format!("{entry_id}-{}", description.key))
+    let spec = if description.domain == "binary_sensor" {
+        hass_binary_sensor::BinarySensorDescriptor::new(DOMAIN, provider_id, description.key)
+            .into_entity_spec()
+    } else {
+        EntitySpec::new(description.domain, DOMAIN, provider_id, description.key)
+    };
+    spec.with_unique_id(format!("{entry_id}-{}", description.key))
         .with_config_entry_id(entry_id)
         .with_device_id(device_id)
         .with_suggested_object_id(description.suggested_object_id)

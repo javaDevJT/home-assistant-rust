@@ -27,6 +27,8 @@ members = [
     "crates/hass-oauth2-flow",
     "crates/hass-media-player",
     "crates/hass-spotify",
+    "crates/hass-binary-sensor",
+    "crates/hass-sensor",
 ]
 
 [workspace.package]
@@ -51,6 +53,8 @@ unicode-normalization = "=0.1.24"
 hass-core = { path = "crates/hass-core" }
 hass-media-player = { path = "crates/hass-media-player" }
 hass-spotify = { path = "crates/hass-spotify" }
+hass-binary-sensor = { path = "crates/hass-binary-sensor" }
+hass-sensor = { path = "crates/hass-sensor" }
 hass-storage = { path = "crates/hass-storage" }
 hass-automation = { path = "crates/hass-automation" }
 hass-api = { path = "crates/hass-api" }

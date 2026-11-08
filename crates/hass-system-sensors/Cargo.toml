@@ -8,7 +8,7 @@ rust-version.workspace = true
 
 [features]
 default = ["runtime"]
-runtime = ["dep:hass-core", "dep:hass-entity", "dep:hass-registry", "dep:tokio"]
+runtime = ["dep:hass-core", "dep:hass-entity", "dep:hass-registry", "dep:hass-sensor", "dep:tokio", "dep:tracing"]
 
 [dependencies]
 chrono.workspace = true
@@ -16,10 +16,12 @@ chrono-tz.workspace = true
 hass-core = { workspace = true, optional = true }
 hass-entity = { workspace = true, optional = true }
 hass-registry = { workspace = true, optional = true }
+hass-sensor = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_yaml.workspace = true
