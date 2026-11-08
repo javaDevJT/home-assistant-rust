@@ -12,8 +12,10 @@ echoes the ignored synthetic secret.
 
 Optimized macOS binary SHA-256:
 `de5dced125913f18d09ca28132340b1fde98b20e793e688312f167cfe9c78255`.
-Source publication and exact-source Linux CI are pending. This receipt does not
-supersede the historical accepted 48-crate source until publication is recorded.
+Published source `83aaa07027efe8a233ed441a097b7b566a88f9a6` passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539).
+Root verified the matching head, completed status and successful conclusion.
+The accepted 48-crate receipt remains historical below.
 
 Light, cover and fan now use typed SDKs through MQTT's shared entity lifecycle.
 Focused SDK cases total 12 light, seven cover and eight fan. MQTT passes five

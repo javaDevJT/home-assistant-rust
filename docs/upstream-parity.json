@@ -169115,7 +169115,7 @@
         ],
         "remaining": "Authenticated GET /api/components now reports sorted process-lifetime receipts from successful setup; configured HTTP and WebSocket get_config snapshots use the same receipt set, while embedded callers without a receipt provider keep their configured static names. MQTT, Spotify/media-player, and time/date/uptime producers record only after setup, and unload retains names. Logger filtering uses canonical domains from all_components; in-progress discovery-handler supplementation and component_loaded event parity remain open, and SDK namespace metadata does not claim tracing-event emission. Remaining pinned endpoint, error, auth/permission, subscription, connection, history, and complete API semantics require acceptance.",
         "status": "partial",
-        "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "application_credentials",
@@ -169565,7 +169565,7 @@
         ],
         "remaining": "Typed button descriptors, timestamp projection, press services, actual MQTT press publication, and button.press Script device actions have focused SDK, wire, Script, and compiled-process evidence. Other provider adapters, default localized names/translations, frontend/UI, the full platform catalog, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "config",
@@ -169734,7 +169734,7 @@
         ],
         "remaining": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. The compiled MQTT process fixture confirms that config-entry disable removes all five managed platform entities, re-enable restores them, and SQLite restart preserves registry IDs. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage, and exhaustive pinned config acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "counter",
@@ -170144,7 +170144,7 @@
         ],
         "remaining": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent dispatch, cancellation, context and results. The compiled process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider and direct light.turn_off, cover.open_cover, and fan.turn_on calls produce real broker commands; switch/button Script device actions are also exercised. Other core services, full selector/exclusion variants, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "http",
@@ -170596,7 +170596,7 @@
         ],
         "remaining": "MQTT now uses native switch, button, light, cover, and fan SDK paths. Five unit and 18 wire tests cover discovery/config, QoS callback completion, cancellation/timeouts/late ACKs, per-target driver-owned fan effect chains, cover direction/toggle/tilt behavior, and release/shutdown guards. The compiled process fixture exercises all five managed platforms, broker commands, entry disable/absence/reload, and SQLite-backed entity identity. Additional MQTT platform adapters, discovery/manifest/schema variants, and exhaustive pinned protocol acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "network",
@@ -170997,7 +170997,7 @@
         ],
         "remaining": "Switch and button device actions now validate YAML, resolve registry UUIDs across renames, preserve literal IDs, await provider calls, and cover context, errors and cancellation in the 23-test Script package and compiled process. Upstream sequencing/modes beyond the implemented subset, tracing, broader device actions, UI/config flow, and exhaustive pinned fixtures remain open.",
         "status": "partial",
-        "verification": "Root reports 18 hass-script cases passed in the 44-crate local workspace run; strict all-target Clippy and formatting also pass. Root reports 1,158 tests across 129 targets (zero failures or ignored cases) in the 44-crate local workspace run, plus strict all-target Clippy, formatting, optimized build, and seven optimized CLI checks. Optimized macOS binary SHA-256 is 8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f. Published source 90fd6b15e01c176ce2e65ceb992705843da2b089 passes exact-source Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045 (formatting, strict all-target Clippy, full tests and CLI); this inventory writer did not run tests. Full script and Sun feature acceptance remain open. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "sensor",
@@ -171093,7 +171093,7 @@
         ],
         "remaining": "The shared sensor SDK covers the pinned native-unit rules and all 41 sensor-class converter mappings across the 31 hass-units converter families. UnitSystem source mappings are independently checked, but global UnitSystem selection is not yet integrated with app preferences or sensor registry/readback. Remaining work includes selected-unit persistence, display precision, restore, statistics/history, full platform/provider setup, UI/WebSocket consumers, and exhaustive pinned fixtures. No physical sensors, host telemetry, or real account traffic were tested.",
         "status": "partial",
-        "verification": "Root reports two unit-table tests and 11 projection tests passing. Static source validation confirms all 57 pinned unit rules across 270 entries and 62 classes; 13 native unit spelling aliases preserve raw source metadata, and 16 float-format golden values pass. Sun and system-sensor consumers use the SDK. Conversion families remain partial. No physical sensors, host telemetry, or real account traffic were used. This inventory writer did not run tests; 46-worktree tests, strict Clippy, formatting, optimized build, and ten optimized CLI checks passed. Optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e. Published source aade9aa33ecccce1b627359f7fd1023353bb5f49 passes exact-source Linux CI [run 42438729634](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42438729634), including formatting, strict all-target Clippy, full workspace tests, and CLI validation. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "spotify",
@@ -171564,7 +171564,7 @@
         ],
         "remaining": "Native switch descriptors, state projection, assumed_state live publication, strict service targets/commands, and actual MQTT switch commands have focused SDK, wire, and process evidence. Switch turn_on/turn_off device actions now have Script YAML/runtime and compiled-process coverage; device enumeration, the generic switch.is_on/switch.is_off condition registry, reproduce/significant-change semantics, switch-as-light, full provider coverage, translations, and frontend/UI remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "system_health",
@@ -172228,7 +172228,7 @@
         ],
         "remaining": "The WebSocket get_config snapshot uses dynamic successful-setup component receipts when the optional provider is configured; static embedded callers retain their configured component list. This adds no component_loaded event. Component-loaded event parity and in-progress logger discovery supplementation remain open. Repairs/config-subentry, Tag, SSDP and Network command/channel subsets have focused transport evidence; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "zeroconf",
@@ -172453,7 +172453,7 @@
         ],
         "remaining": "Typed cover descriptors/snapshots, feature projection, validated services, command resolution, observed-direction toggle memory, tilt toggle, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Cover device conditions/triggers and state reproduction, provider setup/unload and device-specific mappings beyond MQTT, service/UI metadata and frontend behavior, significant-change scheduling, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Focused SDK, MQTT wire, and compiled-process evidence is included in the final52 local candidate gate recorded at status_policy.current_local_candidate_receipt. Source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "fan",
@@ -172511,7 +172511,7 @@
         ],
         "remaining": "Typed fan state/capability projection, service planning, reported power state, inclusive speed boundaries, ordered multi-effect commands, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Exact cv.boolean alias coverage remains unverified, and the pinned optional set_direction.direction schema/method mismatch is preserved for host handling. Other provider setup/catalog coverage, localization/UI, broader automation/reproduce behavior, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Focused SDK, MQTT wire, and compiled-process evidence is included in the final52 local candidate gate recorded at status_policy.current_local_candidate_receipt. Source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
       {
         "domain": "light",
@@ -172585,7 +172585,7 @@
         ],
         "remaining": "Typed light descriptors/snapshots, live capabilities, service validation/normalization, color conversion, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Core profile application/default transitions, the full CSS color_name mapping and warning behavior, light-specific gamut clipping, Python coercion edge cases, other provider setup/catalog coverage, localization/translations, frontend/UI, and exhaustive pinned acceptance remain open. The SDK also keeps explicit range/finite-value guards where the pinned accessors do not validate provider values.",
         "status": "partial",
-        "verification": "Focused SDK, MQTT wire, and compiled-process evidence is included in the final52 local candidate gate recorded at status_policy.current_local_candidate_receipt. Source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       }
     ],
     "partial": 54,
@@ -172593,7 +172593,7 @@
     "test_execution_by_inventory_writer": false,
     "unported": 1511,
     "current_local_candidate_receipt": {
-      "candidate": "NEXT52",
+      "candidate": "native-52",
       "candidate_crates": 52,
       "workspace_tests": 1321,
       "workspace_targets": 154,
@@ -172608,10 +172608,16 @@
         "result": "all passed against the optimized binary"
       },
       "optimized_macos_binary_sha256": "de5dced125913f18d09ca28132340b1fde98b20e793e688312f167cfe9c78255",
-      "source_commit": null,
-      "source_publication": "pending",
-      "exact_source_linux_ci_run": null,
-      "exact_source_linux_ci": "pending",
+      "source_commit": "83aaa07027efe8a233ed441a097b7b566a88f9a6",
+      "source_publication": "published",
+      "exact_source_linux_ci_run": {
+        "id": 42466298539,
+        "url": "https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539",
+        "head_sha": "83aaa07027efe8a233ed441a097b7b566a88f9a6",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      "exact_source_linux_ci": "passed",
       "independent_unit_checks": {
         "converter_families": 31,
         "converter_factor_bit_patterns_matched": 190,
@@ -172623,7 +172629,7 @@
         "unit_system_mapping_content_matches_source": true,
         "only_unit_system_difference": "BTreeMap key ordering differs from Python insertion order; serialized mapping content matches."
       },
-      "note": "Local final52 candidate only. No current52 source commit or exact-source Linux CI is available; do not interpret this as published or CI-green. Units is a shared library, not an integration domain."
+      "note": "Published 52-crate native source; root verified the exact Linux CI head and successful conclusion. Units is a shared library, not an integration domain."
     }
   },
   "title": "Pinned Home Assistant Core porting inventory"

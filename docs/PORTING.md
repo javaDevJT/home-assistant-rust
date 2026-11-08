@@ -287,10 +287,12 @@ Independent v187 checked all 118 UnitSystem map rows and 6,208 public API
 probes with no mapping errors; only sorted-map versus Python insertion order
 differs. Global unit preferences remain separate work.
 
-v165 now owns only PARITY.md and upstream-parity.json for the local 52-member
-receipt and three platform promotions. Source publication and exact Linux CI
-remain pending; the accepted 48-member receipt stays immutable. Root owns
-staging, publication and the exact-source CI readback. GitHub metadata confirms
+v165 is released after the 52-member receipt and three platform promotions.
+Published source `83aaa07027efe8a233ed441a097b7b566a88f9a6` passes exact-source
+[Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539);
+root verified head, completed status and success. The inventory is 54 partial /
+1,511 unported / zero complete. The accepted 48-member receipt stays immutable.
+Root owns the metadata-only publication follow-up. GitHub metadata confirms
 `javaDevJT/home-assistant-rust` is a fork of `home-assistant/core`, with
 `rust-rewrite` as its default branch.
 
