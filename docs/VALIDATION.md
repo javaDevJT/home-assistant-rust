@@ -25,9 +25,10 @@ empty/null/false/ignored inputs, reject an unknown root key, create no additiona
 files or database and do not echo the ignored fixture secret. Optimized macOS
 binary SHA-256 is
 `8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f`.
-Publication and exact-source Linux CI remain pending. The following 42-crate
-receipt remains the last published and Linux-accepted implementation; future
-isolated sensor SDK work is excluded from this 44-crate candidate.
+Source `90fd6b15e01c176ce2e65ceb992705843da2b089` is published and passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045):
+formatting, strict all-target Clippy, full workspace tests and CLI validation.
+Future isolated sensor SDK work is excluded from this 44-crate receipt.
 
 ## Accepted local external OAuth foundation (42 crates)
 

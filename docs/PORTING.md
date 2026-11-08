@@ -73,9 +73,14 @@ workspace build and seven owned-temp CLI checks pass; binary SHA-256 is
 The first full run exposed an obsolete response expectation and restart's own
 shutdown canceling its reply. Both are corrected; the compiled restart case
 verifies WebSocket and HTTP acknowledgments, in-place exec and persisted state.
-Publication and exact-source Linux CI remain pending. v150 owns only PARITY.md
-and upstream-parity.json for source-preserving Media Player/Spotify partial
-evidence; no domain is declared complete.
+Source `90fd6b15e01c176ce2e65ceb992705843da2b089` is published and passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045)
+including formatting, strict all-target Clippy, full tests and CLI. v150 is
+released; root independently verified all 878 partial-row paths and 546 Rust
+symbols, unchanged source snapshots and unrelated records. Inventory is now
+47 partial / 1,518 unported / zero complete. The sensor SDK wave continues
+outside this receipt; binary SDK is released to root with four isolated cases,
+and root corrected explicit-null extra attributes against the pinned entity helper.
 
 ### OAuth external-flow implementation (2026-11-07)
 

@@ -13124,7 +13124,10 @@
         "crates/hass/src/oauth2.rs#uses_actual_loopback_listener_without_inventing_a_remote_origin",
         "crates/hass/src/oauth2.rs#configured_origin_preserves_prefix_and_external_precedence",
         "crates/hass/src/oauth2.rs#rejects_unsafe_configured_origins_without_echoing_the_input",
-        "docs/OAUTH2-CLIENT-PORT.md"
+        "docs/OAUTH2-CLIENT-PORT.md",
+        "crates/hass/src/spotify/mod.rs",
+        "crates/hass/src/spotify/tests.rs",
+        "crates/hass/src/spotify/tests.rs#native_oauth_entry_setup_refresh_command_and_joined_unload"
       ],
       "manifest": {
         "codeowners": [
@@ -13143,7 +13146,7 @@
       },
       "manifest_blob_oid": "80566448af85ed716be8005bb211c938dfc0dde3",
       "manifest_path": "homeassistant/components/application_credentials/manifest.json",
-      "outstanding_acceptance": "The native host still has no production registered OAuth providers, provider autoloading, or static 54-provider catalog. The config_entry credential lookup requires an actually loaded platform callback, and the app currently registers none. The generic OAuth client and host now implement synthetic-provider code exchange, signed callbacks, private token refresh, reauthentication, owned teardown and external config flows; production provider and full pinned upstream acceptance remain open. Custom opaque implementations and per-request HA-Frontend-Base origin selection remain unsupported. No real-provider activity or secret zeroization guarantee is claimed.",
+      "outstanding_acceptance": "The native application registers Spotify as one provider. Provider autoload, the full static 54-provider catalog, and all other production providers remain open; config_entry lookup still requires a loaded platform callback. Spotify acceptance uses synthetic numeric-loopback fixtures only, with no real account/device traffic or real-provider verification. Custom opaque implementations and per-request HA-Frontend-Base origin selection remain unsupported. No secret zeroization guarantee is claimed.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -84456,7 +84459,45 @@
       "component_directory": "homeassistant/components/media_player/",
       "config_flow_classes": [],
       "domain": "media_player",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-media-player/src/lib.rs",
+        "crates/hass-media-player/src/tests.rs",
+        "crates/hass-media-player/src/tests.rs#pinned_feature_bits_state_values_and_gate_groups_match_contract",
+        "crates/hass-media-player/src/tests.rs#command_parser_validates_required_types_ranges_and_legacy_media_fields",
+        "crates/hass-media-player/src/tests.rs#snapshot_projection_omits_nulls_preserves_position_time_and_capability_gates",
+        "crates/hass-media-player/src/tests.rs#service_schema_rejects_undeclared_fields_and_removes_editor_metadata",
+        "crates/hass-media-player/src/tests.rs#grouping_and_local_picture_preserve_source_null_and_off_rules",
+        "crates/hass-media-player/src/tests.rs#browse_and_search_payloads_match_pinned_tree_serialization",
+        "crates/hass-media-player/src/tests.rs#service_dispatch_preserves_host_context_for_provider_callbacks",
+        "crates/hass-media-player/src/tests.rs#published_unavailable_snapshot_skips_service_and_recovery_restores_dispatch",
+        "crates/hass-media-player/src/tests.rs#provider_owners_target_independently_and_release_only_their_handles",
+        "crates/hass-media-player/src/tests.rs#lifecycle_rename_disable_reenable_and_release_use_current_handle_state",
+        "crates/hass-media-player/src/tests.rs#unload_cancels_snapshot_future_before_stale_state_can_publish",
+        "crates/hass-media-player/src/tests.rs#provider_callback_can_reregister_and_old_weak_lease_cannot_remove_new_owner",
+        "crates/hass-media-player/src/tests.rs#direct_browse_and_search_use_feature_checks_and_typed_results",
+        "crates/hass-media-player/src/tests.rs#browse_service_preserves_runtime_gate_quirk_and_provider_noop",
+        "crates/hass-core/src/lib.rs",
+        "crates/hass-core/src/service_dispatch.rs",
+        "crates/hass-core/src/service_tasks.rs",
+        "crates/hass-api/src/media_player.rs",
+        "crates/hass-api/src/websocket.rs",
+        "crates/hass-api/tests/async_services_protocol.rs",
+        "crates/hass-api/tests/async_services_protocol.rs#http_and_websocket_enforce_response_capabilities_and_keep_envelopes",
+        "crates/hass-api/tests/async_services_protocol.rs#service_authorization_context_and_target_resolution_are_shared",
+        "crates/hass-api/tests/async_services_protocol.rs#api_shutdown_drops_blocked_http_and_websocket_service_futures",
+        "crates/hass-api/tests/async_services_protocol.rs#service_provider_errors_do_not_leak_request_or_provider_details",
+        "crates/hass-api/tests/async_services_protocol.rs#semantic_target_and_user_facing_provider_errors_have_source_error_categories",
+        "crates/hass-api/tests/media_player_protocol.rs",
+        "crates/hass-api/tests/media_player_protocol.rs#browse_and_search_return_pinned_shapes_for_admin_ordinary_and_read_only_users",
+        "crates/hass-api/tests/media_player_protocol.rs#strict_schemas_reject_invalid_fields_types_pairs_and_filters_before_provider_calls",
+        "crates/hass-api/tests/media_player_protocol.rs#missing_entities_feature_errors_and_provider_failures_have_safe_codes",
+        "crates/hass-api/tests/media_player_protocol.rs#renamed_and_disabled_registry_targets_follow_current_entity_lifecycle",
+        "crates/hass-api/tests/media_player_protocol.rs#invalid_auth_is_rejected_and_shutdown_drops_blocked_provider_callback",
+        "crates/hass/src/main.rs",
+        "crates/hass/src/media_player.rs",
+        "crates/hass/tests/media_player_services.rs",
+        "crates/hass/tests/media_player_services.rs#registered_media_services_validate_before_effects_and_preserve_actual_state_context"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -84472,10 +84513,10 @@
       },
       "manifest_blob_oid": "ab17db103a74c16b846e4e9d634beae6a02f50b1",
       "manifest_path": "homeassistant/components/media_player/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "The native media-player SDK, Core async service dispatch, authenticated media browse/search WebSocket endpoints, and app media-service host have focused evidence. Image-proxy and source resolution, frontend UI, intents, device conditions, triggers, reproduce-state, and exhaustive pinned fixtures remain open. The broader workspace checks do not constitute full pinned media_player acceptance.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "15_cloud_http_auth_webhook",
       "protocol_families": [
         "cloud_http_auth_webhook"
@@ -121352,7 +121393,10 @@
       "config_flow_classes": [],
       "domain": "script",
       "local_evidence_paths": [
-        "crates/hass-script/src/lib.rs"
+        "crates/hass-script/src/lib.rs",
+        "crates/hass-script/src/lib.rs#service_response_variables_feed_later_sync_and_async_actions",
+        "crates/hass-script/src/lib.rs#response_capability_mismatches_fail_before_service_effects",
+        "crates/hass-script/src/lib.rs#script_service_returns_stop_response_and_turn_on_rejects_response"
       ],
       "manifest": {
         "codeowners": [
@@ -131112,7 +131156,63 @@
       "component_directory": "homeassistant/components/spotify/",
       "config_flow_classes": [],
       "domain": "spotify",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-spotify/src/lib.rs",
+        "crates/hass-spotify/src/authorization.rs",
+        "crates/hass-spotify/src/authorization.rs#one_shot_authorization_header_is_sensitive_and_not_debuggable",
+        "crates/hass-spotify/src/client.rs",
+        "crates/hass-spotify/src/error.rs",
+        "crates/hass-spotify/src/models.rs",
+        "crates/hass-spotify/tests/http_contract.rs",
+        "crates/hass-spotify/tests/http_contract.rs#profile_playback_devices_and_all_pinned_browse_routes_are_exact",
+        "crates/hass-spotify/tests/http_contract.rs#player_writes_use_exact_methods_queries_bodies_and_accept_204",
+        "crates/hass-spotify/tests/http_contract.rs#initial_external_token_profile_lookup_is_one_shot_and_redacted",
+        "crates/hass-spotify/tests/http_contract.rs#persisted_oauth_session_authorizer_is_sensitive_and_uses_current_token",
+        "crates/hass-spotify/tests/http_contract.rs#playback_204_is_no_state_while_200_null_item_is_present_state",
+        "crates/hass-spotify/tests/http_contract.rs#empty_lists_are_success_but_missing_payload_fields_are_not",
+        "crates/hass-spotify/tests/http_contract.rs#paginated_reads_follow_same_origin_next_and_preserve_all_results",
+        "crates/hass-spotify/tests/http_contract.rs#pagination_limit_incomplete_loop_and_unsafe_origin_are_typed_errors",
+        "crates/hass-spotify/tests/http_contract.rs#status_mapping_retry_after_quota_reason_and_provider_secrets_are_sanitized",
+        "crates/hass-spotify/tests/http_contract.rs#invalid_json_oversized_body_and_timeout_are_not_empty_successes",
+        "crates/hass-spotify/tests/http_contract.rs#oversized_command_request_body_is_rejected_before_transport",
+        "crates/hass-spotify/tests/http_contract.rs#caller_cancellation_drops_the_in_flight_api_request",
+        "crates/hass-spotify/tests/http_contract.rs#credentialed_redirect_is_not_forwarded",
+        "crates/hass-spotify/tests/http_contract.rs#injected_bases_require_https_or_literal_loopback_http",
+        "crates/hass/src/main.rs",
+        "crates/hass/src/spotify/mod.rs",
+        "crates/hass/src/spotify/account.rs",
+        "crates/hass/src/spotify/account.rs#new_link_prefers_current_identifier_and_stores_only_needed_profile_fields",
+        "crates/hass/src/spotify/account.rs#reauthentication_preserves_legacy_identity_and_rejects_a_different_account",
+        "crates/hass/src/spotify/account.rs#duplicate_checks_both_known_identifiers_and_preserves_current_identity",
+        "crates/hass/src/spotify/browse.rs",
+        "crates/hass/src/spotify/browse.rs#root_and_library_are_local_and_keep_link_hierarchy",
+        "crates/hass/src/spotify/browse.rs#all_pinned_collection_and_detail_branches_use_current_get_routes",
+        "crates/hass/src/spotify/browse.rs#missing_legacy_profile_id_keeps_saved_tracks_browsable_but_not_playable",
+        "crates/hass/src/spotify/browse.rs#incomplete_or_unsafe_pagination_errors_are_not_returned_as_partial_trees",
+        "crates/hass/src/spotify/browse.rs#malformed_or_unknown_ids_fail_before_authorization_or_http",
+        "crates/hass/src/spotify/control.rs",
+        "crates/hass/src/spotify/control.rs#browser_wrapper_uses_once_decoded_final_segment",
+        "crates/hass/src/spotify/control.rs#maps_advertised_commands_and_all_play_media_targets_to_exact_requests",
+        "crates/hass/src/spotify/control.rs#unsupported_source_and_media_commands_are_noops_or_typed_errors_without_http",
+        "crates/hass/src/spotify/player.rs",
+        "crates/hass/src/spotify/tests.rs",
+        "crates/hass/src/spotify/tests.rs#native_oauth_entry_setup_refresh_command_and_joined_unload",
+        "crates/hass/src/spotify/tests.rs#shutdown_cancels_and_joins_held_periodic_playback_request",
+        "crates/hass/src/spotify/tests.rs#canceled_shutdown_keeps_cleanup_running_after_held_poll",
+        "crates/hass/src/spotify/tests.rs#canceled_start_joins_restoration_and_releases_provider",
+        "crates/hass/src/spotify/tests.rs#post_authorize_profile_failure_does_not_create_a_loaded_player",
+        "crates/hass/src/spotify/tests.rs#unauthorized_setup_is_a_nonfatal_auth_retry",
+        "crates/hass/src/spotify/tests.rs#due_setup_retry_is_retried_by_the_spotify_scheduler",
+        "crates/hass/src/spotify/tests.rs#abandoned_reauth_flow_allows_a_later_unauthorized_retry",
+        "crates/hass/src/spotify/tests.rs#changed_playlist_unauthorized_refresh_marks_player_unavailable_once",
+        "crates/hass/src/spotify_projection.rs",
+        "crates/hass/src/spotify_projection.rs#track_projection_maps_metadata_volume_repeat_sorting_and_round_ties",
+        "crates/hass/src/spotify_projection.rs#episode_projection_uses_show_fallback_and_maps_repeat_values",
+        "crates/hass/src/spotify_projection.rs#successful_no_playback_is_idle_and_has_source_list_only_control",
+        "crates/hass/src/spotify_projection.rs#nonpremium_and_unknown_entitlement_advertise_no_controls",
+        "crates/hass/src/spotify_projection.rs#restricted_or_unknown_device_restricts_premium_controls",
+        "crates/hass/src/spotify_projection.rs#nullable_and_unknown_items_keep_only_known_metadata"
+      ],
       "manifest": {
         "categories": [
           "media_entertainment.music_radio_services"
@@ -131142,7 +131242,7 @@
       },
       "manifest_blob_oid": "9741d2a7ed687dc73359bfdf9e139454888e7803",
       "manifest_path": "homeassistant/components/spotify/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "The native application registers Spotify and focused synthetic-loopback evidence covers its OAuth/session lifecycle, account identity, player projection, supported controls, and browse routes. Spotify diagnostics and system-health surfaces, provider policy, product/alias migration, device-auth failure behavior, full pinned fixtures, and real-provider verification remain open. No real Spotify account or device traffic has been used.",
       "platform_expressions": [
         {
           "path": "__init__.py",
@@ -131154,7 +131254,7 @@
       "platforms_static": [
         "media_player"
       ],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "15_cloud_http_auth_webhook",
       "protocol_families": [
         "cloud_http_auth_webhook"
@@ -168840,9 +168940,18 @@
           },
           {
             "path": "docs/OAUTH2-CLIENT-PORT.md"
+          },
+          {
+            "path": "crates/hass/src/spotify/mod.rs"
+          },
+          {
+            "path": "crates/hass/src/spotify/tests.rs",
+            "test_functions_present": [
+              "native_oauth_entry_setup_refresh_command_and_joined_unload"
+            ]
           }
         ],
-        "remaining": "The native host still has no production registered OAuth providers, provider autoloading, or static 54-provider catalog. The config_entry credential lookup requires an actually loaded platform callback, and the app currently registers none. The generic OAuth client and host now implement synthetic-provider code exchange, signed callbacks, private token refresh, reauthentication, owned teardown and external config flows; production provider and full pinned upstream acceptance remain open. Custom opaque implementations and per-request HA-Frontend-Base origin selection remain unsupported. No real-provider activity or secret zeroization guarantee is claimed.",
+        "remaining": "The native application registers Spotify as one provider. Provider autoload, the full static 54-provider catalog, and all other production providers remain open; config_entry lookup still requires a loaded platform callback. Spotify acceptance uses synthetic numeric-loopback fixtures only, with no real account/device traffic or real-provider verification. Custom opaque implementations and per-request HA-Frontend-Base origin selection remain unsupported. No secret zeroization guarantee is claimed.",
         "status": "partial",
         "verification": "Root's final exact-source 40-crate gate passes 998 tests across 114 targets (0 failed, 0 ignored), formatting, strict locked offline all-target Clippy and the optimized workspace build. Focused evidence is 12 SDK tests, five slug tests, nine API protocol tests, one YAML configuration test, and one compiled-process restart test. SDK evidence covers owned/weak handles, loaded-provider callbacks/catalog, persistence-before-events and failure atomicity, temporary SQLite reopen, stable IDs and import-alias in-use guards. API evidence covers schema validation before authorization, subscription lifecycle/revocation, overflow, and the shared limit. Seven optimized CLI cases pass without database/extra-file creation or ignored-secret echo. Optimized macOS SHA-256 is 6a517d876da5d337f80f8656e91ddb29b6a1f4f3a0604178db097c448bb17d57. Source d9025ac2860539d05752990723d6b138f5c606a2 passes exact Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42398882199 (formatting, strict all-target Clippy, all tests and CLI validation). No production OAuth provider, external code exchange, or real-provider activity is claimed; the inventory writer did not run tests. The next 42-crate OAuth extension has focused native evidence: 30 client cases, 39 Core library plus four public-API lifecycle cases, one host unit plus 18 loopback integration cases, eight HTTP callback cases, three callback-origin cases, preserved legacy HTTP/subentry protocols, and the compiled credentials restart/SIGTERM case with public callback error checks. The final 42-crate workspace passes 1,070 tests across 121 targets (zero failed or ignored), including 148 app-bin and 20 process cases. Strict all-target locked offline Clippy, formatting, optimized build and seven optimized CLI checks pass. Its macOS binary SHA-256 is 3f812bd98da78ad8d115a6f44e8ab6a96d03d654f7fc7311da3c078acddb9747. Source eefd57e453c74229ad6f53fb02ab9f9734f424a0 is published and passes exact Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42415440469 (formatting, strict all-target Clippy, full tests and CLI)."
       },
@@ -169672,6 +169781,83 @@
         "verification": "Published revision 216bb1f1271e8f2cf7dd6ae4c4161cda4df34bff records 517 tests/66 targets for 25 crates. The current 27-crate tree passes formatting, strict Clippy and 578 tests/71 targets, including all 16 logger cases: dynamic LogTracer targets/regex, critical severity, original span/event/TRACE fields and transport-only context under independent logger thresholds. Release/CLI and exact CI receipts remain separate. This inventory writer did not run tests."
       },
       {
+        "domain": "media_player",
+        "local_evidence": [
+          {
+            "path": "crates/hass-media-player/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-media-player/src/tests.rs",
+            "test_functions_present": [
+              "pinned_feature_bits_state_values_and_gate_groups_match_contract",
+              "command_parser_validates_required_types_ranges_and_legacy_media_fields",
+              "snapshot_projection_omits_nulls_preserves_position_time_and_capability_gates",
+              "service_schema_rejects_undeclared_fields_and_removes_editor_metadata",
+              "grouping_and_local_picture_preserve_source_null_and_off_rules",
+              "browse_and_search_payloads_match_pinned_tree_serialization",
+              "service_dispatch_preserves_host_context_for_provider_callbacks",
+              "published_unavailable_snapshot_skips_service_and_recovery_restores_dispatch",
+              "provider_owners_target_independently_and_release_only_their_handles",
+              "lifecycle_rename_disable_reenable_and_release_use_current_handle_state",
+              "unload_cancels_snapshot_future_before_stale_state_can_publish",
+              "provider_callback_can_reregister_and_old_weak_lease_cannot_remove_new_owner",
+              "direct_browse_and_search_use_feature_checks_and_typed_results",
+              "browse_service_preserves_runtime_gate_quirk_and_provider_noop"
+            ]
+          },
+          {
+            "path": "crates/hass-core/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-core/src/service_dispatch.rs"
+          },
+          {
+            "path": "crates/hass-core/src/service_tasks.rs"
+          },
+          {
+            "path": "crates/hass-api/src/media_player.rs"
+          },
+          {
+            "path": "crates/hass-api/src/websocket.rs"
+          },
+          {
+            "path": "crates/hass-api/tests/async_services_protocol.rs",
+            "test_functions_present": [
+              "http_and_websocket_enforce_response_capabilities_and_keep_envelopes",
+              "service_authorization_context_and_target_resolution_are_shared",
+              "api_shutdown_drops_blocked_http_and_websocket_service_futures",
+              "service_provider_errors_do_not_leak_request_or_provider_details",
+              "semantic_target_and_user_facing_provider_errors_have_source_error_categories"
+            ]
+          },
+          {
+            "path": "crates/hass-api/tests/media_player_protocol.rs",
+            "test_functions_present": [
+              "browse_and_search_return_pinned_shapes_for_admin_ordinary_and_read_only_users",
+              "strict_schemas_reject_invalid_fields_types_pairs_and_filters_before_provider_calls",
+              "missing_entities_feature_errors_and_provider_failures_have_safe_codes",
+              "renamed_and_disabled_registry_targets_follow_current_entity_lifecycle",
+              "invalid_auth_is_rejected_and_shutdown_drops_blocked_provider_callback"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/src/media_player.rs"
+          },
+          {
+            "path": "crates/hass/tests/media_player_services.rs",
+            "test_functions_present": [
+              "registered_media_services_validate_before_effects_and_preserve_actual_state_context"
+            ]
+          }
+        ],
+        "remaining": "Image-proxy and source resolution, frontend UI, intents, device conditions, triggers, reproduce-state, and exhaustive pinned media_player fixtures remain open.",
+        "status": "partial",
+        "verification": "Root reports the 44-crate local workspace run passed 1,158 tests across 129 targets (zero failures or ignored cases), including 14 media-player SDK tests, five async-service API tests, five media-player WebSocket tests, and one app media-service case. Strict all-target Clippy, formatting, the optimized build, and seven optimized CLI checks pass; optimized macOS candidate binary SHA-256 is 8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f. This inventory writer did not run tests; published source 90fd6b15e01c176ce2e65ceb992705843da2b089 passes exact-source Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045 (formatting, strict all-target Clippy, full tests and CLI)."
+      },
+      {
         "domain": "mqtt",
         "local_evidence": [
           {
@@ -170054,7 +170240,7 @@
         "domain": "script",
         "local_evidence": [
           {
-            "line_count": 2574,
+            "line_count": 4939,
             "path": "crates/hass-script/src/lib.rs",
             "public_functions": [
               "validate_config",
@@ -170064,13 +170250,121 @@
               "run_sequence"
             ],
             "test_functions_present": [
-              "script_choose_conditions_evaluate_legacy_and_registry_sun_conditions"
+              "script_choose_conditions_evaluate_legacy_and_registry_sun_conditions",
+              "service_response_variables_feed_later_sync_and_async_actions",
+              "response_capability_mismatches_fail_before_service_effects",
+              "script_service_returns_stop_response_and_turn_on_rejects_response"
             ]
           }
         ],
         "remaining": "Native legacy and registry-backed Sun conditions have focused script tests, but only a subset of the script integration is implemented. Upstream sequencing, modes, cancellation, tracing, UI/config flow, full Sun feature review, and exhaustive pinned fixtures remain open.",
         "status": "partial",
-        "verification": "Root reports 8 current-worktree script cases passing; this inventory writer did not run tests. Full script and Sun feature acceptance remain open."
+        "verification": "Root reports 18 hass-script cases passed in the 44-crate local workspace run; strict all-target Clippy and formatting also pass. Root reports 1,158 tests across 129 targets (zero failures or ignored cases) in the 44-crate local workspace run, plus strict all-target Clippy, formatting, optimized build, and seven optimized CLI checks. Optimized macOS binary SHA-256 is 8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f. Published source 90fd6b15e01c176ce2e65ceb992705843da2b089 passes exact-source Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045 (formatting, strict all-target Clippy, full tests and CLI); this inventory writer did not run tests. Full script and Sun feature acceptance remain open."
+      },
+      {
+        "domain": "spotify",
+        "local_evidence": [
+          {
+            "path": "crates/hass-spotify/src/lib.rs"
+          },
+          {
+            "path": "crates/hass-spotify/src/authorization.rs",
+            "test_functions_present": [
+              "one_shot_authorization_header_is_sensitive_and_not_debuggable"
+            ]
+          },
+          {
+            "path": "crates/hass-spotify/src/client.rs"
+          },
+          {
+            "path": "crates/hass-spotify/src/error.rs"
+          },
+          {
+            "path": "crates/hass-spotify/src/models.rs"
+          },
+          {
+            "path": "crates/hass-spotify/tests/http_contract.rs",
+            "test_functions_present": [
+              "profile_playback_devices_and_all_pinned_browse_routes_are_exact",
+              "player_writes_use_exact_methods_queries_bodies_and_accept_204",
+              "initial_external_token_profile_lookup_is_one_shot_and_redacted",
+              "persisted_oauth_session_authorizer_is_sensitive_and_uses_current_token",
+              "playback_204_is_no_state_while_200_null_item_is_present_state",
+              "empty_lists_are_success_but_missing_payload_fields_are_not",
+              "paginated_reads_follow_same_origin_next_and_preserve_all_results",
+              "pagination_limit_incomplete_loop_and_unsafe_origin_are_typed_errors",
+              "status_mapping_retry_after_quota_reason_and_provider_secrets_are_sanitized",
+              "invalid_json_oversized_body_and_timeout_are_not_empty_successes",
+              "oversized_command_request_body_is_rejected_before_transport",
+              "caller_cancellation_drops_the_in_flight_api_request",
+              "credentialed_redirect_is_not_forwarded",
+              "injected_bases_require_https_or_literal_loopback_http"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs"
+          },
+          {
+            "path": "crates/hass/src/spotify/mod.rs"
+          },
+          {
+            "path": "crates/hass/src/spotify/account.rs",
+            "test_functions_present": [
+              "new_link_prefers_current_identifier_and_stores_only_needed_profile_fields",
+              "reauthentication_preserves_legacy_identity_and_rejects_a_different_account",
+              "duplicate_checks_both_known_identifiers_and_preserves_current_identity"
+            ]
+          },
+          {
+            "path": "crates/hass/src/spotify/browse.rs",
+            "test_functions_present": [
+              "root_and_library_are_local_and_keep_link_hierarchy",
+              "all_pinned_collection_and_detail_branches_use_current_get_routes",
+              "missing_legacy_profile_id_keeps_saved_tracks_browsable_but_not_playable",
+              "incomplete_or_unsafe_pagination_errors_are_not_returned_as_partial_trees",
+              "malformed_or_unknown_ids_fail_before_authorization_or_http"
+            ]
+          },
+          {
+            "path": "crates/hass/src/spotify/control.rs",
+            "test_functions_present": [
+              "browser_wrapper_uses_once_decoded_final_segment",
+              "maps_advertised_commands_and_all_play_media_targets_to_exact_requests",
+              "unsupported_source_and_media_commands_are_noops_or_typed_errors_without_http"
+            ]
+          },
+          {
+            "path": "crates/hass/src/spotify/player.rs"
+          },
+          {
+            "path": "crates/hass/src/spotify/tests.rs",
+            "test_functions_present": [
+              "native_oauth_entry_setup_refresh_command_and_joined_unload",
+              "shutdown_cancels_and_joins_held_periodic_playback_request",
+              "canceled_shutdown_keeps_cleanup_running_after_held_poll",
+              "canceled_start_joins_restoration_and_releases_provider",
+              "post_authorize_profile_failure_does_not_create_a_loaded_player",
+              "unauthorized_setup_is_a_nonfatal_auth_retry",
+              "due_setup_retry_is_retried_by_the_spotify_scheduler",
+              "abandoned_reauth_flow_allows_a_later_unauthorized_retry",
+              "changed_playlist_unauthorized_refresh_marks_player_unavailable_once"
+            ]
+          },
+          {
+            "path": "crates/hass/src/spotify_projection.rs",
+            "test_functions_present": [
+              "track_projection_maps_metadata_volume_repeat_sorting_and_round_ties",
+              "episode_projection_uses_show_fallback_and_maps_repeat_values",
+              "successful_no_playback_is_idle_and_has_source_list_only_control",
+              "nonpremium_and_unknown_entitlement_advertise_no_controls",
+              "restricted_or_unknown_device_restricts_premium_controls",
+              "nullable_and_unknown_items_keep_only_known_metadata"
+            ]
+          }
+        ],
+        "remaining": "Spotify diagnostics and system-health surfaces, provider policy, product/alias migration, device-auth failure behavior, full pinned fixtures, and real-provider verification remain open. No real Spotify account or device traffic has been used.",
+        "status": "partial",
+        "verification": "Root reports the 44-crate local workspace run passed 1,158 tests across 129 targets (zero failures or ignored cases), strict all-target Clippy, formatting, the optimized build, and seven optimized CLI checks; optimized candidate SHA-256 is 8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f. Focused evidence includes one wire unit test, 14 wire contract tests, nine account/projection tests, three control tests, five browse tests, and nine Spotify runtime tests using synthetic numeric-loopback fixtures. No real Spotify account or device traffic was used. This inventory writer did not run tests; published source 90fd6b15e01c176ce2e65ceb992705843da2b089 passes exact-source Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045 (formatting, strict all-target Clippy, full tests and CLI)."
       },
       {
         "domain": "ssdp",
@@ -171083,10 +171377,10 @@
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
       }
     ],
-    "partial": 45,
+    "partial": 47,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1520
+    "unported": 1518
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }
