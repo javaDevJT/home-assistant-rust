@@ -184,3 +184,23 @@ no missing, incorrect or extra results. Lookup, normalization, custom-map
 replacement and `None` keys also matched. The native `as_dict` uses a sorted
 `BTreeMap`; its iteration order differs from Python's insertion order, while
 the serialized object keys and values match.
+
+## Candidate 53 runtime and persistence adoption
+
+`Runtime::unit_system` shares a canonical `UnitSystemKind` across runtime
+clones, while a fresh runtime begins in metric. Config applies persisted
+selections only after durable writes succeed, then emits its existing
+`core_config_updated` event. Startup restores the same setting before native
+providers are restored. Legacy eight-field records with `name: imperial`
+remain readable and retain their stored representation; new records use
+`us_customary`. API dictionaries use the SDK's eight source keys, including
+`area`, without a `name` field. Accepting that dictionary as update input is a
+native extension; source commands select the system by normalized string.
+
+The focused config suite covers legacy restoration, canonical API bundles,
+invalid mixed bundles and write failure before runtime mutation. Core's four
+unit/diagnostic integration cases cover runtime isolation and request-local
+warning claims across provider groups, polls, nested blocking calls and
+canceled pending calls. Read-only review found no correctness issue in those
+boundaries. These focused checks do not substitute for candidate 53's pending
+MQTT unit reprojection, compiled-process and full-workspace acceptance.

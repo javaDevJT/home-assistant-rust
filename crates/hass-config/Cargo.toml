@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 hass-core.workspace = true
+hass-units.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

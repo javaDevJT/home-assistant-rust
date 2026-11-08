@@ -4,20 +4,28 @@
 //! Behavior is pinned to Home Assistant Core commit
 //! `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf`. This crate covers the light
 //! color-mode contract, capability metadata, state attributes, common color
-//! conversions, and the standard `turn_on`, `turn_off`, and `toggle` service
-//! vocabulary. Profile lookup and the full CSS color-name table remain
-//! integration-owned and are not synthesized here.
+//! conversions, named colors, pure profile CSV parsing, and the standard
+//! `turn_on`, `turn_off`, and `toggle` service vocabulary. Hosts own profile
+//! file IO, catalog readiness, registry entity IDs, diagnostics and provider
+//! execution.
 
 mod color;
+mod named_colors;
+mod profiles;
 mod service;
 
 pub use color::{
     hs_to_rgb, kelvin_to_rgb, kelvin_to_rgbww, rgb_to_hs, rgb_to_rgbw, rgb_to_rgbww, rgb_to_xy,
     rgbw_to_rgb, rgbww_to_rgb, xy_to_kelvin, xy_to_rgb,
 };
+pub use named_colors::color_name_to_rgb;
+pub use profiles::{
+    BUILT_IN_LIGHT_PROFILES_CSV, LightProfile, LightProfileCatalog, LightProfileParseIssue,
+};
 pub use service::{
     LIGHT_SERVICE_ARGUMENTS, LIGHT_TARGET_FIELDS, LIGHT_TURN_OFF_ARGUMENTS,
-    LIGHT_TURN_ON_ARGUMENTS, LightAction, LightCommand, LightServiceError, LightServiceRequest,
+    LIGHT_TURN_ON_ARGUMENTS, LIGHT_UNKNOWN_COLOR_NAME_DIAGNOSTIC, LightAction, LightCommand,
+    LightNormalizationContext, LightServiceDiagnostic, LightServiceError, LightServiceRequest,
     NormalizedLightCommand,
 };
 

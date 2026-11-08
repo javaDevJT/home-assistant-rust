@@ -15,6 +15,7 @@ pub fn catalog() -> IntegrationCatalog {
         ("binary_sensor", &["hass_binary_sensor"]),
         ("button", &["hass_button"]),
         ("automation", &["hass_automation"]),
+        ("climate", &["hass_climate"]),
         ("config", &["hass_config"]),
         ("cover", &["hass_cover"]),
         ("counter", &["hass::helpers::counter"]),
@@ -222,12 +223,12 @@ mod tests {
         loaded.record_successful_component("media_player");
         assert!((provider)().contains_key("media_player"));
 
-        for domain in ["button", "cover", "fan", "light", "switch"] {
+        for domain in ["button", "climate", "cover", "fan", "light", "switch"] {
             loaded.record_successful_component(domain);
         }
         let loaded_catalog = (provider)();
         let full_catalog = catalog();
-        for domain in ["button", "cover", "fan", "light", "switch"] {
+        for domain in ["button", "climate", "cover", "fan", "light", "switch"] {
             assert!(loaded_catalog.contains_key(domain));
             assert_eq!(
                 full_catalog.get(domain).unwrap().as_slice(),

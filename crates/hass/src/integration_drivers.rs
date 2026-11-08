@@ -7,6 +7,7 @@ use hass_config::{
     ConfigFlowResult, SetupOutcome,
 };
 use hass_core::{Error as CoreError, Runtime};
+use hass_light::LightProfileCatalog;
 use hass_mqtt::{MqttConfig, MqttEntityMetadata, MqttIntegration};
 #[cfg(test)]
 use hass_registry::EntityUpdate;
@@ -53,6 +54,7 @@ struct DriverState {
     entries: Weak<ConfigEntries>,
     registries: Registries,
     entity_lifecycle: Option<hass_entity::EntityLifecycle>,
+    light_profiles: Arc<LightProfileCatalog>,
     closed: AtomicBool,
     handle: Handle,
     mqtt_topics: Vec<String>,
@@ -75,17 +77,27 @@ impl NativeDrivers {
         mqtt_topics: Vec<String>,
         yaml_mqtt: Option<MqttConfig>,
     ) -> Result<Self> {
-        Self::start_inner(runtime, entries, registries, mqtt_topics, yaml_mqtt, None).await
+        Self::start_inner(
+            runtime,
+            entries,
+            registries,
+            mqtt_topics,
+            yaml_mqtt,
+            None,
+            Arc::new(LightProfileCatalog::built_in()),
+        )
+        .await
     }
 
-    /// Use the application's existing lifecycle for SDK-backed MQTT entities.
-    pub async fn start_with_entity_lifecycle(
+    /// Restore providers only after the host's profile catalog is ready.
+    pub async fn start_with_entity_lifecycle_and_profiles(
         runtime: Runtime,
         entries: ConfigEntries,
         registries: Registries,
         mqtt_topics: Vec<String>,
         yaml_mqtt: Option<MqttConfig>,
         lifecycle: hass_entity::EntityLifecycle,
+        light_profiles: Arc<LightProfileCatalog>,
     ) -> Result<Self> {
         Self::start_inner(
             runtime,
@@ -94,6 +106,7 @@ impl NativeDrivers {
             mqtt_topics,
             yaml_mqtt,
             Some(lifecycle),
+            light_profiles,
         )
         .await
     }
@@ -105,6 +118,7 @@ impl NativeDrivers {
         mqtt_topics: Vec<String>,
         yaml_mqtt: Option<MqttConfig>,
         entity_lifecycle: Option<hass_entity::EntityLifecycle>,
+        light_profiles: Arc<LightProfileCatalog>,
     ) -> Result<Self> {
         // The runtime parameter is part of the public startup contract; config
         // entries carry the same clone into each synchronous driver callback.
@@ -114,6 +128,7 @@ impl NativeDrivers {
             entries: Arc::downgrade(&entries),
             registries,
             entity_lifecycle,
+            light_profiles,
             closed: AtomicBool::new(false),
             handle: Handle::current(),
             mqtt_topics,
@@ -401,12 +416,13 @@ impl ConfigEntryDriver for MqttConfigEntryDriver {
 
         let integration = match self.state.handle.block_on(async {
             if let Some(lifecycle) = &self.state.entity_lifecycle {
-                MqttIntegration::start_with_entity_lifecycle(
+                MqttIntegration::start_with_entity_lifecycle_and_profiles(
                     runtime.clone(),
                     config.clone(),
                     lifecycle.clone(),
                     self.state.registries.clone(),
                     &entry.entry_id,
+                    Arc::clone(&self.state.light_profiles),
                 )
                 .await
             } else {

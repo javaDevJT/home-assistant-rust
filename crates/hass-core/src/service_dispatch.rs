@@ -1,16 +1,19 @@
 //! Shared sync and async service preparation and dispatch.
 
+use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
 use crate::service_tasks;
 use crate::{
     Context, Error, OwnedServiceCall, Result, Runtime, ServiceCall, ServiceCallRequest,
-    ServiceExecutionScope, ServiceExecutionScopeGuard, ServiceHandlerKind, ServiceRegistrations,
-    ServiceResponseSupport, ServiceResult, ServiceTargetAuthorizer, active_service_execution_scope,
-    entity_domain, parse_service_target, validate_component, validate_entity_id,
+    ServiceDiagnosticClaims, ServiceExecutionScope, ServiceExecutionScopeGuard, ServiceHandlerKind,
+    ServiceRegistrations, ServiceResponseSupport, ServiceResult, ServiceTargetAuthorizer,
+    active_service_execution_scope, enter_service_diagnostic_claims, entity_domain,
+    parse_service_target, validate_component, validate_entity_id,
 };
 
 impl Runtime {
@@ -46,8 +49,10 @@ impl Runtime {
 
     /// Invoke a registered service without holding the registry lock.
     pub fn call_service(&self, call: ServiceCall) -> Result<ServiceResult> {
+        let scope = service_call_execution_scope(None);
         let registrations = self.snapshot_service_registrations(&call.domain, &call.service)?;
         let prepared = self.prepare_service_call(call, registrations, None)?;
+        let _scope = ServiceExecutionScopeGuard::enter(&scope);
         self.invoke_prepared_service_sync(prepared)
     }
 
@@ -61,14 +66,18 @@ impl Runtime {
     /// result waiter is dropped. Explicitly cancel it through its cancellation
     /// handle, or join it with [`OwnedServiceCall::result`].
     pub fn spawn_service_call_async(&self, call: ServiceCall) -> Result<OwnedServiceCall> {
-        let scope = active_service_execution_scope();
+        let scope = service_call_execution_scope(active_service_execution_scope());
         let registrations = self.snapshot_service_registrations(&call.domain, &call.service)?;
         let prepared = self.prepare_service_call(call, registrations, None)?;
         let handle = tokio::runtime::Handle::try_current().map_err(|_| {
             Error::Service("owned async service calls require an active Tokio runtime".to_owned())
         })?;
         let runtime = self.clone();
-        let work = async move { runtime.invoke_prepared_service_async(prepared, scope).await };
+        let work = async move {
+            runtime
+                .invoke_prepared_service_async(prepared, Some(scope))
+                .await
+        };
         self.inner.service_tasks.spawn_async(&handle, work)
     }
 
@@ -108,6 +117,7 @@ impl Runtime {
         request: ServiceCallRequest,
         scope: Option<ServiceExecutionScope>,
     ) -> Result<ServiceResult> {
+        let scope = service_call_execution_scope(scope);
         let registrations =
             self.snapshot_service_registrations(&request.call.domain, &request.call.service)?;
         match (registrations.response_support(), request.return_response) {
@@ -127,7 +137,9 @@ impl Runtime {
         }
         let prepared =
             self.prepare_service_call(request.call, registrations, request.authorize_targets)?;
-        let mut result = self.invoke_prepared_service_async(prepared, scope).await?;
+        let mut result = self
+            .invoke_prepared_service_async(prepared, Some(scope))
+            .await?;
         if !request.return_response {
             result.response = None;
         }
@@ -145,9 +157,11 @@ impl Runtime {
         call: ServiceCall,
         scope: Option<ServiceExecutionScope>,
     ) -> Result<ServiceResult> {
+        let scope = service_call_execution_scope(scope);
         let registrations = self.snapshot_service_registrations(&call.domain, &call.service)?;
         let prepared = self.prepare_service_call(call, registrations, None)?;
-        self.invoke_prepared_service_async(prepared, scope).await
+        self.invoke_prepared_service_async(prepared, Some(scope))
+            .await
     }
 
     fn snapshot_service_registrations(
@@ -187,6 +201,28 @@ impl Runtime {
         }
         Ok(ServiceRegistrations { legacy, providers })
     }
+}
+
+fn service_call_execution_scope(scope: Option<ServiceExecutionScope>) -> ServiceExecutionScope {
+    let inherited_scope = scope.or_else(active_service_execution_scope);
+    let claims: ServiceDiagnosticClaims = Arc::new(Mutex::new(BTreeSet::new()));
+    Arc::new(move || {
+        let inherited_scope_guard = inherited_scope
+            .as_ref()
+            .map(ServiceExecutionScopeGuard::enter);
+        let diagnostic_scope_guard = enter_service_diagnostic_claims(Arc::clone(&claims));
+        Box::new(ServiceCallExecutionScopeGuard {
+            _inherited_scope_guard: inherited_scope_guard,
+            _diagnostic_scope_guard: diagnostic_scope_guard,
+        }) as Box<dyn Any + Send>
+    })
+}
+
+struct ServiceCallExecutionScopeGuard {
+    // Drop inherited scope callbacks before restoring the previous diagnostic
+    // set, while keeping diagnostics active during callback teardown.
+    _inherited_scope_guard: Option<ServiceExecutionScopeGuard>,
+    _diagnostic_scope_guard: Box<dyn Any + Send>,
 }
 
 impl Runtime {

@@ -3,6 +3,9 @@
 use crate::helpers::Helpers;
 use anyhow::{Context, Result, bail};
 use hass_automation::Automation;
+#[cfg(test)]
+use hass_units::UnitSystemKind;
+use hass_units::validate_unit_system;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, net::IpAddr, path::Path};
@@ -361,6 +364,9 @@ impl Config {
         config.usb_enabled = usb_enabled;
         config.hardware_enabled = hardware_enabled;
         config.application_credentials_enabled = application_credentials_enabled;
+        if let Ok(kind) = validate_unit_system(&config.homeassistant.unit_system) {
+            config.homeassistant.unit_system = kind.as_str().into();
+        }
         config.validate()?;
         Ok(config)
     }
@@ -391,9 +397,11 @@ impl Config {
         home.time_zone
             .parse::<chrono_tz::Tz>()
             .context("unknown IANA time zone")?;
-        if !matches!(home.unit_system.as_str(), "metric" | "imperial") {
-            bail!("unit_system must be metric or imperial");
-        }
+        validate_unit_system(&home.unit_system).map_err(|_| {
+            anyhow::anyhow!(
+                "homeassistant.unit_system must be metric or us_customary (imperial is a deprecated alias)"
+            )
+        })?;
         if self.recorder.db_path.trim().is_empty() || self.recorder.db_path == ":memory:" {
             bail!("recorder.db_path must be a persistent filesystem path");
         }
@@ -482,11 +490,9 @@ impl Config {
     }
 
     pub fn api_config(&self) -> Value {
-        let units = if self.homeassistant.unit_system == "metric" {
-            json!({"length":"km", "mass":"g", "temperature":"°C", "volume":"L", "pressure":"Pa", "wind_speed":"m/s", "accumulated_precipitation":"mm"})
-        } else {
-            json!({"length":"mi", "mass":"lb", "temperature":"°F", "volume":"gal", "pressure":"psi", "wind_speed":"mph", "accumulated_precipitation":"in"})
-        };
+        let unit_system = validate_unit_system(&self.homeassistant.unit_system)
+            .expect("HomeConfig unit system is validated during configuration parsing");
+        let units = json!(unit_system.unit_system().as_dict());
         let mut components = vec![
             "api",
             "websocket_api",
@@ -1079,6 +1085,35 @@ mod tests {
         ] {
             assert!(Config::parse(source).is_err(), "{source}");
         }
+    }
+
+    #[test]
+    fn homeassistant_unit_system_accepts_source_keys_and_serializes_the_canonical_bundle() {
+        for (setting, expected) in [
+            ("metric", UnitSystemKind::Metric),
+            ("us_customary", UnitSystemKind::UsCustomary),
+            ("US_CUSTOMARY", UnitSystemKind::UsCustomary),
+            ("imperial", UnitSystemKind::UsCustomary),
+            ("IMPERIAL", UnitSystemKind::UsCustomary),
+        ] {
+            let config =
+                Config::parse(&format!("homeassistant:\n  unit_system: {setting}\n")).unwrap();
+            assert_eq!(
+                config.homeassistant.unit_system,
+                expected.as_str(),
+                "{setting}"
+            );
+
+            let public_config = config.api_config();
+            let units = &public_config["unit_system"];
+            assert_eq!(*units, json!(expected.unit_system().as_dict()), "{setting}");
+            let units = units.as_object().unwrap();
+            assert_eq!(units.len(), 8, "{setting}");
+            assert!(units.contains_key("area"), "{setting}");
+            assert!(!units.contains_key("name"), "{setting}");
+        }
+
+        assert!(Config::parse("homeassistant:\n  unit_system: mars\n").is_err());
     }
 
     #[test]

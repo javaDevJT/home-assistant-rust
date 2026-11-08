@@ -8,6 +8,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio},
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
@@ -29,10 +30,15 @@ const RENAMED_ENTITY_ID: &str = "switch.compiled_process_heater";
 const BUTTON_DISCOVERY_TOPIC: &str = "homeassistant/button/process/device/config";
 const BUTTON_COMMAND_TOPIC: &str = "process/device/press";
 const BUTTON_ENTITY_ID: &str = "button.compiled_device_button";
-const MANAGED_PLATFORMS: [(&str, &str, &str); 3] = [
+const MANAGED_PLATFORMS: [(&str, &str, &str); 4] = [
     ("light.compiled_light", "compiled-process-light", "on"),
     ("cover.compiled_cover", "compiled-process-cover", "closed"),
     ("fan.compiled_fan", "compiled-process-fan", "off"),
+    (
+        "climate.compiled_climate",
+        "compiled-process-climate",
+        "heat",
+    ),
 ];
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
@@ -474,7 +480,8 @@ struct Server {
     child: Child,
     url: String,
     client: Client,
-    _stdout: JoinHandle<()>,
+    logs: Arc<Mutex<Vec<String>>>,
+    stdout_task: JoinHandle<()>,
 }
 
 impl Server {
@@ -488,15 +495,17 @@ impl Server {
             .arg("0")
             .env("HASS_TOKEN", TOKEN)
             .env_remove("HASS_TOKEN_FILE")
-            .env("RUST_LOG", "hass=info")
+            .env("RUST_LOG", "hass=info,hass_mqtt=warn")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
             .expect("compiled hass process should start");
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        let logs = Arc::new(Mutex::new(Vec::new()));
         let port = tokio::time::timeout(Duration::from_secs(20), async {
             while let Some(line) = lines.next_line().await.unwrap() {
+                logs.lock().unwrap().push(line.clone());
                 if line.contains("Rust runtime listening")
                     && let Some((_, address)) = line.split_once("127.0.0.1:")
                 {
@@ -511,8 +520,12 @@ impl Server {
         })
         .await
         .expect("compiled server did not announce its listener");
-        let stdout =
-            tokio::spawn(async move { while matches!(lines.next_line().await, Ok(Some(_))) {} });
+        let output = Arc::clone(&logs);
+        let stdout = tokio::spawn(async move {
+            while let Ok(Some(line)) = lines.next_line().await {
+                output.lock().unwrap().push(line);
+            }
+        });
         let client = Client::builder()
             .timeout(Duration::from_secs(3))
             .build()
@@ -525,7 +538,8 @@ impl Server {
                     child,
                     url,
                     client,
-                    _stdout: stdout,
+                    logs,
+                    stdout_task: stdout,
                 };
             }
             if let Some(status) = child.try_wait().unwrap() {
@@ -545,6 +559,46 @@ impl Server {
             .unwrap()
     }
 
+    async fn service(&self, domain: &str, service: &str, data: Value) -> Value {
+        let response = self
+            .client
+            .post(format!("{}/api/services/{domain}/{service}", self.url))
+            .bearer_auth(TOKEN)
+            .json(&data)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let result: Value = response.json().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{domain}.{service}: {result}");
+        result
+    }
+
+    async fn wait_log_count(&self, needle: &str, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            let count = self
+                .logs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.contains(needle))
+                .count();
+            assert!(
+                count <= expected,
+                "{needle}: expected {expected} log entries, found {count}"
+            );
+            if count == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{needle}: only {count} of {expected} log entries arrived"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn wait_state(&self, entity_id: &str, expected: &str) -> Value {
         let deadline = Instant::now() + Duration::from_secs(8);
         loop {
@@ -560,10 +614,40 @@ impl Server {
             };
             assert!(
                 Instant::now() < deadline,
-                "{entity_id} did not reach {expected}; last response: {last}"
+                "{entity_id} did not reach {expected}; last response: {last}; recent process logs:\n{}",
+                self.log_tail()
             );
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    async fn wait_attribute(&self, entity_id: &str, field: &str, expected: Value) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        loop {
+            let response = self.get(&format!("/api/states/{entity_id}")).await;
+            let last: Value = response.json().await.unwrap();
+            if last["attributes"][field] == expected {
+                return last;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{entity_id}.{field} did not reach {expected}: {last}; recent process logs:\n{}",
+                self.log_tail()
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    fn log_tail(&self) -> String {
+        self.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .take(16)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     async fn wait_absent(&self, entity_id: &str, phase: &str) {
@@ -628,6 +712,10 @@ impl Server {
             .expect("server did not finish its graceful shutdown")
             .unwrap();
         assert!(status.success(), "server shutdown returned {status}");
+        tokio::time::timeout(Duration::from_secs(3), &mut self.stdout_task)
+            .await
+            .expect("process log reader did not drain after shutdown")
+            .expect("process log reader failed");
     }
 }
 
@@ -1032,6 +1120,14 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
                 "percentage_state_topic":"process/fan/percentage",
                 "percentage_command_topic":"process/fan/set-percentage"}),
         ),
+        (
+            "homeassistant/climate/process/thermostat/config",
+            json!({"name":"Compiled Climate","unique_id":"compiled-process-climate",
+                "temperature_unit":"C","modes":["off","heat","cool"],
+                "mode_state_topic":"process/climate/mode", "mode_command_topic":"process/climate/set-mode",
+                "current_temperature_topic":"process/climate/current",
+                "temperature_state_topic":"process/climate/target", "temperature_command_topic":"process/climate/set-target"}),
+        ),
     ] {
         broker.publish(topic, serde_json::to_vec(&discovery).unwrap(), true);
     }
@@ -1044,6 +1140,9 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
         ("process/cover/position", b"0".as_slice()),
         ("process/fan/state", b"OFF".as_slice()),
         ("process/fan/percentage", b"0".as_slice()),
+        ("process/climate/mode", b"heat".as_slice()),
+        ("process/climate/current", b"20".as_slice()),
+        ("process/climate/target", b"22".as_slice()),
     ] {
         broker.publish(topic, payload.to_vec(), true);
     }
@@ -1092,6 +1191,13 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
             "process/fan/set",
             b"ON".as_slice(),
         ),
+        (
+            "climate",
+            "turn_off",
+            "climate.compiled_climate",
+            "process/climate/set-mode",
+            b"off".as_slice(),
+        ),
     ] {
         let response = server
             .client
@@ -1120,7 +1226,7 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
     }
 
     let discovered_components = loaded_components(&server).await;
-    for platform in ["switch", "button", "light", "cover", "fan"] {
+    for platform in ["switch", "button", "light", "cover", "fan", "climate"] {
         assert!(discovered_components.iter().any(|name| name == platform));
         assert!(
             discovered_components
@@ -1332,7 +1438,222 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
         assert_eq!(after["entity_id"], entity_id);
         assert!(after["disabled_by"].is_null());
     }
+    broker.publish(
+        "homeassistant/climate/process/thermostat/config",
+        Vec::new(),
+        true,
+    );
+    restarted
+        .wait_absent("climate.compiled_climate", "permanent discovery removal")
+        .await;
+    let cleared = Server::ws_command(
+        &mut restarted_socket,
+        json!({"id":2,"type":"config/entity_registry/list"}),
+    )
+    .await;
+    assert_eq!(cleared["success"], true);
+    assert!(
+        cleared["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["unique_id"] != "compiled-process-climate")
+    );
+    // Wait beyond two application registry synchronization ticks: a removed
+    // registry identity must not become a restored placeholder again.
+    tokio::time::sleep(Duration::from_millis(550)).await;
+    assert_eq!(
+        restarted
+            .get("/api/states/climate.compiled_climate")
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert!(
+        loaded_components(&restarted)
+            .await
+            .iter()
+            .any(|name| name == "mqtt.climate")
+    );
     restarted_socket.close(None).await.unwrap();
+    restarted.shutdown_gracefully().await;
+    broker.wait_for_disconnect().await;
+}
+
+#[tokio::test]
+async fn compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units() {
+    let mut broker = LocalBroker::start().await;
+    let directory = tempfile::tempdir().unwrap();
+    let config = write_config(directory.path(), &broker.address);
+    std::fs::write(directory.path().join("light_profiles.csv"),
+        "id,x,y,brightness,transition\nlight.profile_one.default,,,31,3\nlight.profile_renamed.default,,,41,5\ngroup.all_lights.default,,,80,1\ncustom,,,73,2\n").unwrap();
+    let mut server = Server::start(&config).await;
+    broker.wait_for_subscription("homeassistant/#").await;
+    for (name, unique, topic) in [
+        ("Profile One", "profile-one", "profile/one"),
+        ("Profile Two", "profile-two", "profile/two"),
+    ] {
+        broker.publish(
+            &format!("homeassistant/light/{unique}/config"),
+            serde_json::to_vec(&json!({"name":name,"unique_id":unique,"schema":"json",
+                "supported_color_modes":["rgb"],"brightness":true,
+                "state_topic":format!("{topic}/state"),"command_topic":format!("{topic}/set")}))
+            .unwrap(),
+            true,
+        );
+        broker.publish(
+            &format!("{topic}/state"),
+            br#"{"state":"OFF","brightness":0}"#.to_vec(),
+            true,
+        );
+    }
+    broker.publish(
+        "homeassistant/climate/unit-fixture/config",
+        serde_json::to_vec(&json!({
+            "name":"Unit Fixture", "unique_id":"unit-fixture", "temperature_unit":"C",
+            "modes":["off","heat","cool"], "min_temp":7,"max_temp":35,
+            "mode_state_topic":"unit/mode","mode_command_topic":"unit/set-mode",
+            "current_temperature_topic":"unit/current", "temperature_state_topic":"unit/target",
+            "temperature_command_topic":"unit/set-target"
+        }))
+        .unwrap(),
+        true,
+    );
+    for (topic, payload) in [
+        ("unit/mode", b"heat".as_slice()),
+        ("unit/current", b"20".as_slice()),
+        ("unit/target", b"25".as_slice()),
+    ] {
+        broker.publish(topic, payload.to_vec(), true);
+    }
+    for entity in ["light.profile_one", "light.profile_two"] {
+        server.wait_state(entity, "off").await;
+    }
+    server
+        .wait_attribute("climate.unit_fixture", "current_temperature", json!(20.0))
+        .await;
+    server
+        .wait_attribute("climate.unit_fixture", "temperature", json!(25.0))
+        .await;
+
+    server
+        .service("light", "turn_on", json!({"entity_id":"light.profile_one"}))
+        .await;
+    assert_fixture_command(
+        &mut broker,
+        "profile/one/set",
+        json!({"state":"ON","brightness":31,"transition":3.0}),
+    )
+    .await;
+    server
+        .service(
+            "light",
+            "turn_on",
+            json!({"entity_id":"light.profile_one","profile":"custom","brightness_pct":20}),
+        )
+        .await;
+    assert_fixture_command(
+        &mut broker,
+        "profile/one/set",
+        json!({"state":"ON","brightness":51,"transition":2.0}),
+    )
+    .await;
+    server
+        .service(
+            "light",
+            "turn_on",
+            json!({"entity_id":"light.profile_one","profile":"custom","brightness_step":-255}),
+        )
+        .await;
+    assert_fixture_command(
+        &mut broker,
+        "profile/one/set",
+        json!({"state":"OFF","transition":3.0}),
+    )
+    .await;
+    for expected_warnings in [1, 2] {
+        server.service("light","turn_on",json!({"entity_id":["light.profile_one","light.profile_two"],"color_name":"unknown-fixture-color"})).await;
+        for topic in ["profile/one/set", "profile/two/set"] {
+            let payload = fixture_command_payload(&mut broker, topic).await;
+            let command: Value = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(command["state"], "ON");
+            assert_eq!(command["color"], json!({"r":255,"g":255,"b":255}));
+        }
+        server
+            .wait_log_count("Got unknown color", expected_warnings)
+            .await;
+    }
+
+    let mut socket = authenticated_socket(&server).await;
+    let renamed = Server::ws_command(
+        &mut socket,
+        json!({"id":1,"type":"config/entity_registry/update","entity_id":"light.profile_one","new_entity_id":"light.profile_renamed"}),
+    )
+    .await;
+    assert_eq!(renamed["success"], true, "{renamed}");
+    server
+        .wait_absent("light.profile_one", "profile light rename")
+        .await;
+    server.wait_state("light.profile_renamed", "off").await;
+    server
+        .service(
+            "light",
+            "turn_on",
+            json!({"entity_id":"light.profile_renamed"}),
+        )
+        .await;
+    assert_fixture_command(
+        &mut broker,
+        "profile/one/set",
+        json!({"state":"ON","brightness":41,"transition":5.0}),
+    )
+    .await;
+    let updated = Server::ws_command(
+        &mut socket,
+        json!({"id":2,"type":"config/core/update","unit_system":"us_customary"}),
+    )
+    .await;
+    assert_eq!(updated["success"], true, "{updated}");
+    let units: Value = server.get("/api/config").await.json().await.unwrap();
+    assert_eq!(units["unit_system"]["temperature"], "°F");
+    assert!(units["unit_system"].get("name").is_none());
+    assert_eq!(units["unit_system"].as_object().unwrap().len(), 8);
+    server
+        .wait_attribute("climate.unit_fixture", "current_temperature", json!(68.0))
+        .await;
+    server
+        .wait_attribute("climate.unit_fixture", "temperature", json!(77.0))
+        .await;
+    broker
+        .assert_no_command_for(Duration::from_millis(100))
+        .await;
+    server
+        .service(
+            "climate",
+            "set_temperature",
+            json!({"entity_id":"climate.unit_fixture","temperature":86.0}),
+        )
+        .await;
+    let payload = fixture_command_payload(&mut broker, "unit/set-target").await;
+    assert_eq!(
+        std::str::from_utf8(&payload)
+            .unwrap()
+            .parse::<f64>()
+            .unwrap(),
+        30.0,
+        "Fahrenheit service input becomes the native Celsius broker command"
+    );
+    socket.close(None).await.unwrap();
+    server.shutdown_gracefully().await;
+    broker.wait_for_disconnect().await;
+
+    let mut restarted = Server::start(&config).await;
+    broker.wait_for_subscription("homeassistant/#").await;
+    restarted
+        .wait_attribute("climate.unit_fixture", "current_temperature", json!(68.0))
+        .await;
+    let restored: Value = restarted.get("/api/config").await.json().await.unwrap();
+    assert_eq!(restored["unit_system"]["temperature"], "°F");
     restarted.shutdown_gracefully().await;
     broker.wait_for_disconnect().await;
 }

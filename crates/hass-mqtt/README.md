@@ -38,7 +38,7 @@ empty MQTT password.
 ## Discovery and state
 
 The port handles `sensor`, `binary_sensor`, `switch`, `light`, `cover`, `fan`,
-`button`, `number`, `select`, and `text` discovery topics in either supported
+`climate`, `button`, `number`, `select`, and `text` discovery topics in either supported
 Home Assistant form:
 
 ```text
@@ -62,8 +62,12 @@ Sensors accept `state_topic`, `value_template`, `unit_of_measurement`,
 sensor/binary sensor/switch state; lights use `state_value_template` and then
 `value_template`. State/value templates accept one expression (for example,
 `{{ value_json.temperature }}`); command and JSON-attributes templates use the
-shared bounded string renderer. `value` is the raw UTF-8 message and
-`value_json` is available when that message parses as JSON.
+shared bounded string renderer. Templates receive `value`, `entity_id`, and
+`name`; state templates also receive `value_json` when the message parses as
+JSON. The `this` object exposes `entity_id`, `name`, `state`, and `attributes`
+from the entity's current Runtime state (or `unknown` and discovery attributes
+before a state exists). It does not expose Python State properties such as
+timestamps or context.
 
 Availability accepts `availability_topic` or an `availability` object/list,
 with `availability_mode: all|any`. Defaults are `online` and `offline`.
@@ -74,7 +78,17 @@ Cover discovery accepts state, position, and tilt topics and their command
 counterparts. Positions are checked against configured ranges and exposed as
 percentages. Fan discovery accepts on/off, percentage, preset, oscillation, and
 direction topics; percentage values use `speed_range_min` and
-`speed_range_max`. Buttons publish `payload_press`. Numbers validate `min`,
+`speed_range_max`. Climate discovery subscribes to 12 state topics for HVAC
+mode/action, current and target temperature/humidity, fan, preset, and swing
+modes. Reported temperatures stay in the device's native unit. The MQTT
+`temperature_unit` accepts `C`/`c` and `F`/`f`, then normalizes to the typed
+degree unit used internally. If `temperature_unit` is omitted, the adapter
+captures Core's configured unit system when discovery is accepted; later Core
+unit changes reproject the cached native values without sending MQTT commands.
+Defaults include modes
+`auto/off/cool/heat/dry/fan_only`, fan modes `auto/low/medium/high`, swing modes
+`on/off`, humidity bounds 30–99, temperature step 1, and an initial target of
+21 °C converted to the native unit. Buttons publish `payload_press`. Numbers validate `min`,
 `max`, and `step`; selects validate `options`; text entities enforce `min`,
 `max`, and an optional regular-expression `pattern`. Their reported values are
 updated only from state topics. An empty retained config message removes the
@@ -94,8 +108,8 @@ then publish `online` to `lab/available` and
 ## Shared entity lifecycle
 
 The application config-entry driver starts MQTT with its shared entity
-lifecycle and registries. Discovered switches, buttons, lights, covers, and
-fans use their native descriptors and snapshot projections there, while MQTT
+lifecycle and registries. Discovered switches, buttons, lights, covers, fans,
+and climate entities use their native descriptors and snapshot projections there, while MQTT
 keeps its discovery, state-topic, command queue, reconnect, and removal flow.
 Registry names, device-class and icon overrides remain effective; raw MQTT
 device metadata is preserved while its supported identity and details are
@@ -104,21 +118,32 @@ live lifecycle handle, and disabled or removed entities are not service
 targets. Platform capabilities remain visible while unavailable; ordinary
 MQTT state attributes are hidden until the entity is available again.
 
+An empty discovery payload permanently removes the owned entity-registry row
+before releasing its publisher, so it does not leave a restored placeholder.
+Ordinary provider unload retains that row. Registry identity checks prevent a
+reused entity ID from deleting another publisher's entry. Orphan-device,
+device-trigger and tag cleanup remain separate work.
+
+
 Standalone callers can continue using `MqttIntegration::start`; that entry
-point keeps the direct runtime path for compatibility. The shared lifecycle
-config-entry driver uses `start_with_entity_lifecycle` for the native
-switch/button/light/cover/fan SDK path.
+point keeps the direct runtime path for compatibility. Existing constructors
+use the built-in light profile catalog. The shared lifecycle config-entry
+driver uses `start_with_entity_lifecycle_and_profiles` for the native
+switch/button/light/cover/fan/climate SDK path and accepts the host-loaded light
+profile catalog. Profile defaults are resolved against each entity's current
+registry ID.
 
 ## Commands and optimistic state
 
 The integration registers switch and basic light `turn_on/off/toggle`, cover
-open/close/stop/position/tilt services, fan turn on/off/percentage/preset/
-oscillation/direction services, `button.press`, `number.set_value`,
+open/close/stop/position/tilt services, climate `turn_on`, `turn_off`, `toggle`,
+HVAC mode, temperature, humidity, fan mode, preset, and swing mode services,
+fan turn on/off/percentage/preset/oscillation/direction services, `button.press`, `number.set_value`,
 `select.select_option`, and `text.set_value`. Each service requires a known
 `entity_id` target. Switch/basic-light discovery requires `command_topic`;
 `payload_on` and `payload_off` default to `ON` and `OFF`. `command_template`
-receives `value` (the selected payload), `entity_id`, and the service
-data/target variables.
+receives `value` (the selected payload), `entity_id`, `name`, `this`, and the
+service data/target variables.
 This supports the usual JSON wrapper, for example:
 
 ```json
@@ -141,22 +166,30 @@ color modes, effects, flash, and transition support. `light.turn_on` publishes
 the Home Assistant JSON shape (`state`, `brightness`, `color_temp`, `color`,
 `effect`, `flash`, and `transition`) to `command_topic`. HS, RGB, RGBW, RGBWW,
 XY, white, brightness, color-temperature, and effect input state is parsed
-from the reported JSON topic. Options absent from the entity's declared
-capabilities and unknown service options are rejected.
+from the reported JSON topic. Light options are filtered according to the
+entity's declared capabilities; unknown service options are rejected.
 
 The async command queue is bounded. Queue saturation, unknown target IDs, and
-unsupported service options return runtime service errors. Published commands
-do not change reported state unless global `optimistic: true` or the discovery
-entity explicitly sets `optimistic: true`. The tests use a local MQTT wire
-fixture; they do not contact an external broker or issue physical device calls.
+unsupported service options return runtime service errors. For switch and light
+entities, published commands do not change reported state unless global
+`optimistic: true` or the discovery entity explicitly sets `optimistic: true`.
+Climate updates a commanded cache field when it has no state topic or optimism
+is enabled. Each queued publication carries its own explicit cache operation,
+even when the requested value matched an earlier snapshot. Actor admission
+applies that operation once; completion projects the live cache. Concurrent
+telemetry can therefore supersede a commanded value before its ACK, and other
+state callbacks can expose the updated cache while the ACK is pending. The
+tests use a local MQTT wire fixture; they do not contact an external broker or
+issue physical device calls.
 
 MQTT service handlers await the publish callback. QoS 0 completes after the
 outgoing packet is written, QoS 1 at PUBACK, and QoS 2 at PUBCOMP. The callback
 has a ten-second soft timeout: it logs and returns normally without promising
 broker delivery. A late acknowledgment still clears its packet-ID record, so
-it cannot complete a later command. Explicit optimistic state is applied only
-after callback completion or timeout, and service results include only states
-that the runtime actually changed. Repeating a command that leaves the state
+it cannot complete a later command. Switch, light, cover and fan optimistic
+updates are applied after callback completion or timeout; climate uses the
+cache timing described above. Service results include only states that the
+runtime actually changed. Repeating a command that leaves the state
 and attributes unchanged returns no changed-state entry. See pinned
 [`mqtt/entity.py:2011`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/mqtt/entity.py#L2011),
 [`mqtt/client.py:750`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/mqtt/client.py#L750),
@@ -171,8 +204,12 @@ remains `unavailable`. When availability returns after reconnect, the remembered
 desired state is projected again.
 
 Canceling a service caller does not retract an already queued MQTT command; the
-event loop retains its packet tracking and applies any optimistic state when the
-callback completes. Shutdown closes command admission, resolves pending replies,
+event loop retains its packet tracking and completes the admitted operation,
+using the state timing described above. For lifecycle-managed publishers,
+completion remains bound
+to the original entity handle: a released publisher's late ACK cannot update a
+replacement entity using the same discovery topic. Shutdown closes command
+admission, resolves pending replies,
 sends DISCONNECT when possible, and joins the event-loop worker. If startup is
 canceled after the worker connects, its guard signals and reaps that worker.
 

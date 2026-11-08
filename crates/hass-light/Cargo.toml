@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Typed native light entity descriptions, state projection, and service normalization"
 
 [dependencies]
+csv.workspace = true
 hass-core.workspace = true
 hass-entity.workspace = true
 serde_json.workspace = true

@@ -1,6 +1,8 @@
 //! Native light service-call parsing and normalization.
 
 use super::color;
+use super::named_colors::color_name_to_rgb;
+use super::profiles::LightProfileCatalog;
 use super::{
     LIGHT_DOMAIN, LightColorMode, LightDescriptor, LightError, LightFeature, LightFeatures,
     LightSnapshot, round_ties_even,
@@ -40,6 +42,9 @@ pub const LIGHT_TURN_OFF_ARGUMENTS: &[&str] = &["flash", "transition"];
 
 /// All standard light service argument names at the pinned revision.
 pub const LIGHT_SERVICE_ARGUMENTS: &[&str] = LIGHT_TURN_ON_ARGUMENTS;
+
+/// Stable diagnostic code for an unknown `color_name` fallback.
+pub const LIGHT_UNKNOWN_COLOR_NAME_DIAGNOSTIC: &str = "light.unknown_color_name";
 
 /// One native light service.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -147,13 +152,30 @@ impl LightServiceRequest {
         })
     }
 
-    /// Normalize standard arguments to one supported light action and color
-    /// space. Provider-specific profile data and the full CSS color-name map
-    /// require integration-owned state and return explicit errors.
+    /// Normalize standard arguments using the built-in profile catalog.
+    ///
+    /// This compatibility entry point has no registry-resolved entity ID, so
+    /// it cannot apply entity-specific default profiles. Use
+    /// [`LightServiceRequest::normalize_with_context`] when the caller has the
+    /// current entity ID and a host-loaded catalog.
     pub fn normalize(
         &self,
         descriptor: &LightDescriptor,
         current: &LightSnapshot,
+    ) -> Result<NormalizedLightCommand, LightServiceError> {
+        let profiles = LightProfileCatalog::built_in();
+        let context = LightNormalizationContext::without_entity_id(&profiles);
+        self.normalize_with_context(descriptor, current, &context)
+    }
+
+    /// Normalize using the registry-resolved entity ID and the host's ready
+    /// profile catalog. The SDK does not read files or maintain a global
+    /// catalog.
+    pub fn normalize_with_context(
+        &self,
+        descriptor: &LightDescriptor,
+        current: &LightSnapshot,
+        context: &LightNormalizationContext<'_>,
     ) -> Result<NormalizedLightCommand, LightServiceError> {
         descriptor.validate()?;
         let modes = descriptor
@@ -161,33 +183,57 @@ impl LightServiceRequest {
             .expect("validated supported color modes are present");
         let features = descriptor.supported_features();
 
-        let immediate_toggle_off =
-            self.command == LightCommand::Toggle && current.is_on() == Some(true);
         let mut params = self.params.clone();
+        let has_brightness_step =
+            params.contains_key("brightness_step") || params.contains_key("brightness_step_pct");
+        let mut diagnostics = Vec::new();
+
+        // This is the common pre-fanout preprocessing path. Brightness steps
+        // defer alternatives until the per-entity current state is available.
+        if self.command != LightCommand::TurnOff && !has_brightness_step {
+            preprocess_turn_on_alternatives(
+                &mut params,
+                context.profile_catalog,
+                &mut diagnostics,
+            )?;
+        }
+
         let mut action = match self.command {
             LightCommand::TurnOn => LightAction::On,
             LightCommand::TurnOff => LightAction::Off,
-            LightCommand::Toggle if immediate_toggle_off => LightAction::Off,
+            LightCommand::Toggle if current.is_on() == Some(true) => LightAction::Off,
             LightCommand::Toggle => LightAction::On,
         };
+        // A zero-brightness turn-on reroutes the original, commonly
+        // preprocessed call through the off handler, not its per-entity copy.
+        let off_request_params = params.clone();
 
         if action == LightAction::On {
-            if params.contains_key("profile") {
-                return Err(LightServiceError::ProviderOwnedParameter("profile"));
+            if has_brightness_step {
+                process_brightness_step(&mut params, current)?;
+                preprocess_turn_on_alternatives(
+                    &mut params,
+                    context.profile_catalog,
+                    &mut diagnostics,
+                )?;
             }
-            if params.contains_key("color_name") {
-                return Err(LightServiceError::ProviderOwnedParameter("color_name"));
-            }
-            process_brightness(&mut params, current)?;
+            apply_default_profiles(&mut params, context, current.is_on());
             process_colors(&mut params, descriptor, current, &modes)?;
             if params.get("brightness").and_then(Value::as_u64) == Some(0)
                 || params.get("white").and_then(Value::as_u64) == Some(0)
             {
                 action = LightAction::Off;
+                params = off_request_params;
             }
         }
 
         if action == LightAction::Off {
+            // Core's turn-off path supplies `state_on = True` when consulting
+            // defaults. For a nonempty request this fills only transition;
+            // an empty request can apply the full default profile first.
+            if !params.contains_key("transition") {
+                apply_default_profiles(&mut params, context, Some(true));
+            }
             let mut off_params = Map::new();
             if features.contains(LightFeature::Transition)
                 && let Some(value) = params.get("transition")
@@ -208,7 +254,51 @@ impl LightServiceRequest {
             action,
             target: self.target.clone(),
             params,
+            diagnostics,
         })
+    }
+}
+
+/// Host-owned normalization context for light profiles.
+#[derive(Clone, Copy, Debug)]
+pub struct LightNormalizationContext<'a> {
+    resolved_entity_id: Option<&'a str>,
+    profile_catalog: &'a LightProfileCatalog,
+}
+
+impl<'a> LightNormalizationContext<'a> {
+    /// Use an entity ID resolved from the host's live registry.
+    #[must_use]
+    pub const fn new(
+        resolved_entity_id: &'a str,
+        profile_catalog: &'a LightProfileCatalog,
+    ) -> Self {
+        Self {
+            resolved_entity_id: Some(resolved_entity_id),
+            profile_catalog,
+        }
+    }
+
+    /// Build a compatibility context without inferring an ID from a
+    /// descriptor. Group defaults can still be applied from the catalog.
+    #[must_use]
+    pub const fn without_entity_id(profile_catalog: &'a LightProfileCatalog) -> Self {
+        Self {
+            resolved_entity_id: None,
+            profile_catalog,
+        }
+    }
+
+    /// Return the canonical registry-resolved entity ID, when supplied.
+    #[must_use]
+    pub const fn resolved_entity_id(self) -> Option<&'a str> {
+        self.resolved_entity_id
+    }
+
+    /// Return the ready catalog supplied by the host.
+    #[must_use]
+    pub const fn profile_catalog(self) -> &'a LightProfileCatalog {
+        self.profile_catalog
     }
 }
 
@@ -231,6 +321,23 @@ pub struct NormalizedLightCommand {
     pub target: Map<String, Value>,
     /// Parameters filtered to the light's advertised features and color modes.
     pub params: Map<String, Value>,
+    /// Nonfatal diagnostics generated while applying common service data.
+    pub diagnostics: Vec<LightServiceDiagnostic>,
+}
+
+/// Nonfatal, source-aligned diagnostic attached to a normalized command.
+///
+/// Providers and hosts decide whether and how to log it. Retaining the
+/// original field and value lets a request boundary deduplicate warnings
+/// across all resolved target entities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LightServiceDiagnostic {
+    /// Stable SDK diagnostic identifier.
+    pub code: &'static str,
+    /// Input service field that caused this diagnostic.
+    pub original_field: &'static str,
+    /// Exact original string value from the parsed request.
+    pub original_value: String,
 }
 
 /// Error returned while parsing or normalizing a light service request.
@@ -255,7 +362,7 @@ pub enum LightServiceError {
         /// Short reason for rejection.
         reason: &'static str,
     },
-    /// The parameter requires integration-owned profile or color-name data.
+    /// Reserved compatibility error for provider-owned light parameters.
     ProviderOwnedParameter(&'static str),
     /// Light descriptor or state projection error.
     Light(LightError),
@@ -398,16 +505,113 @@ fn validate_params(
     Ok(())
 }
 
-fn process_brightness(
+fn preprocess_turn_on_alternatives(
     params: &mut Map<String, Value>,
-    current: &LightSnapshot,
+    profiles: &LightProfileCatalog,
+    diagnostics: &mut Vec<LightServiceDiagnostic>,
 ) -> Result<(), LightServiceError> {
+    if params.contains_key("brightness_step") || params.contains_key("brightness_step_pct") {
+        return Ok(());
+    }
+
+    if let Some(Value::String(name)) = params.remove("profile") {
+        apply_profile(&name, params, profiles);
+    }
+
+    if let Some(value) = params.remove("color_name") {
+        let name = value
+            .as_str()
+            .expect("validated color_name must be a string");
+        let original_value = name.to_owned();
+        let rgb = color_name_to_rgb(name).unwrap_or_else(|| {
+            diagnostics.push(LightServiceDiagnostic {
+                code: LIGHT_UNKNOWN_COLOR_NAME_DIAGNOSTIC,
+                original_field: "color_name",
+                original_value: original_value.clone(),
+            });
+            [255, 255, 255]
+        });
+        params.insert("rgb_color".into(), json!(rgb));
+    }
+
     if let Some(value) = params.remove("brightness_pct") {
         let percentage = number("brightness_pct", &value)?;
         let brightness = round_ties_even(255.0 * percentage / 100.0).clamp(0.0, 255.0) as u8;
         params.insert("brightness".into(), json!(brightness));
     }
 
+    Ok(())
+}
+
+fn apply_profile(name: &str, params: &mut Map<String, Value>, profiles: &LightProfileCatalog) {
+    let Some(profile) = profiles.get(name) else {
+        return;
+    };
+
+    let color_fields = [
+        "color_name",
+        "color_temp_kelvin",
+        "hs_color",
+        "rgb_color",
+        "rgbw_color",
+        "rgbww_color",
+        "xy_color",
+        "white",
+    ];
+    if let Some(hs_color) = profile.hs_color()
+        && !color_fields.iter().any(|field| params.contains_key(*field))
+    {
+        params.insert("hs_color".into(), json!(hs_color));
+    }
+    if let Some(brightness) = profile.brightness {
+        params.entry("brightness").or_insert(json!(brightness));
+    }
+    if let Some(transition) = profile.transition {
+        params.entry("transition").or_insert(json!(transition));
+    }
+}
+
+fn apply_default_profiles(
+    params: &mut Map<String, Value>,
+    context: &LightNormalizationContext<'_>,
+    state_on: Option<bool>,
+) {
+    if let Some(entity_id) = context.resolved_entity_id {
+        apply_default_profile(
+            &format!("{entity_id}.default"),
+            params,
+            context.profile_catalog,
+            state_on,
+        );
+    }
+    apply_default_profile(
+        "group.all_lights.default",
+        params,
+        context.profile_catalog,
+        state_on,
+    );
+}
+
+fn apply_default_profile(
+    profile_name: &str,
+    params: &mut Map<String, Value>,
+    profiles: &LightProfileCatalog,
+    state_on: Option<bool>,
+) {
+    let Some(profile) = profiles.get(profile_name) else {
+        return;
+    };
+    if state_on != Some(true) || params.is_empty() {
+        apply_profile(&profile.name, params, profiles);
+    } else if let Some(transition) = profile.transition {
+        params.entry("transition").or_insert(json!(transition));
+    }
+}
+
+fn process_brightness_step(
+    params: &mut Map<String, Value>,
+    current: &LightSnapshot,
+) -> Result<(), LightServiceError> {
     if let Some(value) = params.remove("brightness_step") {
         let base = if current.is_on() == Some(true) {
             current.brightness().unwrap_or_default()
@@ -878,5 +1082,318 @@ mod tests {
             LightServiceRequest::parse(&call("turn_on", invalid_color, Map::new())),
             Err(LightServiceError::InvalidParameter { .. })
         ));
+    }
+
+    #[test]
+    fn named_colors_convert_and_unknown_names_fall_back_with_original_diagnostic() {
+        let descriptor = LightDescriptor::new("fixture", "light-provider", "desk")
+            .with_supported_color_modes([LightColorMode::Rgb]);
+        let profiles = LightProfileCatalog::default();
+        let context = LightNormalizationContext::new("light.desk", &profiles);
+
+        let known = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([("color_name".into(), json!("Light Blue"))]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(&descriptor, &LightSnapshot::new(Some(false)), &context)
+        .unwrap();
+        assert_eq!(known.params.get("rgb_color"), Some(&json!([173, 216, 230])));
+        assert!(known.diagnostics.is_empty());
+
+        let unknown = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([("color_name".into(), json!("No Such Color"))]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(&descriptor, &LightSnapshot::new(Some(false)), &context)
+        .unwrap();
+        assert_eq!(
+            unknown.params.get("rgb_color"),
+            Some(&json!([255, 255, 255]))
+        );
+        assert_eq!(
+            unknown.diagnostics,
+            vec![LightServiceDiagnostic {
+                code: LIGHT_UNKNOWN_COLOR_NAME_DIAGNOSTIC,
+                original_field: "color_name",
+                original_value: "No Such Color".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_profiles_apply_defaults_and_caller_brightness_forms_win() {
+        let profiles = LightProfileCatalog::from_csv_sources([concat!(
+            "name,x,y,brightness,transition\n",
+            "soft,,,,7000\n"
+        )]);
+        let descriptor = LightDescriptor::new("fixture", "light-provider", "desk")
+            .with_supported_color_modes([LightColorMode::Brightness])
+            .with_feature(LightFeature::Transition);
+        let context = LightNormalizationContext::new("light.desk", &profiles);
+
+        let explicit = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([("profile".into(), json!("soft"))]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(&descriptor, &LightSnapshot::new(Some(false)), &context)
+        .unwrap();
+        assert_eq!(explicit.params.get("transition"), Some(&json!(6_553.0)));
+
+        let caller_percent = LightProfileCatalog::from_csv_sources([concat!(
+            "name,x,y,brightness,transition\n",
+            "soft,,,,90\n"
+        )]);
+        let context = LightNormalizationContext::new("light.desk", &caller_percent);
+        let percentage = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([
+                ("profile".into(), json!("soft")),
+                ("brightness_pct".into(), json!(50)),
+            ]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(&descriptor, &LightSnapshot::new(Some(false)), &context)
+        .unwrap();
+        assert_eq!(percentage.params.get("brightness"), Some(&json!(128)));
+
+        let step_profile = LightProfileCatalog::from_csv_sources([concat!(
+            "name,x,y,brightness,transition\n",
+            "soft,,,,90\n"
+        )]);
+        let context = LightNormalizationContext::new("light.desk", &step_profile);
+        let stepped = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([
+                ("profile".into(), json!("soft")),
+                ("brightness_step".into(), json!(25)),
+            ]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(
+            &descriptor,
+            &LightSnapshot::new(Some(true)).with_brightness(Some(100)),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(stepped.params.get("brightness"), Some(&json!(125)));
+    }
+
+    #[test]
+    fn zero_brightness_step_reroutes_original_params_and_uses_only_off_defaults() {
+        let descriptor = LightDescriptor::new("fixture", "light-provider", "desk")
+            .with_supported_color_modes([LightColorMode::Brightness])
+            .with_feature(LightFeature::Transition);
+        for (csv, explicit_transition, expected_transition) in [
+            ("name,x,y,brightness,transition\nsoft,,,,4\n", None, None),
+            (
+                "name,x,y,brightness,transition\nsoft,,,,4\nlight.desk.default,,,,7\n",
+                None,
+                Some(7.0),
+            ),
+            (
+                "name,x,y,brightness,transition\nsoft,,,,4\nlight.desk.default,,,,7\n",
+                Some(2.0),
+                Some(2.0),
+            ),
+        ] {
+            let profiles = LightProfileCatalog::from_csv_sources([csv]);
+            let context = LightNormalizationContext::new("light.desk", &profiles);
+            for step in ["brightness_step", "brightness_step_pct"] {
+                let mut params =
+                    Map::from_iter([("profile".into(), json!("soft")), (step.into(), json!(-1))]);
+                if let Some(transition) = explicit_transition {
+                    params.insert("transition".into(), json!(transition));
+                }
+                let normalized = LightServiceRequest::parse(&call("turn_on", params, Map::new()))
+                    .unwrap()
+                    .normalize_with_context(&descriptor, &LightSnapshot::new(Some(false)), &context)
+                    .unwrap();
+                assert_eq!(normalized.action, LightAction::Off);
+                assert_eq!(
+                    normalized.params.get("transition"),
+                    expected_transition.map(|value| json!(value)).as_ref()
+                );
+                assert!(normalized.params.keys().all(|key| key == "transition"));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_normalize_uses_builtin_profiles_without_descriptor_id_inference() {
+        let request = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([("profile".into(), json!("relax"))]),
+            Map::new(),
+        ))
+        .unwrap();
+        let descriptor = LightDescriptor::new("fixture", "provider-id", "name-only")
+            .with_supported_color_modes([LightColorMode::Hs]);
+        let normalized = request
+            .normalize(&descriptor, &LightSnapshot::new(Some(false)))
+            .unwrap();
+        assert_eq!(normalized.params.get("brightness"), Some(&json!(144)));
+        assert!(normalized.params.contains_key("hs_color"));
+    }
+
+    #[test]
+    fn default_profiles_use_resolved_entity_then_group_and_fill_transition_only_when_on() {
+        let profiles = LightProfileCatalog::from_csv_sources([concat!(
+            "name,x,y,brightness,transition\n",
+            "light.desk.default,0.1,0.2,100,3\n",
+            "group.all_lights.default,0.2,0.3,200,5\n"
+        )]);
+        let descriptor = LightDescriptor::new("fixture", "light-provider", "desk")
+            .with_supported_color_modes([LightColorMode::Hs])
+            .with_feature(LightFeature::Transition);
+        let context = LightNormalizationContext::new("light.desk", &profiles);
+        let empty = LightServiceRequest::parse(&call("turn_on", Map::new(), Map::new())).unwrap();
+        let off_state = empty
+            .normalize_with_context(&descriptor, &LightSnapshot::new(Some(false)), &context)
+            .unwrap();
+        assert_eq!(off_state.params.get("brightness"), Some(&json!(100)));
+        assert_eq!(off_state.params.get("transition"), Some(&json!(3.0)));
+        assert_eq!(
+            off_state.params.get("hs_color"),
+            Some(&json!(color::rgb_to_hs(color::xy_to_rgb([0.1, 0.2]))))
+        );
+
+        let unknown_state = empty
+            .normalize_with_context(&descriptor, &LightSnapshot::new(None), &context)
+            .unwrap();
+        assert_eq!(unknown_state.params.get("brightness"), Some(&json!(100)));
+        assert_eq!(unknown_state.params.get("transition"), Some(&json!(3.0)));
+
+        let caller_color = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([("hs_color".into(), json!([120, 100]))]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(&descriptor, &LightSnapshot::new(Some(false)), &context)
+        .unwrap();
+        assert_eq!(
+            caller_color.params.get("hs_color"),
+            Some(&json!([120.0, 100.0]))
+        );
+        assert_eq!(caller_color.params.get("brightness"), Some(&json!(100)));
+
+        let caller_params = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([("brightness".into(), json!(40))]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(
+            &descriptor,
+            &LightSnapshot::new(Some(true)).with_brightness(Some(10)),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(caller_params.params.get("brightness"), Some(&json!(40)));
+        assert_eq!(caller_params.params.get("transition"), Some(&json!(3.0)));
+        assert!(!caller_params.params.contains_key("hs_color"));
+
+        let explicit_transition = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([
+                ("brightness".into(), json!(40)),
+                ("transition".into(), json!(9)),
+            ]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(
+            &descriptor,
+            &LightSnapshot::new(Some(true)).with_brightness(Some(10)),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_transition.params.get("transition"),
+            Some(&json!(9.0))
+        );
+        assert!(!explicit_transition.params.contains_key("hs_color"));
+    }
+
+    #[test]
+    fn unknown_profile_can_leave_empty_request_for_defaults_and_turn_off_keeps_only_default_transition()
+     {
+        let profiles = LightProfileCatalog::from_csv_sources([concat!(
+            "name,x,y,brightness,transition\n",
+            "group.all_lights.default,0.2,0.3,99,4\n"
+        )]);
+        let descriptor = LightDescriptor::new("fixture", "light-provider", "desk")
+            .with_supported_color_modes([LightColorMode::Hs])
+            .with_supported_features(LightFeatures::TRANSITION | LightFeatures::FLASH);
+        let context = LightNormalizationContext::without_entity_id(&profiles);
+        let unknown_profile = LightServiceRequest::parse(&call(
+            "turn_on",
+            Map::from_iter([("profile".into(), json!("not-installed"))]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(&descriptor, &LightSnapshot::new(Some(true)), &context)
+        .unwrap();
+        assert_eq!(unknown_profile.params.get("brightness"), Some(&json!(99)));
+        assert_eq!(unknown_profile.params.get("transition"), Some(&json!(4.0)));
+        assert!(unknown_profile.params.contains_key("hs_color"));
+
+        let turn_off = LightServiceRequest::parse(&call(
+            "turn_off",
+            Map::from_iter([("flash".into(), json!("short"))]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(&descriptor, &LightSnapshot::new(Some(true)), &context)
+        .unwrap();
+        assert_eq!(turn_off.action, LightAction::Off);
+        assert_eq!(
+            turn_off.params,
+            Map::from_iter([
+                ("transition".into(), json!(4.0)),
+                ("flash".into(), json!("short")),
+            ])
+        );
+    }
+
+    #[test]
+    fn toggle_off_retains_common_color_diagnostic_but_step_bypass_does_not_create_one() {
+        let descriptor = LightDescriptor::new("fixture", "light-provider", "desk")
+            .with_supported_color_modes([LightColorMode::Rgb]);
+        let profiles = LightProfileCatalog::default();
+        let context = LightNormalizationContext::new("light.desk", &profiles);
+        let request = LightServiceRequest::parse(&call(
+            "toggle",
+            Map::from_iter([("color_name".into(), json!("unknown-color"))]),
+            Map::new(),
+        ))
+        .unwrap();
+        let toggled_off = request
+            .normalize_with_context(&descriptor, &LightSnapshot::new(Some(true)), &context)
+            .unwrap();
+        assert_eq!(toggled_off.action, LightAction::Off);
+        assert_eq!(toggled_off.diagnostics.len(), 1);
+        assert_eq!(toggled_off.diagnostics[0].original_value, "unknown-color");
+
+        let stepped = LightServiceRequest::parse(&call(
+            "toggle",
+            Map::from_iter([
+                ("color_name".into(), json!("unknown-color")),
+                ("brightness_step".into(), json!(1)),
+            ]),
+            Map::new(),
+        ))
+        .unwrap()
+        .normalize_with_context(&descriptor, &LightSnapshot::new(Some(true)), &context)
+        .unwrap();
+        assert!(stepped.diagnostics.is_empty());
     }
 }

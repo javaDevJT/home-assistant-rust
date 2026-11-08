@@ -478,6 +478,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "csv"
+version = "1.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52cd9d68cf7efc6ddfaaee42e7288d3a99d613d4b50f76ce9827ae0c6e14f938"
+dependencies = [
+ "csv-core",
+ "itoa",
+ "ryu",
+ "serde_core",
+]
+
+[[package]]
+name = "csv-core"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704a3c26996a80471189265814dbc2c257598b96b8a7feae2d31ace646bb9782"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "ctutils"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -842,6 +863,7 @@ dependencies = [
  "hass-hardware",
  "hass-hardware-metrics",
  "hass-image-upload",
+ "hass-light",
  "hass-logger",
  "hass-media-player",
  "hass-mqtt",
@@ -865,6 +887,7 @@ dependencies = [
  "hass-tag",
  "hass-template",
  "hass-template-entities",
+ "hass-units",
  "hass-usb",
  "hass-usb-backend",
  "hass-webhook",
@@ -1028,6 +1051,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-climate"
+version = "0.1.0"
+dependencies = [
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "hass-units",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hass-config"
 version = "0.1.0"
 dependencies = [
@@ -1035,6 +1070,7 @@ dependencies = [
  "chrono-tz",
  "hass-core",
  "hass-storage",
+ "hass-units",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1050,6 +1086,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "chrono-tz",
+ "hass-units",
  "serde",
  "serde_json",
  "thiserror",
@@ -1198,6 +1235,7 @@ dependencies = [
 name = "hass-light"
 version = "0.1.0"
 dependencies = [
+ "csv",
  "hass-core",
  "hass-entity",
  "hass-registry",
@@ -1243,6 +1281,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hass-button",
+ "hass-climate",
  "hass-core",
  "hass-cover",
  "hass-entity",
@@ -1252,6 +1291,7 @@ dependencies = [
  "hass-storage",
  "hass-switch",
  "hass-template",
+ "hass-units",
  "regex",
  "rumqttc",
  "serde",

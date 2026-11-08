@@ -34,6 +34,18 @@ state writes.
   supported color representations using the source formulas, filters fields
   unsupported by the descriptor, and resolves zero brightness to an off
   action. Selector values remain unresolved for the shared registry resolver.
+- The full pinned CSS color table and the `homeassistant` alias are available
+  through pure lookup. Unknown names become white and attach a typed diagnostic
+  with the original field and value; the SDK does not log.
+- `LightProfileCatalog` parses built-in and host-supplied CSV strings in order.
+  It retains CSV quoting and whitespace semantics, stops an individual source
+  after its first blank or invalid row, reports that row to the host, and lets
+  later sources replace earlier names. The host still owns file IO and catalog
+  readiness.
+- `normalize_with_context` accepts a host-supplied catalog and the
+  registry-resolved entity ID. It applies explicit and default profiles,
+  brightness and transition precedence, and emits diagnostics on the normalized
+  result for request-level deduplication by the host.
 
 Color conversions are ported from `homeassistant/util/color.py`: RGB/HS uses
 the source HSV scaling and three-decimal rounding; RGB/xy uses the wide RGB D65
@@ -60,15 +72,20 @@ Assistant tree; no Home Assistant or dependency Python was imported or run.
 | HS/RGB/xy formulas | `homeassistant/util/color.py:313-398` |
 | RGBW/RGBWW channel formulas | `homeassistant/util/color.py:401-487` |
 | Kelvin, RGBWW, xy temperature, blackbody coefficients and mired conversion | `homeassistant/util/color.py:503-640` |
+| Full color-name table and name matching | `homeassistant/util/color.py:20-206` |
+| Built-in light profile CSV | `homeassistant/components/light/light_profiles.csv` |
+| Profile parsing, CSV merge and entity/group default precedence | `homeassistant/components/light/__init__.py:220-370` |
+| Common alternative preprocessing and defaulted turn-on/off behavior | `homeassistant/components/light/helper.py:104-167`, `:218-250`; `homeassistant/components/light/services.py:31-57` |
 
 ## Explicit gaps
 
-- Light profiles depend on Core's profile store and integration data. The
-  normalizer reports a provider-owned parameter error for `profile`; profile
-  application and default profile transitions are not emulated.
-- `color_name` uses Core's full CSS color table and warning/fallback behavior.
-  The parser validates its string shape, but normalization reports a
-  provider-owned parameter error instead of guessing a mapping.
+- Profile file discovery, UTF-8/IO errors, startup readiness and host logging
+  stay outside the SDK. Hosts should use `from_csv_sources_with_report`, map
+  each `source_index` to its source path, and publish the ready catalog to
+  normalization callers.
+- Profile numeric parsing follows the pinned shapes and clamps transition to
+  `0..6553`; the service schema's broader coercion behavior is not reproduced
+  for every Python-only input form.
 - Core color utilities can clip xy values to a light-specific gamut. The
   descriptor has no gamut field yet, so conversions use the same no-gamut
   path Core uses when no gamut is passed.
@@ -91,41 +108,53 @@ fixture also exercises real broker commands, config-entry disable/re-enable and
 SQLite-backed registry identity. Expanded acceptance receipts are recorded in
 VALIDATION.md after the final candidate gate.
 
-## Next color-name and profile continuation
+## Named colors and profiles
 
-This contract is not implemented in the 52-member candidate.
+The SDK includes the pinned 148 CSS names and the `homeassistant` alias.
+Matching removes literal spaces and lowercases; tabs and newlines remain part
+of a lookup key. Unknown names normalize to white and attach a
+`light.unknown_color_name` diagnostic carrying `color_name` and the exact input
+value. The host owns once-per-request logging across target groups.
 
-- `util/color.py:20-176` embeds 149 names: 148 CSS entries and the Home
-  Assistant alias `(24,188,242)`. `color_name_to_rgb` at lines 198-206 removes
-  literal spaces and lowercases, then raises `ValueError("Unknown color")` on
-  a miss. Tabs and newlines are not general trimming characters.
-- `light/helper.py:123-134` converts unknown names to white and emits one
-  warning. `light/services.py:31-41` preprocesses once before target fan-out.
-  The current MQTT adapter normalizes per target; diagnostics need a request
-  boundary or deduplication rather than a log call in the pure SDK.
-- `light/light_profiles.csv` supplies relax, concentrate, energize and reading.
-  `Profile` in `light/__init__.py:230-280` accepts four or five fields: name,
-  optional x/y, optional byte brightness and optional clamped transition.
-  Both color coordinates are required for derived HS color.
-- The loader at lines 283-329 merges built-in then config-directory CSV, with
-  later names replacing earlier ones. It skips each header unconditionally.
-  A malformed profile row aborts the remaining rows of that file; a following
-  file is still processed. Unknown valid profile names apply as silent no-ops.
-- Entity defaults precede `group.all_lights.default` and fill missing fields
-  (`light/__init__.py:331-370`). Explicit color/brightness/transition win;
-  brightness percentage overrides profile brightness. Per-entity brightness
-  step handling precedes profile application.
-- For turn-on, off/unknown state receives full defaults. An already-on light
-  with no parameters also receives full defaults; with parameters it receives
-  only a missing transition. Explicit transition skips defaults. Turn-off
-  keeps only transition/flash after default lookup (`light/helper.py:137-167,
-  218-250`). Toggle selects the corresponding on/off path, and zero brightness
-  or white becomes off (`light/services.py:44-57`).
+The built-in CSV is embedded as data. `LightProfileCatalog::from_csv_sources`
+merges host-supplied strings in order, with later names replacing earlier
+entries. Each source skips exactly one record. The parser handles quoted and
+multiline fields, preserves field whitespace, treats an empty physical record
+as an invalid row, stops that source after the first invalid row, and continues
+with later sources. `from_csv_sources_with_report` also returns the source
+index, row index, parsed row or raw malformed record, and a stable reason so
+the host can report the path without reparsing. The SDK performs no file IO.
 
-Implementation needs a pure parsed profile catalog and normalization context,
-the registry-resolved entity ID, request-scoped diagnostics and a host-owned
-config-directory loader. Existing constructors must retain their compatibility
-path. New checks must cover all table values, literal-space behavior, warning
-deduplication, CSV override/abort rules, default precedence, rename and real MQTT
-payloads. Profile loading readiness must have an explicit host contract; source
-startup currently initializes the catalog asynchronously.
+`LightNormalizationContext` takes the registry-resolved entity ID explicitly
+and a ready catalog. `normalize_with_context` applies explicit profiles, then
+entity and `group.all_lights.default` defaults in source order. It retains the
+source's brightness-step precedence and explicit caller fields. Off/unknown
+states receive full defaults. An already-on request without effective
+parameters receives defaults; with parameters it receives only a missing
+transition, so an explicit transition prevents extra defaults on that path.
+The legacy `normalize` method uses built-ins without inferring an entity ID
+from the descriptor.
+
+The zero-brightness reroute restores the original common-preprocessed request
+before applying off defaults. Per-entity step processing and explicit profiles
+can modify a copy, but their transition must not leak into that reroute. A
+focused regression covers both step forms, absent and present defaults, and
+an explicit caller transition. All 27 light package cases and strict lint pass
+after this review correction.
+
+The host still owns file discovery, UTF-8/IO errors, asynchronous catalog
+readiness, diagnostic deduplication and provider execution. Light-specific
+gamut clipping, localization, Python-only service coercions, and broader
+provider/UI coverage remain outside this continuation.
+
+Candidate 53 supplies the host boundary in
+[`light_profiles.rs`](../crates/hass/src/light_profiles.rs): it reads the
+configuration file's sibling `light_profiles.csv`, merges it after the embedded
+built-ins, and completes the catalog before restoring config-entry providers.
+A malformed row retains prior rows and reports its path and logical record;
+an IO/UTF-8 failure leaves the whole catalog empty, matching the pinned
+initializer's assignment-after-success behavior. Missing paths and non-files
+retain built-ins. All three focused host fixtures pass. The
+`--check` return precedes all profile IO. The ready catalog is shared by the
+driver host; actual broker normalization and warning deduplication remain
+subject to the pending MQTT and compiled-process checks.

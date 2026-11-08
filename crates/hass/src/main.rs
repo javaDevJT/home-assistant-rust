@@ -9,6 +9,7 @@ mod homeassistant;
 mod instance_id;
 mod integration_drivers;
 mod ip_policy;
+mod light_profiles;
 mod logging;
 mod media_player;
 mod oauth2;
@@ -529,13 +530,15 @@ async fn main() -> Result<()> {
             record_successful_component(&runtime, component);
         }
     }
-    let drivers = integration_drivers::NativeDrivers::start_with_entity_lifecycle(
+    let light_profiles = light_profiles::load(&args.config).await;
+    let drivers = integration_drivers::NativeDrivers::start_with_entity_lifecycle_and_profiles(
         runtime.clone(),
         config_entries.clone(),
         registries.clone(),
         mqtt_topics,
         config.mqtt,
         entity_lifecycle.clone(),
+        light_profiles,
     )
     .await?;
     let templates = hass_template::TemplateEngine::new(runtime.clone());

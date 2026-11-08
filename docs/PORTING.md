@@ -296,12 +296,57 @@ Root owns the metadata-only publication follow-up. GitHub metadata confirms
 `javaDevJT/home-assistant-rust` is a fork of `home-assistant/core`, with
 `rust-rewrite` as its default branch.
 
-Next independent work is outside the frozen candidate: v163 is read-only on
-light color-name/profile source contracts, and v188 exclusively owns an
-isolated `crates/hass-climate/**` SDK and CLIMATE-PORT.md. Climate is not enrolled
-and its existence does not promote that domain. Do not stage its files in the
-52-member source commit.
-All new owners use native Luna/max, with provider/tier controls unexposed.
+The next candidate enrolls `hass-climate` as member 53. SDK owner v188 and
+read-only reviewer v189 released their scopes; root requires explicit native
+units, retains target exclusions, matches scalar mode coercion and the source's
+zero-low range check. Core v190 and config v191 released the unit context,
+request-scoped diagnostics, persisted selections and API unit dictionaries.
+Read-only v194 found no correctness issues; root added a passing cancellation
+scope regression. Light v192 released named colors and profile normalization;
+v199 identified an explicit-profile transition leaking through a zero-step
+off reroute. Root restores the original common-preprocessed off request and
+adds step/percentage-step/default/caller regressions (27 package tests pass;
+all 149 names and RGB values match the pinned AST). MQTT v193 owns lib.rs,
+inline tests and README for climate/provider and light-profile adoption;
+v203 completed the complementary wire fixtures. After repeated continuation
+loss, root explicitly stopped/interrupted v193 before taking over its surviving
+edits. Both MQTT implementation and wire files are now root-owned; the complete
+package passes six unit and 26 wire tests. Root owns shared manifests, the
+ready profile-file loader, driver injection, process acceptance,
+documentation integration and Git. Candidate 53 has no full-workspace or
+exact-source CI receipt yet; climate remains unported in the inventory.
+
+Review v204 found same-identity retained-update lease collisions, standalone
+update publication gaps, shared-topic sibling-field loss and stale optimistic
+snapshots at ACK completion. MQTT owns their corrections and wire regressions;
+the intended cache rule is to mutate commanded fields at actor admission and
+project the current live cache after ACK, preserving newer same-field telemetry.
+Protocol `C`/`F` spellings normalize to typed SDK units; omitted native units
+capture Core's configured unit at setup (`mqtt/climate.py:491-493`).
+Root also reproduced and blocked late ACKs from released publishers updating a
+replacement discovery entity. The final workspace test gate now passes 1,374
+tests across 158 targets, with zero failed or ignored; strict all-target Clippy
+and formatting pass. The optimized workspace build and native 20-case CLI
+matrix pass. Final macOS binary SHA-256 is
+`5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa`.
+
+Future SDK owners work outside candidate 53: v195 owns new `hass-lock/**` and
+LOCK-PORT.md, v196 `hass-humidifier/**` and HUMIDIFIER-PORT.md, v197
+`hass-siren/**` and SIREN-PORT.md, and v198 `hass-vacuum/**` and VACUUM-PORT.md.
+Lock released nine passing tests after correcting the supported terminal `$`
+anchor subset found by v201. Humidifier released twelve after v202's positive
+target, snapshot-based toggle and Unicode decimal coercion corrections; vacuum
+released ten after its positive-target/exclude corrections. Each passes strict
+lint and formatting checks. Runtime entity schemas require positive key
+presence, while truthy exclusions belong to script/config validation. Unicode
+integer tables target the pinned CPython 3.14.10 / Unicode 16 rather than the
+host interpreter's Unicode 17 data. Siren v197 released 21 passing tests after
+correcting those two boundaries from read-only v205's findings. The
+source-only v200 contract is in MQTT-PLATFORMS-PORT.md; root confirms preserving
+vacuum's pinned publish-topic validator for its state subscription field.
+Those packages remain isolated until root reviews and enrolls them. They do
+not establish provider acceptance or change integration statuses. All owners
+use native Luna/max, with provider/tier controls unexposed.
 
 ### Accepted native media and asynchronous services (44 crates)
 

@@ -24960,7 +24960,16 @@
       "component_directory": "homeassistant/components/climate/",
       "config_flow_classes": [],
       "domain": "climate",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "crates/hass-climate/src/lib.rs",
+        "crates/hass-climate/src/service.rs",
+        "crates/hass-climate/tests/climate_contract.rs",
+        "crates/hass-mqtt/src/lib.rs",
+        "crates/hass-mqtt/tests/wire.rs",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units",
+        "crates/hass-core/tests/runtime_units_diagnostics.rs",
+        "crates/hass-config/src/lib.rs#core_config_canonical_unit_systems_use_sdk_api_bundles_and_preserve_location"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -24973,10 +24982,10 @@
       },
       "manifest_blob_oid": "463a7fd5ac1d70a42162f77f7294719b4b542976",
       "manifest_path": "homeassistant/components/climate/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "The native climate SDK now defines service contracts, capability-aware state projection, native-unit temperature handling, and a shared MQTT provider. The MQTT path covers retained discovery, all ten service families, state and command templates, registry lifecycle, and native-unit cache/ACK behavior; compiled-process coverage includes disable/reload and SQLite identity. Only the MQTT provider is accepted. Additional climate providers, Python service/template/State-object representation, broader platform/UI behavior, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -26680,6 +26689,11 @@
       "config_flow_classes": [],
       "domain": "config",
       "local_evidence_paths": [
+        "crates/hass-config/src/lib.rs#core_config_canonical_unit_systems_use_sdk_api_bundles_and_preserve_location",
+        "crates/hass-config/src/lib.rs#legacy_imperial_storage_restores_without_rewriting_its_record",
+        "crates/hass-config/src/lib.rs#invalid_unit_bundle_is_rejected_before_runtime_or_storage_changes",
+        "crates/hass-config/src/lib.rs#unit_system_persistence_failure_does_not_change_runtime_selection",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units",
         "crates/hass-config/src/lib.rs#discovery_keys_are_typed_private_deduplicated_and_persisted",
         "crates/hass-config/src/lib.rs#removal_notifies_the_keys_present_at_the_deletion_commit",
         "crates/hass-config/src/lib.rs#committed_removal_notifies_discovery_after_cleanup_failure_without_replay_duplicates",
@@ -26742,7 +26756,7 @@
       },
       "manifest_blob_oid": "32aacff2c6fc2096829df4a1270b2f8346e28e31",
       "manifest_path": "homeassistant/components/config/manifest.json",
-      "outstanding_acceptance": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. The compiled MQTT process fixture confirms that config-entry disable removes all five managed platform entities, re-enable restores them, and SQLite restart preserves registry IDs. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage, and exhaustive pinned config acceptance remain open.",
+      "outstanding_acceptance": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. Unit-system config now persists canonical API bundles, restores legacy imperial storage without rewriting it, rejects invalid bundles before runtime/storage effects, and preserves runtime selection after persistence failure. The compiled MQTT process fixture confirms that config-entry disable removes all six managed platform entities, re-enable restores them, and SQLite restart preserves registry IDs. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage including sensor preferences, and exhaustive pinned config acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -58645,6 +58659,11 @@
       "config_flow_classes": [],
       "domain": "homeassistant",
       "local_evidence_paths": [
+        "crates/hass-core/tests/runtime_units_diagnostics.rs#unit_system_is_shared_by_clones_and_independent_between_runtimes",
+        "crates/hass-core/tests/runtime_units_diagnostics.rs#canceled_pending_call_does_not_leak_claims_to_the_thread_or_next_call",
+        "crates/hass-core/tests/runtime_units_diagnostics.rs#async_provider_groups_share_claims_across_construction_and_polls",
+        "crates/hass-core/tests/runtime_units_diagnostics.rs#nested_owned_blocking_call_uses_fresh_claims_and_restores_parent",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units",
         "crates/hass/src/homeassistant.rs",
         "crates/hass/tests/end_to_end.rs",
         "crates/hass-core/src/lib.rs",
@@ -58694,7 +58713,7 @@
       },
       "manifest_blob_oid": "c10e99e845466af084100ace7aad05ce5309020a",
       "manifest_path": "homeassistant/components/homeassistant/manifest.json",
-      "outstanding_acceptance": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent dispatch, cancellation, context and results. The compiled process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider and direct light.turn_off, cover.open_cover, and fan.turn_on calls produce real broker commands; switch/button Script device actions are also exercised. Other core services, full selector/exclusion variants, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent dispatch, cancellation, context and results. Four Core runtime tests now cover shared-but-isolated UnitSystem state and request diagnostic claims across grouped providers, polls, nested calls, and cancellation. The compiled process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider and direct light.turn_off, cover.open_cover, fan.turn_on, and climate lifecycle calls reach real broker commands; switch/button Script device actions are also exercised. Other core services, full selector/exclusion variants, Python service/template/State-object representation, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -78270,6 +78289,12 @@
       "config_flow_classes": [],
       "domain": "light",
       "local_evidence_paths": [
+        "crates/hass-light/src/named_colors.rs#lookup_matches_source_normalization_and_alias",
+        "crates/hass-light/src/profiles.rs#custom_profiles_override_builtin_names_and_support_four_or_five_columns",
+        "crates/hass-light/src/service.rs#explicit_profiles_apply_defaults_and_caller_brightness_forms_win",
+        "crates/hass-light/src/service.rs#default_profiles_use_resolved_entity_then_group_and_fill_transition_only_when_on",
+        "crates/hass-light/src/service.rs#zero_brightness_step_reroutes_original_params_and_uses_only_off_defaults",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units",
         "docs/LIGHT-PORT.md",
         "crates/hass-light/README.md",
         "crates/hass-light/src/lib.rs",
@@ -78305,7 +78330,7 @@
       },
       "manifest_blob_oid": "2130241b6dcd4230f9e6705d859f24a4fa1ac6c9",
       "manifest_path": "homeassistant/components/light/manifest.json",
-      "outstanding_acceptance": "Typed light descriptors/snapshots, live capabilities, service validation/normalization, color conversion, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Core profile application/default transitions, the full CSS color_name mapping and warning behavior, light-specific gamut clipping, Python coercion edge cases, other provider setup/catalog coverage, localization/translations, frontend/UI, and exhaustive pinned acceptance remain open. The SDK also keeps explicit range/finite-value guards where the pinned accessors do not validate provider values.",
+      "outstanding_acceptance": "Typed light descriptors/snapshots, live capabilities, service validation/normalization, color conversion, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Twenty-seven package cases check the 149-entry source-exact named-color palette, built-in and custom CSV profiles, context defaults, profile application, transition/brightness behavior, and zero-brightness-step rerouting; process fixtures also cover ready profiles and once-per-call warnings. Other provider setup/catalog coverage, Python coercion edge cases, localization/translations, frontend/UI, and exhaustive pinned acceptance remain open. The SDK also keeps explicit range/finite-value guards where the pinned accessors do not validate provider values.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -80284,6 +80309,8 @@
       "config_flow_classes": [],
       "domain": "logger",
       "local_evidence_paths": [
+        "crates/hass/src/logging.rs#native_target_aliases_keep_integration_levels_independent",
+        "crates/hass-logger/src/lib.rs#integration_log_info_only_reports_supplied_native_catalog",
         "crates/hass-logger/src/lib.rs",
         "crates/hass-logger/src/records.rs",
         "crates/hass-logger/README.md",
@@ -80309,7 +80336,7 @@
       },
       "manifest_blob_oid": "eed80c3f4608bb16b878266db0063af22942a773",
       "manifest_path": "homeassistant/components/logger/manifest.json",
-      "outstanding_acceptance": "Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
+      "outstanding_acceptance": "The native target catalog maps climate to its separate `hass_climate` SDK namespace. SDK logger listing reports the supplied catalog and does not establish that those SDKs emitted logs. Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -90110,6 +90137,18 @@
       ],
       "domain": "mqtt",
       "local_evidence_paths": [
+        "crates/hass-mqtt/src/lib.rs#async_publish_tests::late_ack_cannot_publish_into_a_replacement_discovery_entity",
+        "crates/hass-climate/src/lib.rs",
+        "crates/hass-climate/src/service.rs",
+        "crates/hass-climate/tests/climate_contract.rs",
+        "crates/hass-mqtt/tests/wire.rs#shared_climate_discovery_projects_all_topics_and_tracks_registry_lifecycle",
+        "crates/hass-mqtt/tests/wire.rs#retained_climate_discovery_update_replaces_live_lifecycle_registration",
+        "crates/hass-mqtt/tests/wire.rs#climate_services_publish_all_families_and_resolve_hvac_fallbacks",
+        "crates/hass-mqtt/tests/wire.rs#climate_topic_templates_receive_entity_name_state_and_attributes",
+        "crates/hass-mqtt/tests/wire.rs#climate_native_units_reproject_and_keep_captured_commands_native_across_ack_wait",
+        "crates/hass-mqtt/tests/wire.rs#climate_optimistic_command_ack_preserves_new_inbound_telemetry",
+        "crates/hass-mqtt/tests/wire.rs#climate_equal_preflight_temperature_is_admitted_before_held_ack",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units",
         "crates/hass-mqtt/src/lib.rs",
         "crates/hass-mqtt/tests/wire.rs",
         "crates/hass/src/integration_drivers.rs",
@@ -90184,7 +90223,7 @@
       },
       "manifest_blob_oid": "ad9f55bd55815237942b2a149f64e88bd71eeeab",
       "manifest_path": "homeassistant/components/mqtt/manifest.json",
-      "outstanding_acceptance": "MQTT now uses native switch, button, light, cover, and fan SDK paths. Five unit and 18 wire tests cover discovery/config, QoS callback completion, cancellation/timeouts/late ACKs, per-target driver-owned fan effect chains, cover direction/toggle/tilt behavior, and release/shutdown guards. The compiled process fixture exercises all five managed platforms, broker commands, entry disable/absence/reload, and SQLite-backed entity identity. Additional MQTT platform adapters, discovery/manifest/schema variants, and exhaustive pinned protocol acceptance remain open.",
+      "outstanding_acceptance": "MQTT now uses native switch, button, light, cover, fan, and climate SDK paths. Six unit and 26 wire tests cover discovery/config, QoS callback completion, cancellation/timeouts/late ACKs, per-target driver-owned fan effect chains, cover direction/toggle/tilt, and the climate's ten service families, twelve state attributes, native-unit/cache/ACK behavior, and templates. The process fixtures exercise all six managed platforms, climate registry disable/reload with SQLite entity identity, and ready custom light profiles, transition/brightness, zero-step off rerouting, and once-per-call warnings. Additional MQTT platform adapters, discovery/manifest/schema variants, exhaustive pinned protocol acceptance, and orphan-device/trigger/tag cleanup remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -169571,7 +169610,7 @@
         "domain": "config",
         "local_evidence": [
           {
-            "line_count": 2356,
+            "line_count": 3522,
             "path": "crates/hass-registry/src/lib.rs",
             "public_functions": [
               "new",
@@ -169612,7 +169651,7 @@
             "test_functions_present": []
           },
           {
-            "line_count": 905,
+            "line_count": 2675,
             "path": "crates/hass-api/src/websocket.rs",
             "public_functions": [],
             "test_functions_present": [
@@ -169638,9 +169677,13 @@
               "committed_removal_notifies_discovery_after_cleanup_failure_without_replay_duplicates",
               "discovery_flow_creation_and_removal_notify_after_cleanup_outside_locks",
               "discovery_removal_replay_keeps_keys_out_of_cleanup_journal",
-              "observer_guard_unregisters_only_its_owned_instance"
+              "observer_guard_unregisters_only_its_owned_instance",
+              "core_config_canonical_unit_systems_use_sdk_api_bundles_and_preserve_location",
+              "legacy_imperial_storage_restores_without_rewriting_its_record",
+              "invalid_unit_bundle_is_rejected_before_runtime_or_storage_changes",
+              "unit_system_persistence_failure_does_not_change_runtime_selection"
             ],
-            "line_count": 9702,
+            "line_count": 9871,
             "public_functions": []
           },
           {
@@ -169711,7 +169754,7 @@
           },
           {
             "path": "crates/hass/src/main.rs",
-            "line_count": 786,
+            "line_count": 850,
             "public_functions": [],
             "test_functions_present": []
           },
@@ -169725,14 +169768,25 @@
           },
           {
             "path": "crates/hass/tests/mqtt_process.rs",
-            "line_count": 1338,
+            "line_count": 1659,
             "public_functions": [],
             "test_functions_present": [
-              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces",
+              "compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units"
+            ]
+          },
+          {
+            "path": "crates/hass-core/tests/runtime_units_diagnostics.rs",
+            "line_count": 263,
+            "test_functions_present": [
+              "unit_system_is_shared_by_clones_and_independent_between_runtimes",
+              "canceled_pending_call_does_not_leak_claims_to_the_thread_or_next_call",
+              "async_provider_groups_share_claims_across_construction_and_polls",
+              "nested_owned_blocking_call_uses_fresh_claims_and_restores_parent"
             ]
           }
         ],
-        "remaining": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. The compiled MQTT process fixture confirms that config-entry disable removes all five managed platform entities, re-enable restores them, and SQLite restart preserves registry IDs. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage, and exhaustive pinned config acceptance remain open.",
+        "remaining": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. Unit-system config now persists canonical API bundles, restores legacy imperial storage without rewriting it, rejects invalid bundles before runtime/storage effects, and preserves runtime selection after persistence failure. The compiled MQTT process fixture confirms that config-entry disable removes all six managed platform entities, re-enable restores them, and SQLite restart preserves registry IDs. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage including sensor preferences, and exhaustive pinned config acceptance remain open.",
         "status": "partial",
         "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
@@ -170105,7 +170159,7 @@
           },
           {
             "path": "crates/hass-core/src/lib.rs",
-            "line_count": 4803,
+            "line_count": 4886,
             "public_functions": [],
             "test_functions_present": [
               "async_dispatch_mixes_entity_handlers_and_preflights_once",
@@ -170135,14 +170189,25 @@
           },
           {
             "path": "crates/hass/tests/mqtt_process.rs",
-            "line_count": 1338,
+            "line_count": 1659,
             "public_functions": [],
             "test_functions_present": [
-              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces",
+              "compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units"
+            ]
+          },
+          {
+            "path": "crates/hass-core/tests/runtime_units_diagnostics.rs",
+            "line_count": 263,
+            "test_functions_present": [
+              "unit_system_is_shared_by_clones_and_independent_between_runtimes",
+              "canceled_pending_call_does_not_leak_claims_to_the_thread_or_next_call",
+              "async_provider_groups_share_claims_across_construction_and_polls",
+              "nested_owned_blocking_call_uses_fresh_claims_and_restores_parent"
             ]
           }
         ],
-        "remaining": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent dispatch, cancellation, context and results. The compiled process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider and direct light.turn_off, cover.open_cover, and fan.turn_on calls produce real broker commands; switch/button Script device actions are also exercised. Other core services, full selector/exclusion variants, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
+        "remaining": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent dispatch, cancellation, context and results. Four Core runtime tests now cover shared-but-isolated UnitSystem state and request diagnostic claims across grouped providers, polls, nested calls, and cancellation. The compiled process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider and direct light.turn_off, cover.open_cover, fan.turn_on, and climate lifecycle calls reach real broker commands; switch/button Script device actions are also exercised. Other core services, full selector/exclusion variants, Python service/template/State-object representation, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
         "status": "partial",
         "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
@@ -170423,7 +170488,7 @@
             "path": "crates/hass/src/system_sensors.rs"
           }
         ],
-        "remaining": "Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
+        "remaining": "The native target catalog maps climate to its separate `hass_climate` SDK namespace. SDK logger listing reports the supplied catalog and does not establish that those SDKs emitted logs. Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
         "status": "partial",
         "verification": "Published revision 216bb1f1271e8f2cf7dd6ae4c4161cda4df34bff records 517 tests/66 targets for 25 crates. The current 27-crate tree passes formatting, strict Clippy and 578 tests/71 targets, including all 16 logger cases: dynamic LogTracer targets/regex, critical severity, original span/event/TRACE fields and transport-only context under independent logger thresholds. Release/CLI and exact CI receipts remain separate. This inventory writer did not run tests."
       },
@@ -170508,7 +170573,7 @@
         "domain": "mqtt",
         "local_evidence": [
           {
-            "line_count": 6521,
+            "line_count": 8609,
             "path": "crates/hass-mqtt/src/lib.rs",
             "public_functions": [
               "validate",
@@ -170522,11 +170587,12 @@
               "callback_timeout_advances_one_continuation_and_late_ack_does_not_repeat_it",
               "attribute_only_optimism_uses_the_state_cached_at_completion",
               "failed_or_unsupported_discovery_does_not_record_component_receipts",
-              "rumqttc_queue_error_returns_error_without_optimistic_state"
+              "rumqttc_queue_error_returns_error_without_optimistic_state",
+              "late_ack_cannot_publish_into_a_replacement_discovery_entity"
             ]
           },
           {
-            "line_count": 3206,
+            "line_count": 4687,
             "path": "crates/hass-mqtt/tests/wire.rs",
             "public_functions": [],
             "test_functions_present": [
@@ -170547,12 +170613,20 @@
               "qos1_callback_timeout_completes_normally_and_late_ack_does_not_stick",
               "held_ack_completion_while_unavailable_preserves_new_attributes_and_reconnects",
               "shared_button_presses_ack_independently_and_report_their_timestamp_states",
-              "canceling_start_signals_and_reaps_the_connected_event_loop"
+              "canceling_start_signals_and_reaps_the_connected_event_loop",
+              "shared_climate_discovery_projects_all_topics_and_tracks_registry_lifecycle",
+              "retained_climate_discovery_update_replaces_live_lifecycle_registration",
+              "climate_services_publish_all_families_and_resolve_hvac_fallbacks",
+              "climate_topic_templates_receive_entity_name_state_and_attributes",
+              "climate_native_units_reproject_and_keep_captured_commands_native_across_ack_wait",
+              "light_profiles_and_legacy_basic_template_share_the_loopback_driver",
+              "climate_optimistic_command_ack_preserves_new_inbound_telemetry",
+              "climate_equal_preflight_temperature_is_admitted_before_held_ack"
             ]
           },
           {
             "path": "crates/hass/src/integration_drivers.rs",
-            "line_count": 1550,
+            "line_count": 1566,
             "public_functions": [],
             "test_functions_present": [
               "mqtt_device_identity_uses_mqtt_domain_and_connection_pairs",
@@ -170575,15 +170649,16 @@
           },
           {
             "path": "crates/hass/tests/mqtt_process.rs",
-            "line_count": 1338,
+            "line_count": 1659,
             "public_functions": [],
             "test_functions_present": [
-              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces",
+              "compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units"
             ]
           },
           {
             "path": "crates/hass-light/src/lib.rs",
-            "line_count": 1049
+            "line_count": 1057
           },
           {
             "path": "crates/hass-cover/src/lib.rs",
@@ -170594,7 +170669,7 @@
             "line_count": 800
           }
         ],
-        "remaining": "MQTT now uses native switch, button, light, cover, and fan SDK paths. Five unit and 18 wire tests cover discovery/config, QoS callback completion, cancellation/timeouts/late ACKs, per-target driver-owned fan effect chains, cover direction/toggle/tilt behavior, and release/shutdown guards. The compiled process fixture exercises all five managed platforms, broker commands, entry disable/absence/reload, and SQLite-backed entity identity. Additional MQTT platform adapters, discovery/manifest/schema variants, and exhaustive pinned protocol acceptance remain open.",
+        "remaining": "MQTT now uses native switch, button, light, cover, fan, and climate SDK paths. Six unit and 26 wire tests cover discovery/config, QoS callback completion, cancellation/timeouts/late ACKs, per-target driver-owned fan effect chains, cover direction/toggle/tilt, and the climate's ten service families, twelve state attributes, native-unit/cache/ACK behavior, and templates. Pending optimistic completion is bound to the original entity handle, preventing a released publisher's late ACK from changing a replacement entity. The process fixtures exercise all six managed platforms, climate registry disable/reload with SQLite entity identity, and ready custom light profiles, transition/brightness, zero-step off rerouting, and once-per-call warnings. Additional MQTT platform adapters, discovery/manifest/schema variants, exhaustive pinned protocol acceptance, and orphan-device/trigger/tag cleanup remain open.",
         "status": "partial",
         "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
       },
@@ -172518,7 +172593,7 @@
         "local_evidence": [
           {
             "path": "docs/LIGHT-PORT.md",
-            "line_count": 131
+            "line_count": 160
           },
           {
             "path": "crates/hass-light/README.md",
@@ -172526,7 +172601,27 @@
           },
           {
             "path": "crates/hass-light/src/lib.rs",
-            "line_count": 1049
+            "line_count": 1057
+          },
+          {
+            "path": "crates/hass-light/src/named_colors.rs",
+            "line_count": 47,
+            "test_functions_present": [
+              "lookup_matches_source_normalization_and_alias"
+            ]
+          },
+          {
+            "path": "crates/hass-light/src/profiles.rs",
+            "line_count": 431,
+            "test_functions_present": [
+              "builtins_match_pinned_values",
+              "custom_profiles_override_builtin_names_and_support_four_or_five_columns",
+              "quoted_fields_and_multiline_values_are_preserved",
+              "skips_one_header_and_stops_each_file_at_blank_or_invalid_rows",
+              "exact_empty_is_optional_but_whitespace_only_numbers_abort_the_file",
+              "names_are_not_trimmed_and_later_source_wins",
+              "report_identifies_first_bad_record_by_source_and_preserves_row_text"
+            ]
           },
           {
             "path": "crates/hass-light/src/color.rs",
@@ -172539,13 +172634,20 @@
           },
           {
             "path": "crates/hass-light/src/service.rs",
-            "line_count": 882,
+            "line_count": 1399,
             "test_functions_present": [
               "parses_targets_and_normalizes_brightness_and_color_to_native_mode",
               "brightness_steps_use_current_light_state_and_clamp_to_home_assistant_range",
               "zero_brightness_turns_on_request_into_off_and_filters_on_only_fields",
               "xy_to_temperature_uses_the_pinned_singularity_fallback",
-              "rejects_schema_conflicts_unknown_target_fields_and_invalid_color_arrays"
+              "rejects_schema_conflicts_unknown_target_fields_and_invalid_color_arrays",
+              "named_colors_convert_and_unknown_names_fall_back_with_original_diagnostic",
+              "explicit_profiles_apply_defaults_and_caller_brightness_forms_win",
+              "zero_brightness_step_reroutes_original_params_and_uses_only_off_defaults",
+              "legacy_normalize_uses_builtin_profiles_without_descriptor_id_inference",
+              "default_profiles_use_resolved_entity_then_group_and_fill_transition_only_when_on",
+              "unknown_profile_can_leave_empty_request_for_defaults_and_turn_off_keeps_only_default_transition",
+              "toggle_off_retains_common_color_diagnostic_but_step_bypass_does_not_create_one"
             ]
           },
           {
@@ -172566,37 +172668,164 @@
           },
           {
             "path": "crates/hass-mqtt/src/lib.rs",
-            "line_count": 6521
+            "line_count": 8609
           },
           {
             "path": "crates/hass-mqtt/tests/wire.rs",
-            "line_count": 3206,
+            "line_count": 4687,
             "test_functions_present": [
               "shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases"
             ]
           },
           {
             "path": "crates/hass/tests/mqtt_process.rs",
-            "line_count": 1338,
+            "line_count": 1659,
             "test_functions_present": [
-              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces",
+              "compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units"
             ]
           }
         ],
-        "remaining": "Typed light descriptors/snapshots, live capabilities, service validation/normalization, color conversion, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Core profile application/default transitions, the full CSS color_name mapping and warning behavior, light-specific gamut clipping, Python coercion edge cases, other provider setup/catalog coverage, localization/translations, frontend/UI, and exhaustive pinned acceptance remain open. The SDK also keeps explicit range/finite-value guards where the pinned accessors do not validate provider values.",
+        "remaining": "Typed light descriptors/snapshots, live capabilities, service validation/normalization, color conversion, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Twenty-seven package cases check the 149-entry source-exact named-color palette, built-in and custom CSV profiles, context defaults, profile application, transition/brightness behavior, and zero-brightness-step rerouting; process fixtures also cover ready profiles and once-per-call warnings. Other provider setup/catalog coverage, Python coercion edge cases, localization/translations, frontend/UI, and exhaustive pinned acceptance remain open. The SDK also keeps explicit range/finite-value guards where the pinned accessors do not validate provider values.",
         "status": "partial",
         "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
+      },
+      {
+        "domain": "climate",
+        "local_evidence": [
+          {
+            "path": "crates/hass-climate/src/lib.rs",
+            "line_count": 1540
+          },
+          {
+            "path": "crates/hass-climate/src/service.rs",
+            "line_count": 708
+          },
+          {
+            "path": "crates/hass-climate/tests/climate_contract.rs",
+            "line_count": 1169,
+            "test_functions_present": [
+              "pinned_modes_features_and_service_names_are_exposed",
+              "each_registered_service_family_resolves_to_its_provider_effect",
+              "parsed_request_carries_selectors_and_causal_context_to_the_plan",
+              "targets_require_positive_selectors_and_preserve_exclusions_without_frontend_metadata",
+              "provider_mode_fields_coerce_json_scalars_with_python_string_spelling",
+              "zero_low_temperature_preserves_source_falsey_range_validation",
+              "entity_spec_retains_registry_identity_features_and_global_unit_capabilities",
+              "schema_rejects_unknown_mixed_missing_and_duplicate_fields_before_planning",
+              "feature_gates_and_mode_lists_reject_commands_before_effects",
+              "each_provider_mode_list_rejects_unadvertised_values",
+              "temperatures_use_shared_conversion_and_source_range_clamping",
+              "native_unit_is_required_and_default_bounds_follow_explicit_provider_units",
+              "humidity_uses_provider_bounds_and_accepts_inclusive_endpoints",
+              "projection_keeps_unknown_off_nullable_and_feature_gated_states_distinct",
+              "publication_retains_live_capabilities_and_registry_lifecycle_context",
+              "unavailable_publication_removes_disabled_live_capability_but_not_user_metadata"
+            ]
+          },
+          {
+            "path": "crates/hass-mqtt/src/lib.rs",
+            "line_count": 8609,
+            "test_functions_present": [
+              "async_publish_tests::late_ack_cannot_publish_into_a_replacement_discovery_entity"
+            ]
+          },
+          {
+            "path": "crates/hass-mqtt/tests/wire.rs",
+            "line_count": 4687,
+            "test_functions_present": [
+              "shared_climate_discovery_projects_all_topics_and_tracks_registry_lifecycle",
+              "retained_climate_discovery_update_replaces_live_lifecycle_registration",
+              "climate_services_publish_all_families_and_resolve_hvac_fallbacks",
+              "climate_topic_templates_receive_entity_name_state_and_attributes",
+              "climate_native_units_reproject_and_keep_captured_commands_native_across_ack_wait",
+              "climate_optimistic_command_ack_preserves_new_inbound_telemetry",
+              "climate_equal_preflight_temperature_is_admitted_before_held_ack"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/mqtt_process.rs",
+            "line_count": 1659,
+            "test_functions_present": [
+              "compiled_process_uses_ready_light_profiles_and_reprojects_native_climate_units"
+            ]
+          },
+          {
+            "path": "crates/hass-core/tests/runtime_units_diagnostics.rs",
+            "line_count": 263,
+            "test_functions_present": [
+              "unit_system_is_shared_by_clones_and_independent_between_runtimes",
+              "canceled_pending_call_does_not_leak_claims_to_the_thread_or_next_call",
+              "async_provider_groups_share_claims_across_construction_and_polls",
+              "nested_owned_blocking_call_uses_fresh_claims_and_restores_parent"
+            ]
+          },
+          {
+            "path": "crates/hass-config/src/lib.rs",
+            "line_count": 9871,
+            "test_functions_present": [
+              "core_config_canonical_unit_systems_use_sdk_api_bundles_and_preserve_location",
+              "legacy_imperial_storage_restores_without_rewriting_its_record",
+              "invalid_unit_bundle_is_rejected_before_runtime_or_storage_changes",
+              "unit_system_persistence_failure_does_not_change_runtime_selection"
+            ]
+          }
+        ],
+        "remaining": "Only the shared MQTT climate provider is accepted. Additional climate providers, Python service/template/State-object representation, broader platform/UI behavior, and exhaustive pinned acceptance remain open. Registry sensor preferences and MQTT orphan-device/trigger/tag cleanup are outside this pass.",
+        "status": "partial",
+        "verification": "Candidate53 local gates pass 1,374 tests across 158 targets with zero failures or ignored cases, six MQTT unit and 26 wire tests, strict locked offline all-target Clippy, formatting, the optimized workspace build, and all 20 optimized CLI cases. The final optimized macOS binary is 28,949,248 bytes with SHA-256 5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa. Source commit/publication and exact-source Linux CI remain pending; source52 publication and CI receipts remain historical in docs/PARITY.md."
       }
     ],
-    "partial": 54,
+    "partial": 55,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1511,
+    "unported": 1510,
+    "historical_candidate_receipts": [
+      {
+        "candidate": "native-52",
+        "candidate_crates": 52,
+        "workspace_tests": 1321,
+        "workspace_targets": 154,
+        "failed_tests": 0,
+        "ignored_tests": 0,
+        "workspace_formatting": "passed",
+        "strict_locked_offline_all_target_clippy": "passed",
+        "optimized_workspace_build": "passed",
+        "optimized_native_cli_matrix": {
+          "cases": 20,
+          "suite": "crates/hass/tests/check_config.rs",
+          "result": "all passed against the optimized binary"
+        },
+        "optimized_macos_binary_sha256": "de5dced125913f18d09ca28132340b1fde98b20e793e688312f167cfe9c78255",
+        "source_commit": "83aaa07027efe8a233ed441a097b7b566a88f9a6",
+        "source_publication": "published",
+        "exact_source_linux_ci_run": {
+          "id": 42466298539,
+          "url": "https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539",
+          "head_sha": "83aaa07027efe8a233ed441a097b7b566a88f9a6",
+          "status": "completed",
+          "conclusion": "success"
+        },
+        "exact_source_linux_ci": "passed",
+        "independent_unit_checks": {
+          "converter_families": 31,
+          "converter_factor_bit_patterns_matched": 190,
+          "unit_system_mapping_rows": 118,
+          "unit_system_metric_rows": 56,
+          "unit_system_us_rows": 62,
+          "unit_system_public_api_probes": 6208,
+          "unit_system_selection_domains": 8,
+          "unit_system_mapping_content_matches_source": true,
+          "only_unit_system_difference": "BTreeMap key ordering differs from Python insertion order; serialized mapping content matches."
+        },
+        "note": "Published 52-crate native source; root verified the exact Linux CI head and successful conclusion. Units is a shared library, not an integration domain."
+      }
+    ],
     "current_local_candidate_receipt": {
-      "candidate": "native-52",
-      "candidate_crates": 52,
-      "workspace_tests": 1321,
-      "workspace_targets": 154,
+      "candidate": "native-53",
+      "candidate_crates": 53,
+      "workspace_tests": 1374,
+      "workspace_targets": 158,
       "failed_tests": 0,
       "ignored_tests": 0,
       "workspace_formatting": "passed",
@@ -172605,31 +172834,15 @@
       "optimized_native_cli_matrix": {
         "cases": 20,
         "suite": "crates/hass/tests/check_config.rs",
-        "result": "all passed against the optimized binary"
+        "result": "all 20 passed against the final optimized binary; no database or extra files created and no ignored-secret echo"
       },
-      "optimized_macos_binary_sha256": "de5dced125913f18d09ca28132340b1fde98b20e793e688312f167cfe9c78255",
-      "source_commit": "83aaa07027efe8a233ed441a097b7b566a88f9a6",
-      "source_publication": "published",
-      "exact_source_linux_ci_run": {
-        "id": 42466298539,
-        "url": "https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539",
-        "head_sha": "83aaa07027efe8a233ed441a097b7b566a88f9a6",
-        "status": "completed",
-        "conclusion": "success"
-      },
-      "exact_source_linux_ci": "passed",
-      "independent_unit_checks": {
-        "converter_families": 31,
-        "converter_factor_bit_patterns_matched": 190,
-        "unit_system_mapping_rows": 118,
-        "unit_system_metric_rows": 56,
-        "unit_system_us_rows": 62,
-        "unit_system_public_api_probes": 6208,
-        "unit_system_selection_domains": 8,
-        "unit_system_mapping_content_matches_source": true,
-        "only_unit_system_difference": "BTreeMap key ordering differs from Python insertion order; serialized mapping content matches."
-      },
-      "note": "Published 52-crate native source; root verified the exact Linux CI head and successful conclusion. Units is a shared library, not an integration domain."
+      "optimized_macos_binary_sha256": "5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa",
+      "optimized_macos_binary_size_bytes": 28949248,
+      "source_commit": null,
+      "source_publication": "pending",
+      "exact_source_linux_ci_run": null,
+      "exact_source_linux_ci": "pending",
+      "note": "The post-guard 53-crate local workspace gate passes 1,374 tests across 158 targets with zero failures or ignored cases, six MQTT unit tests and 26 wire tests, strict locked offline all-target Clippy, and formatting. The final optimized workspace build and all 20 optimized CLI cases pass; CLI checks create no database or extra files and do not echo ignored secrets. The optimized macOS binary hash and size are recorded above. Source commit/publication and exact-source Linux CI remain pending; no candidate53 source commit exists yet. Units is a shared library, not an integration domain."
     }
   },
   "title": "Pinned Home Assistant Core porting inventory"

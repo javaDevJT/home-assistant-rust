@@ -13,6 +13,11 @@ use hass_button::{
     ButtonDescriptor, ButtonDeviceClass, ButtonPressFuture, ButtonPressHandler, ButtonPressOutcome,
     ButtonPressRequest, ButtonSnapshot, ButtonTimestamp, execute_button_press_at,
 };
+use hass_climate::{
+    ClimateCommand, ClimateDescriptor, ClimateEffect, ClimateFeature, ClimateFeatures,
+    ClimateService, ClimateSnapshot, ClimateTemperatureUnit, ClimateUnitContext, HvacAction,
+    HvacMode,
+};
 use hass_core::{Context, Error, Result, Runtime, ServiceCall, ServiceResult, State};
 use hass_cover::{
     CoverAction, CoverCommand, CoverDescriptor, CoverDeviceClass, CoverFeatures, CoverSnapshot,
@@ -22,11 +27,13 @@ use hass_entity::{EntityHandle, EntityLifecycle, EntityPublication, EntitySnapsh
 use hass_fan::{FanCommand, FanDescriptor, FanEffect, FanFeatures, FanSnapshot, FanState};
 use hass_light::{
     LightAction, LightColorMode, LightCommand, LightDescriptor, LightFeature, LightFeatures,
-    LightSnapshot, NormalizedLightCommand,
+    LightNormalizationContext, LightProfileCatalog, LightServiceDiagnostic, LightSnapshot,
+    NormalizedLightCommand,
 };
 use hass_registry::{DeviceRegistration, Registries};
 use hass_switch::{SwitchCommand, SwitchDescriptor, SwitchDeviceClass, SwitchSnapshot};
 use hass_template::TemplateEngine;
+use hass_units::{UnitFamily, UnitSystemKind, convert};
 use regex::Regex;
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS, Transport};
 use serde::{Deserialize, Serialize};
@@ -272,12 +279,18 @@ impl MqttIntegration {
     /// connection that cannot be established is returned as an error instead
     /// of leaving a detached background retry loop behind.
     pub async fn start(runtime: Runtime, config: MqttConfig) -> Result<Self> {
-        Self::start_inner(runtime, config, None).await
+        Self::start_inner(
+            runtime,
+            config,
+            None,
+            Arc::new(LightProfileCatalog::built_in()),
+        )
+        .await
     }
 
     /// Start MQTT using the application's shared entity lifecycle for native
-    /// switch, button, light, cover, and fan discoveries. Other MQTT platforms
-    /// keep the standalone path.
+    /// switch, button, light, cover, fan, and climate discoveries. Other MQTT
+    /// platforms keep the standalone path.
     pub async fn start_with_entity_lifecycle(
         runtime: Runtime,
         config: MqttConfig,
@@ -300,6 +313,37 @@ impl MqttIntegration {
                 provider_id: format!("mqtt:{entry_id}"),
                 entry_id,
             }),
+            Arc::new(LightProfileCatalog::built_in()),
+        )
+        .await
+    }
+
+    /// Start MQTT with the shared entity lifecycle and a host-loaded profile
+    /// catalog for native light service normalization.
+    pub async fn start_with_entity_lifecycle_and_profiles(
+        runtime: Runtime,
+        config: MqttConfig,
+        lifecycle: EntityLifecycle,
+        registries: Registries,
+        entry_id: &str,
+        profiles: Arc<LightProfileCatalog>,
+    ) -> Result<Self> {
+        if entry_id.trim().is_empty() {
+            return Err(Error::InvalidInput(
+                "MQTT entity lifecycle requires a config entry ID".into(),
+            ));
+        }
+        let entry_id = entry_id.to_owned();
+        Self::start_inner(
+            runtime,
+            config,
+            Some(SharedEntityLifecycleContext {
+                lifecycle,
+                registries,
+                provider_id: format!("mqtt:{entry_id}"),
+                entry_id,
+            }),
+            profiles,
         )
         .await
     }
@@ -308,6 +352,7 @@ impl MqttIntegration {
         runtime: Runtime,
         config: MqttConfig,
         entity_lifecycle: Option<SharedEntityLifecycleContext>,
+        profiles: Arc<LightProfileCatalog>,
     ) -> Result<Self> {
         config.validate()?;
 
@@ -336,6 +381,7 @@ impl MqttIntegration {
         let metadata = Arc::new(RwLock::new(BTreeMap::new()));
         let additional_subscriptions = Arc::new(RwLock::new(BTreeMap::new()));
         let templates = TemplateEngine::new(runtime.clone());
+        let core_events = runtime.subscribe();
 
         let task_entities = Arc::clone(&entities);
         let task_metadata = Arc::clone(&metadata);
@@ -347,6 +393,7 @@ impl MqttIntegration {
             event_loop,
             command_rx,
             subscription_rx,
+            core_events,
             stop_rx,
             ready_tx,
             task_entities,
@@ -387,6 +434,7 @@ impl MqttIntegration {
             Arc::clone(&entities),
             templates,
             Arc::clone(&command_admission),
+            profiles,
         ) {
             if let Err(cleanup_error) = runtime.unregister_entity_services(&service_owner) {
                 warn!(owner = %service_owner, error = %cleanup_error, "failed to clean up partial MQTT service registration");
@@ -607,6 +655,7 @@ enum AvailabilityMode {
 struct DiscoveredEntity {
     metadata: MqttEntityMetadata,
     shared_entity: Option<SharedMqttEntity>,
+    climate: Option<MqttClimateEntity>,
     switch_device_class: Option<SwitchDeviceClass>,
     button_device_class: Option<ButtonDeviceClass>,
     button_last_value: Arc<Mutex<Option<LastValue>>>,
@@ -634,6 +683,56 @@ struct DiscoveredEntity {
 }
 
 #[derive(Clone, Debug)]
+struct MqttClimateEntity {
+    descriptor: ClimateDescriptor,
+    state: Arc<Mutex<MqttClimateState>>,
+    state_topics: BTreeMap<String, Vec<ClimateStateField>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ClimateStateField {
+    Action,
+    CurrentHumidity,
+    CurrentTemperature,
+    TargetHumidity,
+    HvacMode,
+    FanMode,
+    SwingHorizontalMode,
+    SwingMode,
+    PresetMode,
+    TargetTemperature,
+    TargetTemperatureLow,
+    TargetTemperatureHigh,
+}
+
+#[derive(Clone, Debug)]
+struct MqttClimateState {
+    snapshot: ClimateSnapshot,
+    parked_target_temperature: Option<f64>,
+    parked_target_temperature_range: (Option<f64>, Option<f64>),
+    single_and_range_setpoints: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ClimateStateUpdate {
+    mutations: Vec<ClimateStateMutation>,
+}
+
+#[derive(Clone, Debug)]
+enum ClimateStateMutation {
+    HvacMode(HvacMode),
+    HvacModeWithoutSetpointSwap(HvacMode),
+    TargetTemperature(f64),
+    TargetTemperatureLow(f64),
+    TargetTemperatureHigh(f64),
+    TargetHumidity(f64),
+    FanMode(String),
+    PresetMode(String),
+    SwingMode(String),
+    SwingHorizontalMode(String),
+}
+
+#[derive(Clone, Debug)]
 enum SharedMqttEntity {
     Switch(EntityHandle),
     Button {
@@ -653,6 +752,10 @@ enum SharedMqttEntity {
         handle: EntityHandle,
         descriptor: FanDescriptor,
     },
+    Climate {
+        handle: EntityHandle,
+        descriptor: ClimateDescriptor,
+    },
 }
 
 impl SharedMqttEntity {
@@ -662,7 +765,8 @@ impl SharedMqttEntity {
             | Self::Button { handle, .. }
             | Self::Light { handle, .. }
             | Self::Cover { handle, .. }
-            | Self::Fan { handle, .. } => handle,
+            | Self::Fan { handle, .. }
+            | Self::Climate { handle, .. } => handle,
         }
     }
 }
@@ -671,6 +775,7 @@ impl SharedMqttEntity {
 struct Command {
     topic: String,
     payload: Vec<u8>,
+    publish: bool,
     qos: QoS,
     retain: bool,
     optimistic: Option<OptimisticState>,
@@ -692,6 +797,8 @@ struct OptimisticState {
     optimistic_updates: Map<String, Value>,
     context: Context,
     switch_state: bool,
+    climate_state: Option<ClimateStateUpdate>,
+    entity_handle: Option<EntityHandle>,
 }
 
 struct PendingPublish {
@@ -734,6 +841,7 @@ async fn run_event_loop(
     mut event_loop: rumqttc::EventLoop,
     mut command_rx: mpsc::Receiver<CommandRequest>,
     mut subscription_rx: mpsc::Receiver<SubscriptionRequest>,
+    mut core_events: broadcast::Receiver<hass_core::Event>,
     mut stop_rx: oneshot::Receiver<()>,
     ready_tx: oneshot::Sender<()>,
     entities: Arc<RwLock<BTreeMap<String, DiscoveredEntity>>>,
@@ -757,6 +865,7 @@ async fn run_event_loop(
             Command(Option<CommandRequest>),
             Continuation(Option<CommandRequest>),
             Subscription(Option<SubscriptionRequest>),
+            CoreEvent(std::result::Result<hass_core::Event, broadcast::error::RecvError>),
             CompletionDeadline,
             Poll(std::result::Result<Event, rumqttc::ConnectionError>),
         }
@@ -772,6 +881,7 @@ async fn run_event_loop(
                     continuation = async { ready_continuations.pop_front() }, if !ready_continuations.is_empty() => Next::Continuation(continuation),
                     command = command_rx.recv() => Next::Command(command),
                     subscription = subscription_rx.recv() => Next::Subscription(subscription),
+                    event = core_events.recv() => Next::CoreEvent(event),
                     _ = wait_for_publish_deadline(next_deadline) => Next::CompletionDeadline,
                     event = event_loop.poll() => Next::Poll(event),
                 }
@@ -813,10 +923,34 @@ async fn run_event_loop(
                 return Ok(());
             }
             Next::Command(Some(request)) => {
-                queue_publish_command(&client, request, &mut unassigned_publishes);
+                if request.command.publish {
+                    queue_publish_command(&client, request, &entities, &mut unassigned_publishes);
+                } else {
+                    let mut completion = PublishCompletionContext {
+                        runtime: &runtime,
+                        entities: &entities,
+                        connected,
+                        availability_status: &availability_status,
+                        last_values: &mut last_values,
+                        ready_continuations: &mut ready_continuations,
+                    };
+                    complete_local_command(&mut completion, request);
+                }
             }
             Next::Continuation(Some(request)) => {
-                queue_publish_command(&client, request, &mut unassigned_publishes);
+                if request.command.publish {
+                    queue_publish_command(&client, request, &entities, &mut unassigned_publishes);
+                } else {
+                    let mut completion = PublishCompletionContext {
+                        runtime: &runtime,
+                        entities: &entities,
+                        connected,
+                        availability_status: &availability_status,
+                        last_values: &mut last_values,
+                        ready_continuations: &mut ready_continuations,
+                    };
+                    complete_local_command(&mut completion, request);
+                }
             }
             Next::Continuation(None) => {}
             Next::Subscription(Some(request)) => {
@@ -839,6 +973,29 @@ async fn run_event_loop(
                     warn!(error = %error, "failed to add MQTT topic subscription");
                 }
                 let _ = request.reply.send(result);
+            }
+            Next::CoreEvent(Ok(event)) if event.event_type == "core_config_updated" => {
+                reproject_climate_entities(
+                    &runtime,
+                    &entities,
+                    connected,
+                    &availability_status,
+                    &last_values,
+                );
+            }
+            Next::CoreEvent(Err(broadcast::error::RecvError::Lagged(_))) => {
+                reproject_climate_entities(
+                    &runtime,
+                    &entities,
+                    connected,
+                    &availability_status,
+                    &last_values,
+                );
+            }
+            Next::CoreEvent(Ok(_)) => {}
+            Next::CoreEvent(Err(broadcast::error::RecvError::Closed)) => {
+                debug!("runtime event stream closed while MQTT integration was active");
+                return Ok(());
             }
             Next::CompletionDeadline => {
                 let mut completion = PublishCompletionContext {
@@ -1014,13 +1171,44 @@ async fn wait_for_publish_deadline(deadline: Option<tokio::time::Instant>) {
     }
 }
 
+fn apply_climate_optimistic_update(
+    entities: &RwLock<BTreeMap<String, DiscoveredEntity>>,
+    optimistic: Option<&OptimisticState>,
+) {
+    let Some(optimistic) = optimistic else {
+        return;
+    };
+    let Some(update) = optimistic.climate_state.as_ref() else {
+        return;
+    };
+    let entity = entities
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .find(|entity| entity.metadata.discovery_topic == optimistic.discovery_topic)
+        .filter(|entity| mqtt_entity_is_active(entity))
+        .cloned();
+    let Some(entity) = entity else {
+        return;
+    };
+    let Some(climate) = entity.climate.as_ref() else {
+        return;
+    };
+    let mut current = climate
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    apply_climate_state_update(&entity, &mut current, update, &optimistic.context);
+}
+
 fn queue_publish_command(
     client: &AsyncClient,
     request: CommandRequest,
+    entities: &RwLock<BTreeMap<String, DiscoveredEntity>>,
     pending: &mut VecDeque<PendingPublish>,
 ) {
     let CommandRequest {
-        command,
+        mut command,
         remaining_commands,
         changed_states,
         reply,
@@ -1036,21 +1224,55 @@ fn queue_publish_command(
         return;
     }
     let qos = command.qos;
+    let optimistic = command.optimistic.take();
     match client.try_publish(command.topic, qos, command.retain, command.payload) {
-        Ok(()) => pending.push_back(PendingPublish {
-            qos,
-            reply: Some(reply),
-            remaining_commands,
-            changed_states,
-            optimistic: command.optimistic,
-            deadline: Some(tokio::time::Instant::now() + PUBLISH_COMPLETION_TIMEOUT),
-        }),
+        Ok(()) => {
+            apply_climate_optimistic_update(entities, optimistic.as_ref());
+            pending.push_back(PendingPublish {
+                qos,
+                reply: Some(reply),
+                remaining_commands,
+                changed_states,
+                optimistic,
+                deadline: Some(tokio::time::Instant::now() + PUBLISH_COMPLETION_TIMEOUT),
+            });
+        }
         Err(error) => {
             let _ = reply.send(Err(Error::Service(format!(
                 "failed to queue MQTT command for publication: {error}"
             ))));
         }
     }
+}
+
+fn complete_local_command(completion: &mut PublishCompletionContext<'_>, request: CommandRequest) {
+    if request
+        .command
+        .entity_handle
+        .as_ref()
+        .is_some_and(|handle| !handle.status().is_active())
+    {
+        let _ = request.reply.send(Err(Error::Service(
+            "MQTT entity is no longer active".into(),
+        )));
+        return;
+    }
+    apply_climate_optimistic_update(completion.entities, request.command.optimistic.as_ref());
+    let CommandRequest {
+        command,
+        remaining_commands,
+        changed_states,
+        reply,
+    } = request;
+    let mut pending = PendingPublish {
+        qos: command.qos,
+        reply: Some(reply),
+        remaining_commands,
+        changed_states,
+        optimistic: command.optimistic,
+        deadline: None,
+    };
+    complete_publish(completion, &mut pending);
 }
 
 fn complete_expired_publishes(
@@ -1081,7 +1303,12 @@ fn complete_publish(completion: &mut PublishCompletionContext<'_>, pending: &mut
         ready_continuations,
     } = completion;
     let mut changed_states = Vec::new();
-    if let Some(update) = pending.optimistic.take() {
+    if let Some(mut update) = pending.optimistic.take()
+        && update
+            .entity_handle
+            .as_ref()
+            .is_none_or(|handle| handle.status().is_active())
+    {
         let entity = entities
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1092,106 +1319,141 @@ fn complete_publish(completion: &mut PublishCompletionContext<'_>, pending: &mut
         if let Some(entity) = entity {
             let entity_id = mqtt_entity_id(&entity);
             let available = entity_available(&entity, *connected, availability_status);
-            let cached_state = runtime.get_state(&entity_id);
-            let fallback_state = cached_state
-                .as_ref()
-                .map(|state| state.state.as_str())
-                .filter(|state| *state != "unavailable")
-                .or_else(|| last_values.get(&entity_id).map(|last| last.state.as_str()))
-                .or_else(|| cached_state.as_ref().map(|state| state.state.as_str()))
-                .unwrap_or("unknown");
-            let desired_state = update.state.as_deref().unwrap_or(fallback_state);
-            let mut attributes = last_values
-                .get(&entity_id)
-                .map(|last| last.attributes.clone())
-                .or_else(|| cached_state.as_ref().map(|state| state.attributes.clone()))
-                .unwrap_or_else(|| update.attributes.clone());
-            attributes.extend(update.optimistic_updates.clone());
-            let (published, last_attributes, last_state) = if entity_lifecycle_handle(&entity)
-                .is_some()
+            if update.climate_state.take().is_some()
+                && let Some(climate) = entity.climate.as_ref()
             {
-                match shared_entity_projection(
+                let climate_state = climate
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                match publish_climate_state(
+                    runtime,
                     &entity,
-                    Some(desired_state),
+                    &climate_state,
                     available,
-                    attributes.clone(),
                     update.context.clone(),
                 ) {
-                    Ok(Some((publication, snapshot))) => {
-                        let state = snapshot.state.clone().unwrap_or_else(|| "unknown".into());
-                        (
-                            entity_lifecycle_handle(&entity)
-                                .expect("shared projection has a lifecycle handle")
-                                .publish_publication(publication),
-                            snapshot.attributes,
-                            state,
-                        )
+                    Ok(Some((state, changed))) => {
+                        if changed {
+                            changed_states.push(state.clone());
+                        }
+                        last_values.insert(
+                            state.entity_id.clone(),
+                            LastValue {
+                                state: state.state.clone(),
+                                attributes: state.attributes.clone(),
+                                context: update.context.clone(),
+                            },
+                        );
                     }
-                    Ok(None) => (Ok(None), attributes, desired_state.to_owned()),
+                    Ok(None) => {}
                     Err(error) => {
-                        warn!(entity_id = %entity_id, error = %error, "failed to project optimistic MQTT state");
-                        (Err(error), attributes, desired_state.to_owned())
+                        warn!(entity_id = %entity_id, error = %error, "failed to apply optimistic MQTT climate state");
                     }
                 }
-            } else if update.switch_state {
-                let snapshot = SwitchSnapshot::new(Some(desired_state == "on"))
-                    .with_available(available)
-                    .with_assumed_state(true)
-                    .with_extra_attributes(attributes)
-                    .with_context(update.context.clone());
-                let projected = snapshot.entity_snapshot();
-                let state = if available {
-                    projected.state.as_deref().unwrap_or("unknown")
+            } else {
+                let cached_state = runtime.get_state(&entity_id);
+                let fallback_state = cached_state
+                    .as_ref()
+                    .map(|state| state.state.as_str())
+                    .filter(|state| *state != "unavailable")
+                    .or_else(|| last_values.get(&entity_id).map(|last| last.state.as_str()))
+                    .or_else(|| cached_state.as_ref().map(|state| state.state.as_str()))
+                    .unwrap_or("unknown");
+                let desired_state = update.state.as_deref().unwrap_or(fallback_state);
+                let mut attributes = last_values
+                    .get(&entity_id)
+                    .map(|last| last.attributes.clone())
+                    .or_else(|| cached_state.as_ref().map(|state| state.attributes.clone()))
+                    .unwrap_or_else(|| update.attributes.clone());
+                attributes.extend(update.optimistic_updates.clone());
+                let (published, last_attributes, last_state) = if entity_lifecycle_handle(&entity)
+                    .is_some()
+                {
+                    match shared_entity_projection(
+                        &entity,
+                        Some(desired_state),
+                        available,
+                        attributes.clone(),
+                        update.context.clone(),
+                    ) {
+                        Ok(Some((publication, snapshot))) => {
+                            let state = snapshot.state.clone().unwrap_or_else(|| "unknown".into());
+                            (
+                                entity_lifecycle_handle(&entity)
+                                    .expect("shared projection has a lifecycle handle")
+                                    .publish_publication(publication),
+                                snapshot.attributes,
+                                state,
+                            )
+                        }
+                        Ok(None) => (Ok(None), attributes, desired_state.to_owned()),
+                        Err(error) => {
+                            warn!(entity_id = %entity_id, error = %error, "failed to project optimistic MQTT state");
+                            (Err(error), attributes, desired_state.to_owned())
+                        }
+                    }
+                } else if update.switch_state {
+                    let snapshot = SwitchSnapshot::new(Some(desired_state == "on"))
+                        .with_available(available)
+                        .with_assumed_state(true)
+                        .with_extra_attributes(attributes)
+                        .with_context(update.context.clone());
+                    let projected = snapshot.entity_snapshot();
+                    let state = if available {
+                        projected.state.as_deref().unwrap_or("unknown")
+                    } else {
+                        "unavailable"
+                    };
+                    (
+                        runtime
+                            .set_state(
+                                &entity_id,
+                                state,
+                                projected.attributes.clone(),
+                                projected.context.clone(),
+                                false,
+                            )
+                            .map(Some),
+                        projected.attributes,
+                        desired_state.to_owned(),
+                    )
                 } else {
-                    "unavailable"
-                };
-                (
-                    runtime
+                    let state = if available {
+                        desired_state
+                    } else {
+                        "unavailable"
+                    };
+                    let published = runtime
                         .set_state(
                             &entity_id,
                             state,
-                            projected.attributes.clone(),
-                            projected.context.clone(),
+                            attributes.clone(),
+                            update.context.clone(),
                             false,
                         )
-                        .map(Some),
-                    projected.attributes,
-                    desired_state.to_owned(),
-                )
-            } else {
-                let state = if available {
-                    desired_state
-                } else {
-                    "unavailable"
+                        .map(Some);
+                    (published, attributes, desired_state.to_owned())
                 };
-                let published = runtime
-                    .set_state(
-                        &entity_id,
-                        state,
-                        attributes.clone(),
-                        update.context.clone(),
-                        false,
-                    )
-                    .map(Some);
-                (published, attributes, desired_state.to_owned())
-            };
-            match published {
-                Ok(Some(change)) => {
-                    if change.changed {
-                        changed_states.push(change.state.clone());
+                match published {
+                    Ok(Some(change)) => {
+                        if change.changed {
+                            changed_states.push(change.state.clone());
+                        }
+                        last_values.insert(
+                            change.state.entity_id.clone(),
+                            LastValue {
+                                state: last_state,
+                                attributes: last_attributes,
+                                context: update.context,
+                            },
+                        );
                     }
-                    last_values.insert(
-                        change.state.entity_id.clone(),
-                        LastValue {
-                            state: last_state,
-                            attributes: last_attributes,
-                            context: update.context,
-                        },
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    warn!(entity_id = %entity_id, error = %error, "failed to apply explicitly optimistic MQTT state")
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(entity_id = %entity_id, error = %error, "failed to apply explicitly optimistic MQTT state")
+                    }
                 }
             }
         }
@@ -1391,10 +1653,11 @@ async fn handle_message(
                 continue;
             };
             let rendered = match render_string(
+                runtime,
                 templates,
                 availability.value_template.as_deref(),
                 payload_text,
-                &entity.metadata.entity_id,
+                &entity,
             ) {
                 Ok(value) => value,
                 Err(error) => {
@@ -1418,6 +1681,74 @@ async fn handle_message(
             continue;
         }
 
+        if let Some(climate) = entity.climate.as_ref()
+            && (climate.state_topics.contains_key(topic)
+                || entity.json_attributes_topic.as_deref() == Some(topic))
+        {
+            let mut climate_state = climate
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let mut updated = false;
+            if climate.state_topics.contains_key(topic) {
+                match update_climate_reported_state(
+                    runtime,
+                    &entity,
+                    topic,
+                    payload_text,
+                    templates,
+                    climate_state.clone(),
+                ) {
+                    Ok(Some(next)) => {
+                        climate_state = next;
+                        updated = true;
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(entity_id = %entity.metadata.entity_id, error = %error, "ignored invalid MQTT climate state");
+                    }
+                }
+            }
+            if entity.json_attributes_topic.as_deref() == Some(topic) {
+                match parse_json_attributes(templates, &entity, payload_text) {
+                    Ok(extra) => {
+                        climate_state.snapshot.extra_attributes.extend(extra);
+                        updated = true;
+                    }
+                    Err(error) => {
+                        warn!(entity_id = %entity.metadata.entity_id, error = %error, "ignored invalid MQTT climate JSON attributes");
+                    }
+                }
+            }
+            if updated {
+                let context = Context::default();
+                let available = entity_available(&entity, connected, availability_status);
+                match publish_climate_state(
+                    runtime,
+                    &entity,
+                    &climate_state,
+                    available,
+                    context.clone(),
+                ) {
+                    Ok(Some((state, _))) => {
+                        last_values.insert(
+                            state.entity_id.clone(),
+                            LastValue {
+                                state: state.state.clone(),
+                                attributes: state.attributes.clone(),
+                                context,
+                            },
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        warn!(entity_id = %entity.metadata.entity_id, error = %error, "failed to publish MQTT climate state");
+                    }
+                }
+            }
+            continue;
+        }
         let mut value = last_values.get(&entity.metadata.entity_id).cloned();
         if entity.state_topic.as_deref() == Some(topic)
             || entity.extra_state_topics.contains_key(topic)
@@ -1438,7 +1769,7 @@ async fn handle_message(
                     attributes: entity.attributes.clone(),
                     context: Context::default(),
                 });
-            match update_reported_state(&entity, topic, payload_text, templates, current) {
+            match update_reported_state(runtime, &entity, topic, payload_text, templates, current) {
                 Ok(mut next) => {
                     if entity.json_attributes_topic.as_deref() == Some(topic) {
                         match parse_json_attributes(templates, &entity, payload_text) {
@@ -1504,10 +1835,30 @@ fn process_discovery(
     }
     if payload.is_empty() {
         let removed = entities
-            .write()
+            .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(discovery_topic);
+            .get(discovery_topic)
+            .cloned();
         if let Some(entity) = removed {
+            // Discovery deletion is permanent, unlike provider unload. Remove
+            // our registry identity before releasing the lease so the lifecycle
+            // does not restore an enabled, unavailable placeholder afterward.
+            // A reused entity ID must never delete another publisher's row.
+            let entity_id = mqtt_entity_id(&entity);
+            if let Some(context) = entity_lifecycle
+                && let Some(handle) = entity_lifecycle_handle(&entity)
+                && let Some(registry_id) = handle.registry_id()
+                && let Some(registered) = context.registries.entity(&entity_id)
+                && registered.id == registry_id
+                && registered.platform == "mqtt"
+                && registered.config_entry_id.as_deref() == Some(context.entry_id.as_str())
+            {
+                context.registries.remove_entity(&entity_id)?;
+            }
+            entities
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(discovery_topic);
             for item in &entity.availability {
                 availability_status
                     .remove(&(entity.metadata.entity_id.clone(), item.topic.clone()));
@@ -1541,6 +1892,7 @@ fn process_discovery(
             | "cover"
             | "fan"
             | "button"
+            | "climate"
             | "number"
             | "select"
             | "text"
@@ -1548,6 +1900,7 @@ fn process_discovery(
         return Ok(false);
     }
     let parsed = parse_discovered_entity(
+        runtime.unit_system(),
         config,
         discovery_topic,
         &platform,
@@ -1583,7 +1936,7 @@ fn process_discovery(
         let shared_entity = entity_lifecycle.is_some()
             && matches!(
                 entity.metadata.platform.as_str(),
-                "switch" | "button" | "light" | "cover" | "fan"
+                "switch" | "button" | "light" | "cover" | "fan" | "climate"
             );
         let occupied_by_runtime = !shared_entity && runtime.get_state(&entity_id).is_some();
         let occupied_by_map = !shared_entity
@@ -1618,28 +1971,52 @@ fn process_discovery(
     if let Some(entity_lifecycle) = entity_lifecycle.as_ref()
         && matches!(
             entity.metadata.platform.as_str(),
-            "switch" | "button" | "light" | "cover" | "fan"
+            "switch" | "button" | "light" | "cover" | "fan" | "climate"
         )
     {
-        entity.shared_entity = Some(register_shared_entity(&entity, entity_lifecycle)?);
-        if let Some(SharedMqttEntity::Cover { toggle_state, .. }) = entity.shared_entity.as_mut()
-            && let Some(SharedMqttEntity::Cover {
-                toggle_state: prior_toggle_state,
-                ..
-            }) = prior
-                .as_ref()
-                .and_then(|entity| entity.shared_entity.as_ref())
-        {
-            *toggle_state = Arc::clone(prior_toggle_state);
+        let climate_units = climate_unit_context(runtime.unit_system());
+        let prior_handle = prior.as_ref().and_then(entity_lifecycle_handle).cloned();
+        let prior_released = if let Some(handle) = prior_handle {
+            handle.release()?;
+            true
+        } else {
+            false
+        };
+        if let Err(registration_error) = register_shared_entity_into(
+            &mut entity,
+            prior.as_ref(),
+            entity_lifecycle,
+            climate_units,
+        ) {
+            if prior_released && let Some(previous) = prior.as_ref() {
+                let mut restored = previous.clone();
+                match register_shared_entity_into(
+                    &mut restored,
+                    Some(previous),
+                    entity_lifecycle,
+                    climate_units,
+                ) {
+                    Ok(()) => {
+                        let mut entity_metadata = metadata
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        entity_metadata.remove(&previous.metadata.entity_id);
+                        entity_metadata.insert(
+                            restored.metadata.entity_id.clone(),
+                            restored.metadata.clone(),
+                        );
+                        entity_map.insert(discovery_topic.to_owned(), restored);
+                        return Err(registration_error);
+                    }
+                    Err(restore_error) => {
+                        return Err(Error::Service(format!(
+                            "MQTT discovery update failed: {registration_error}; restoring the prior shared entity failed: {restore_error}"
+                        )));
+                    }
+                }
+            }
+            return Err(registration_error);
         }
-        entity.metadata.entity_id = entity
-            .shared_entity
-            .as_ref()
-            .expect("registered shared MQTT entity")
-            .handle()
-            .status()
-            .entity_id()
-            .to_owned();
     }
     entity.metadata.entity_lifecycle_managed = entity_lifecycle_handle(&entity).is_some();
 
@@ -1648,6 +2025,10 @@ fn process_discovery(
         for item in &prior.availability {
             availability_status.remove(&(prior.metadata.entity_id.clone(), item.topic.clone()));
         }
+        metadata
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&prior.metadata.entity_id);
     }
     for item in &entity.availability {
         availability_status.insert(
@@ -1672,6 +2053,15 @@ fn process_discovery(
             &entity,
             None,
             available,
+            entity.attributes.clone(),
+            Context::default(),
+        );
+    } else if entity.climate.is_some() && entity.availability.is_empty() {
+        publish_discovered_state(
+            runtime,
+            &entity,
+            None,
+            true,
             entity.attributes.clone(),
             Context::default(),
         );
@@ -1807,6 +2197,7 @@ fn register_button_entity(
 fn register_shared_entity(
     entity: &DiscoveredEntity,
     context: &SharedEntityLifecycleContext,
+    climate_units: ClimateUnitContext,
 ) -> Result<SharedMqttEntity> {
     match entity.metadata.platform.as_str() {
         "switch" => Ok(SharedMqttEntity::Switch(register_switch_entity(
@@ -1832,10 +2223,43 @@ fn register_shared_entity(
             let (handle, descriptor) = register_fan_entity(entity, context)?;
             Ok(SharedMqttEntity::Fan { handle, descriptor })
         }
+        "climate" => {
+            let (handle, descriptor) = register_climate_entity(entity, context, climate_units)?;
+            Ok(SharedMqttEntity::Climate { handle, descriptor })
+        }
         platform => Err(Error::Service(format!(
             "MQTT {platform} does not use the shared entity lifecycle"
         ))),
     }
+}
+
+fn register_shared_entity_into(
+    entity: &mut DiscoveredEntity,
+    previous: Option<&DiscoveredEntity>,
+    context: &SharedEntityLifecycleContext,
+    climate_units: ClimateUnitContext,
+) -> Result<()> {
+    let mut shared = register_shared_entity(entity, context, climate_units)?;
+    if let SharedMqttEntity::Cover { toggle_state, .. } = &mut shared
+        && let Some(SharedMqttEntity::Cover {
+            toggle_state: previous_toggle_state,
+            ..
+        }) = previous.and_then(|previous| previous.shared_entity.as_ref())
+    {
+        *toggle_state = Arc::clone(previous_toggle_state);
+    }
+    let climate_descriptor = match &shared {
+        SharedMqttEntity::Climate { descriptor, .. } => Some(descriptor.clone()),
+        _ => None,
+    };
+    let entity_id = shared.handle().status().entity_id().to_owned();
+    entity.shared_entity = Some(shared);
+    if let (Some(descriptor), Some(climate)) = (climate_descriptor, entity.climate.as_mut()) {
+        climate.descriptor = descriptor;
+    }
+    entity.metadata.entity_id = entity_id;
+    entity.metadata.entity_lifecycle_managed = true;
+    Ok(())
 }
 
 fn register_light_entity(
@@ -2096,6 +2520,33 @@ fn register_shared_spec(
         })
 }
 
+fn register_climate_entity(
+    entity: &DiscoveredEntity,
+    context: &SharedEntityLifecycleContext,
+    units: ClimateUnitContext,
+) -> Result<(EntityHandle, ClimateDescriptor)> {
+    if entity.climate.is_none() {
+        return Err(Error::Service(
+            "MQTT climate discovery did not produce a climate descriptor".into(),
+        ));
+    }
+    let device_id = register_mqtt_device(
+        &context.registries,
+        &context.entry_id,
+        entity.metadata.device.as_ref(),
+    )?;
+    let descriptor = mqtt_climate_descriptor(
+        entity,
+        &context.provider_id,
+        Some(&context.entry_id),
+        device_id,
+    )?;
+    let spec = descriptor
+        .entity_spec_with_units(units)
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    let handle = register_shared_spec(&context.lifecycle, spec, "climate")?;
+    Ok((handle, descriptor))
+}
 fn mqtt_suggested_object_id(entity: &DiscoveredEntity) -> String {
     entity
         .metadata
@@ -2187,6 +2638,7 @@ fn mqtt_string_value(value: Option<&Value>) -> Option<String> {
 }
 
 fn parse_discovered_entity(
+    unit_system: UnitSystemKind,
     config: &MqttConfig,
     discovery_topic: &str,
     platform: &str,
@@ -2265,8 +2717,16 @@ fn parse_discovered_entity(
         validate_topic(&expanded, key)?;
         Ok(Some(expanded))
     };
-    let state_topic = topic("state_topic")?;
-    let command_topic = topic("command_topic")?;
+    let state_topic = if platform == "climate" {
+        None
+    } else {
+        topic("state_topic")?
+    };
+    let command_topic = if platform == "climate" {
+        None
+    } else {
+        topic("command_topic")?
+    };
     let json_attributes_topic = topic("json_attributes_topic")?;
     let schema = if platform == "light" {
         get_string("schema")?.unwrap_or_else(|| "basic".into())
@@ -2350,6 +2810,20 @@ fn parse_discovered_entity(
             "oscillation_state_topic",
             "direction_state_topic",
         ],
+        "climate" => &[
+            "action_topic",
+            "current_humidity_topic",
+            "current_temperature_topic",
+            "fan_mode_state_topic",
+            "target_humidity_state_topic",
+            "mode_state_topic",
+            "preset_mode_state_topic",
+            "swing_horizontal_mode_state_topic",
+            "swing_mode_state_topic",
+            "temperature_state_topic",
+            "temperature_low_state_topic",
+            "temperature_high_state_topic",
+        ],
         _ => &[],
     };
     for key in extra_topic_keys {
@@ -2414,6 +2888,28 @@ fn parse_discovered_entity(
         "oscillation_value_template",
         "direction_command_template",
         "direction_value_template",
+        "action_template",
+        "current_humidity_template",
+        "current_temperature_template",
+        "fan_mode_command_template",
+        "fan_mode_state_template",
+        "target_humidity_command_template",
+        "target_humidity_state_template",
+        "mode_command_template",
+        "mode_state_template",
+        "power_command_template",
+        "preset_mode_command_template",
+        "preset_mode_value_template",
+        "swing_horizontal_mode_command_template",
+        "swing_horizontal_mode_state_template",
+        "swing_mode_command_template",
+        "swing_mode_state_template",
+        "temperature_command_template",
+        "temperature_high_command_template",
+        "temperature_high_state_template",
+        "temperature_low_command_template",
+        "temperature_low_state_template",
+        "temperature_state_template",
     ] {
         let _ = get_string(key)?;
     }
@@ -2549,6 +3045,38 @@ fn parse_discovered_entity(
     }
     let mut platform_config = object.clone();
     platform_config.insert("schema".into(), Value::String(schema.clone()));
+    let mut climate_state_topics = BTreeMap::new();
+    if platform == "climate" {
+        for (key, field) in climate_state_topic_fields() {
+            if let Some(expanded) = topic(key)? {
+                platform_config.insert((*key).to_owned(), Value::String(expanded.clone()));
+                climate_state_topics
+                    .entry(expanded)
+                    .or_insert_with(Vec::new)
+                    .push(*field);
+            }
+        }
+        for key in climate_command_topic_keys() {
+            if let Some(expanded) = topic(key)? {
+                platform_config.insert((*key).to_owned(), Value::String(expanded));
+            }
+        }
+        let native_unit = match object.get("temperature_unit") {
+            Some(Value::String(value)) => parse_mqtt_climate_temperature_unit(value)?,
+            Some(_) => {
+                return Err(Error::InvalidInput(
+                    "discovery field temperature_unit must be a string".into(),
+                ));
+            }
+            None => climate_unit_for_system(unit_system),
+        };
+        platform_config.insert(
+            "temperature_unit".into(),
+            Value::String(native_unit.as_str().into()),
+        );
+        insert_climate_discovery_defaults(&mut platform_config, config.optimistic, retain);
+        validate_climate_discovery_config(&mut platform_config)?;
+    }
     if platform == "light" && schema == "json" {
         let supported_color_modes = get_string_list("supported_color_modes")?;
         if let Some(modes) = &supported_color_modes {
@@ -2581,6 +3109,15 @@ fn parse_discovered_entity(
         let transition = get_bool("transition", true)?;
         let brightness_scale = get_number("brightness_scale", 255.0)?;
         let white_scale = get_number("white_scale", 255.0)?;
+        for (key, value) in [
+            ("brightness", brightness),
+            ("color_temp_kelvin", color_temp_kelvin),
+            ("effect", effect),
+            ("flash", flash),
+            ("transition", transition),
+        ] {
+            platform_config.insert(key.into(), Value::Bool(value));
+        }
         if brightness_scale < 1.0 || brightness_scale > 65_535.0 || brightness_scale.fract() != 0.0
         {
             return Err(Error::InvalidInput(
@@ -2808,7 +3345,7 @@ fn parse_discovered_entity(
                 .unwrap_or(&name)
         )
     );
-    Ok(DiscoveredEntity {
+    let mut entity = DiscoveredEntity {
         metadata: MqttEntityMetadata {
             entity_id,
             platform: platform.to_owned(),
@@ -2819,6 +3356,7 @@ fn parse_discovered_entity(
             entity_lifecycle_managed: false,
         },
         shared_entity: None,
+        climate: None,
         switch_device_class,
         button_device_class,
         button_last_value: Arc::new(Mutex::new(None)),
@@ -2849,7 +3387,449 @@ fn parse_discovered_entity(
             })
             .transpose()?,
         platform_config,
+    };
+    if platform == "climate" {
+        let descriptor = mqtt_climate_descriptor(&entity, "mqtt:standalone", None, None)?;
+        let state = initial_mqtt_climate_state(&entity, &descriptor, unit_system)?;
+        entity.climate = Some(MqttClimateEntity {
+            descriptor,
+            state: Arc::new(Mutex::new(state)),
+            state_topics: climate_state_topics,
+        });
+    }
+    Ok(entity)
+}
+
+fn climate_state_topic_fields() -> &'static [(&'static str, ClimateStateField)] {
+    &[
+        ("action_topic", ClimateStateField::Action),
+        ("current_humidity_topic", ClimateStateField::CurrentHumidity),
+        (
+            "target_humidity_state_topic",
+            ClimateStateField::TargetHumidity,
+        ),
+        ("mode_state_topic", ClimateStateField::HvacMode),
+        ("fan_mode_state_topic", ClimateStateField::FanMode),
+        (
+            "swing_horizontal_mode_state_topic",
+            ClimateStateField::SwingHorizontalMode,
+        ),
+        ("swing_mode_state_topic", ClimateStateField::SwingMode),
+        ("preset_mode_state_topic", ClimateStateField::PresetMode),
+        (
+            "current_temperature_topic",
+            ClimateStateField::CurrentTemperature,
+        ),
+        (
+            "temperature_state_topic",
+            ClimateStateField::TargetTemperature,
+        ),
+        (
+            "temperature_low_state_topic",
+            ClimateStateField::TargetTemperatureLow,
+        ),
+        (
+            "temperature_high_state_topic",
+            ClimateStateField::TargetTemperatureHigh,
+        ),
+    ]
+}
+
+fn climate_command_topic_keys() -> &'static [&'static str] {
+    &[
+        "fan_mode_command_topic",
+        "target_humidity_command_topic",
+        "mode_command_topic",
+        "power_command_topic",
+        "preset_mode_command_topic",
+        "swing_horizontal_mode_command_topic",
+        "swing_mode_command_topic",
+        "temperature_command_topic",
+        "temperature_high_command_topic",
+        "temperature_low_command_topic",
+    ]
+}
+
+fn climate_unit_for_system(kind: UnitSystemKind) -> ClimateTemperatureUnit {
+    match kind {
+        UnitSystemKind::Metric => ClimateTemperatureUnit::Celsius,
+        UnitSystemKind::UsCustomary => ClimateTemperatureUnit::Fahrenheit,
+    }
+}
+
+fn parse_mqtt_climate_temperature_unit(value: &str) -> Result<ClimateTemperatureUnit> {
+    match value.to_ascii_uppercase().as_str() {
+        "C" => Ok(ClimateTemperatureUnit::Celsius),
+        "F" => Ok(ClimateTemperatureUnit::Fahrenheit),
+        _ => Err(Error::InvalidInput(format!(
+            "invalid MQTT climate temperature_unit {value:?}; expected \"C\" or \"F\""
+        ))),
+    }
+}
+
+fn climate_unit_context(kind: UnitSystemKind) -> ClimateUnitContext {
+    ClimateUnitContext::new(climate_unit_for_system(kind))
+}
+
+fn climate_topic_configured(entity: &DiscoveredEntity, key: &str) -> bool {
+    entity
+        .platform_config
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|topic| !topic.is_empty())
+}
+
+fn insert_climate_discovery_defaults(
+    config: &mut Map<String, Value>,
+    optimistic: bool,
+    retain: bool,
+) {
+    for (key, value) in [
+        (
+            "modes",
+            json!(["auto", "off", "cool", "heat", "dry", "fan_only"]),
+        ),
+        ("fan_modes", json!(["auto", "low", "medium", "high"])),
+        ("preset_modes", json!([])),
+        ("swing_modes", json!(["on", "off"])),
+        ("swing_horizontal_modes", json!(["on", "off"])),
+        ("min_humidity", json!(30.0)),
+        ("max_humidity", json!(99.0)),
+        ("temp_step", json!(1.0)),
+        ("payload_on", json!("ON")),
+        ("payload_off", json!("OFF")),
+    ] {
+        config.entry(key.to_owned()).or_insert(value);
+    }
+    config.insert("optimistic".into(), Value::Bool(optimistic));
+    config.insert("retain".into(), Value::Bool(retain));
+}
+
+fn climate_string_list(config: &Map<String, Value>, key: &str) -> Result<Vec<String>> {
+    let values = config
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::InvalidInput(format!("MQTT climate {key} must be a list")))?;
+    let values = values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                Error::InvalidInput(format!("MQTT climate {key} must contain only strings"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if values
+        .iter()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != values.len()
+    {
+        return Err(Error::InvalidInput(format!(
+            "MQTT climate {key} must not contain duplicates"
+        )));
+    }
+    Ok(values)
+}
+
+fn climate_number(config: &Map<String, Value>, key: &str, default: Option<f64>) -> Result<f64> {
+    let value = match config.get(key) {
+        Some(Value::Number(value)) => value.as_f64(),
+        Some(Value::String(value)) => value.parse::<f64>().ok(),
+        Some(Value::Bool(value)) => Some(if *value { 1.0 } else { 0.0 }),
+        Some(Value::Null) | None => default,
+        Some(_) => None,
+    }
+    .filter(|value| value.is_finite())
+    .ok_or_else(|| Error::InvalidInput(format!("MQTT climate {key} must be a finite number")))?;
+    Ok(value)
+}
+
+fn validate_climate_discovery_config(config: &mut Map<String, Value>) -> Result<()> {
+    for key in [
+        "initial",
+        "min_temp",
+        "max_temp",
+        "temp_step",
+        "precision",
+        "min_humidity",
+        "max_humidity",
+    ] {
+        if config.contains_key(key) {
+            let value = climate_number(config, key, None)?;
+            config.insert(key.into(), json!(value));
+        }
+    }
+    let modes = climate_string_list(config, "modes")?;
+    for mode in &modes {
+        mode.parse::<HvacMode>().map_err(|error| {
+            Error::InvalidInput(format!("invalid MQTT climate mode {mode:?}: {error}"))
+        })?;
+    }
+    for key in [
+        "fan_modes",
+        "swing_modes",
+        "swing_horizontal_modes",
+        "preset_modes",
+    ] {
+        let modes = climate_string_list(config, key)?;
+        if key == "preset_modes" && modes.iter().any(|mode| mode == "none") {
+            return Err(Error::InvalidInput(
+                "preset_modes must not include preset mode 'none'".into(),
+            ));
+        }
+    }
+    let min_humidity = climate_number(config, "min_humidity", Some(30.0))?;
+    let max_humidity = climate_number(config, "max_humidity", Some(99.0))?;
+    if min_humidity <= 0.0 || max_humidity <= 0.0 || min_humidity >= max_humidity {
+        return Err(Error::InvalidInput(
+            "MQTT climate humidity range must be positive with minimum below maximum".into(),
+        ));
+    }
+    if max_humidity > 100.0 {
+        return Err(Error::InvalidInput(
+            "MQTT climate max_humidity must be <= 100".into(),
+        ));
+    }
+    if config.get("target_humidity_state_topic").is_some()
+        && config.get("target_humidity_command_topic").is_none()
+    {
+        return Err(Error::InvalidInput(
+            "target_humidity_state_topic cannot be used without target_humidity_command_topic"
+                .into(),
+        ));
+    }
+    if config.get("preset_mode_command_topic").is_none()
+        && config
+            .get("preset_modes")
+            .and_then(Value::as_array)
+            .is_some_and(|modes| !modes.is_empty())
+    {
+        return Err(Error::InvalidInput(
+            "preset_modes requires preset_mode_command_topic".into(),
+        ));
+    }
+    if config.contains_key("precision") {
+        let precision = climate_number(config, "precision", None)?;
+        if ![0.1, 0.5, 1.0].contains(&precision) {
+            return Err(Error::InvalidInput(
+                "MQTT climate precision must be 0.1, 0.5, or 1".into(),
+            ));
+        }
+        config.insert("precision".into(), json!(precision));
+    }
+    Ok(())
+}
+
+fn mqtt_climate_descriptor(
+    entity: &DiscoveredEntity,
+    provider_id: &str,
+    config_entry_id: Option<&str>,
+    device_id: Option<String>,
+) -> Result<ClimateDescriptor> {
+    let config = &entity.platform_config;
+    let native_unit = config_string(config, "temperature_unit", "°C")
+        .parse::<ClimateTemperatureUnit>()
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    let modes = climate_string_list(config, "modes")?
+        .into_iter()
+        .map(|mode| {
+            mode.parse::<HvacMode>()
+                .map_err(|error| Error::InvalidInput(error.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut descriptor =
+        ClimateDescriptor::new("mqtt", provider_id, entity.metadata.unique_id.clone())
+            .with_unique_id(entity.metadata.unique_id.clone())
+            .with_name(entity.metadata.name.clone())
+            .with_suggested_object_id(mqtt_suggested_object_id(entity))
+            .with_native_temperature_unit(native_unit)
+            .with_hvac_modes(modes)
+            .with_fan_modes(Some(climate_string_list(config, "fan_modes")?))
+            .with_swing_modes(Some(climate_string_list(config, "swing_modes")?))
+            .with_swing_horizontal_modes(Some(climate_string_list(
+                config,
+                "swing_horizontal_modes",
+            )?))
+            .with_target_temperature_step(Some(config_number(config, "temp_step", 1.0)))
+            .with_humidity_limits(
+                config_number(config, "min_humidity", 30.0),
+                config_number(config, "max_humidity", 99.0),
+            );
+    if let Some(config_entry_id) = config_entry_id {
+        descriptor = descriptor.with_config_entry_id(config_entry_id.to_owned());
+    }
+    if let Some(device_id) = device_id {
+        descriptor = descriptor.with_device_id(device_id);
+    }
+    if let Some(icon) = entity.attributes.get("icon").and_then(Value::as_str) {
+        descriptor = descriptor.with_icon(icon.to_owned());
+    }
+    if let Some(category) = entity
+        .attributes
+        .get("entity_category")
+        .and_then(Value::as_str)
+    {
+        descriptor = descriptor.with_entity_category(category.to_owned());
+    }
+    if config.contains_key("min_temp") {
+        descriptor = descriptor.with_min_temperature(climate_number(config, "min_temp", None)?);
+    }
+    if config.contains_key("max_temp") {
+        descriptor = descriptor.with_max_temperature(climate_number(config, "max_temp", None)?);
+    }
+    if config.contains_key("precision") {
+        descriptor = descriptor.with_precision(climate_number(config, "precision", None)?);
+    }
+    let mut features = ClimateFeatures::TURN_ON.union(ClimateFeatures::TURN_OFF);
+    if climate_topic_configured(entity, "temperature_state_topic")
+        || climate_topic_configured(entity, "temperature_command_topic")
+    {
+        features = features.with(ClimateFeature::TargetTemperature);
+    }
+    if climate_topic_configured(entity, "temperature_low_state_topic")
+        || climate_topic_configured(entity, "temperature_low_command_topic")
+        || climate_topic_configured(entity, "temperature_high_state_topic")
+        || climate_topic_configured(entity, "temperature_high_command_topic")
+    {
+        features = features.with(ClimateFeature::TargetTemperatureRange);
+    }
+    if climate_topic_configured(entity, "target_humidity_command_topic") {
+        features = features.with(ClimateFeature::TargetHumidity);
+    }
+    if climate_topic_configured(entity, "fan_mode_state_topic")
+        || climate_topic_configured(entity, "fan_mode_command_topic")
+    {
+        features = features.with(ClimateFeature::FanMode);
+    }
+    if climate_topic_configured(entity, "preset_mode_command_topic") {
+        features = features.with(ClimateFeature::PresetMode);
+        let mut presets = climate_string_list(config, "preset_modes")?;
+        if !presets.is_empty() {
+            presets.insert(0, hass_climate::PRESET_NONE.into());
+        }
+        descriptor = descriptor.with_preset_modes(Some(presets));
+    } else {
+        descriptor = descriptor.with_preset_modes(None);
+    }
+    if climate_topic_configured(entity, "swing_mode_state_topic")
+        || climate_topic_configured(entity, "swing_mode_command_topic")
+    {
+        features = features.with(ClimateFeature::SwingMode);
+    }
+    if climate_topic_configured(entity, "swing_horizontal_mode_state_topic")
+        || climate_topic_configured(entity, "swing_horizontal_mode_command_topic")
+    {
+        features = features.with(ClimateFeature::SwingHorizontalMode);
+    }
+    descriptor = descriptor.with_supported_features(features);
+    descriptor
+        .try_entity_spec()
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    Ok(descriptor)
+}
+
+fn climate_default_initial_temperature(native_unit: ClimateTemperatureUnit) -> Result<f64> {
+    convert(
+        UnitFamily::Temperature,
+        21.0,
+        Some(ClimateTemperatureUnit::Celsius.as_str()),
+        Some(native_unit.as_str()),
+    )
+    .map_err(|error| {
+        Error::InvalidInput(format!(
+            "MQTT climate temperature conversion failed: {error}"
+        ))
     })
+}
+
+fn initial_mqtt_climate_state(
+    entity: &DiscoveredEntity,
+    descriptor: &ClimateDescriptor,
+    _unit_system: UnitSystemKind,
+) -> Result<MqttClimateState> {
+    let config = &entity.platform_config;
+    let optimistic = entity.optimistic;
+    let initial_temperature = config
+        .get("initial")
+        .map(|_| climate_number(config, "initial", None))
+        .transpose()?
+        .unwrap_or(climate_default_initial_temperature(
+            config_string(config, "temperature_unit", "°C")
+                .parse::<ClimateTemperatureUnit>()
+                .map_err(|error| Error::InvalidInput(error.to_string()))?,
+        )?);
+    let mut snapshot = ClimateSnapshot::new(
+        (optimistic || !climate_topic_configured(entity, "mode_state_topic"))
+            .then_some(HvacMode::Off),
+    );
+    if optimistic || !climate_topic_configured(entity, "temperature_state_topic") {
+        snapshot.target_temperature = Some(initial_temperature);
+    }
+    if optimistic || !climate_topic_configured(entity, "temperature_low_state_topic") {
+        snapshot.target_temperature_low = Some(initial_temperature);
+    }
+    if optimistic || !climate_topic_configured(entity, "temperature_high_state_topic") {
+        snapshot.target_temperature_high = Some(initial_temperature);
+    }
+    if optimistic || !climate_topic_configured(entity, "fan_mode_state_topic") {
+        snapshot.fan_mode = Some("low".into());
+    }
+    if optimistic || !climate_topic_configured(entity, "swing_horizontal_mode_state_topic") {
+        snapshot.swing_horizontal_mode = Some("off".into());
+    }
+    if optimistic || !climate_topic_configured(entity, "swing_mode_state_topic") {
+        snapshot.swing_mode = Some("off".into());
+    }
+    if climate_topic_configured(entity, "preset_mode_command_topic") {
+        snapshot.preset_mode = Some(hass_climate::PRESET_NONE.into());
+    }
+    snapshot.extra_attributes = climate_extra_attributes(&entity.attributes);
+    let modes = descriptor.hvac_modes().unwrap_or_default();
+    let single_and_range_setpoints = modes.contains(&HvacMode::HeatCool)
+        && (modes.contains(&HvacMode::Heat) || modes.contains(&HvacMode::Cool));
+    Ok(MqttClimateState {
+        snapshot,
+        parked_target_temperature: None,
+        parked_target_temperature_range: (None, None),
+        single_and_range_setpoints,
+    })
+}
+
+fn climate_extra_attributes(attributes: &Map<String, Value>) -> Map<String, Value> {
+    let mut extra = attributes.clone();
+    for key in [
+        "friendly_name",
+        "unique_id",
+        "platform",
+        "optimistic",
+        hass_climate::attr::CURRENT_HUMIDITY,
+        hass_climate::attr::CURRENT_TEMPERATURE,
+        hass_climate::attr::FAN_MODE,
+        hass_climate::attr::FAN_MODES,
+        hass_climate::attr::HVAC_ACTION,
+        hass_climate::attr::HVAC_MODES,
+        hass_climate::attr::MAX_HUMIDITY,
+        hass_climate::attr::MAX_TEMP,
+        hass_climate::attr::MIN_HUMIDITY,
+        hass_climate::attr::MIN_TEMP,
+        hass_climate::attr::PRESET_MODE,
+        hass_climate::attr::PRESET_MODES,
+        hass_climate::attr::SUPPORTED_FEATURES,
+        hass_climate::attr::SWING_HORIZONTAL_MODE,
+        hass_climate::attr::SWING_HORIZONTAL_MODES,
+        hass_climate::attr::SWING_MODE,
+        hass_climate::attr::SWING_MODES,
+        hass_climate::attr::TARGET_HUMIDITY,
+        hass_climate::attr::TARGET_HUMIDITY_STEP,
+        hass_climate::attr::TARGET_TEMPERATURE,
+        hass_climate::attr::TARGET_TEMP_HIGH,
+        hass_climate::attr::TARGET_TEMP_LOW,
+        hass_climate::attr::TARGET_TEMP_STEP,
+        hass_climate::attr::TEMPERATURE_UNIT,
+    ] {
+        extra.remove(key);
+    }
+    extra
 }
 
 fn register_services(
@@ -2859,8 +3839,10 @@ fn register_services(
     entities: Arc<RwLock<BTreeMap<String, DiscoveredEntity>>>,
     templates: TemplateEngine,
     command_admission: Arc<AsyncRwLock<bool>>,
+    profiles: Arc<LightProfileCatalog>,
 ) -> Result<()> {
     let serial = Arc::new(tokio::sync::Mutex::new(()));
+    let climate_services = ClimateService::ALL.map(|service| ("climate", service.as_str()));
     for (domain, service) in [
         ("switch", "turn_on"),
         ("switch", "turn_off"),
@@ -2891,12 +3873,16 @@ fn register_services(
         ("number", "set_value"),
         ("select", "select_option"),
         ("text", "set_value"),
-    ] {
+    ]
+    .into_iter()
+    .chain(climate_services)
+    {
         let tx = command_tx.clone();
         let entities = Arc::clone(&entities);
         let templates = templates.clone();
         let serial = Arc::clone(&serial);
         let command_admission = Arc::clone(&command_admission);
+        let profiles = Arc::clone(&profiles);
         let matcher_entities = Arc::clone(&entities);
         let matcher_domain = domain.to_owned();
         let description = if domain == "switch" {
@@ -2905,6 +3891,8 @@ fn register_services(
                 .expect("registered switch service is part of the switch SDK")
                 .description()
                 .metadata_json()
+        } else if domain == "climate" {
+            json!({"description": "Publish a typed MQTT climate command for discovered entities"})
         } else {
             json!({"description": "Publish an MQTT command for discovered entities"})
         };
@@ -2914,6 +3902,7 @@ fn register_services(
             let templates = templates.clone();
             let serial = Arc::clone(&serial);
             let command_admission = Arc::clone(&command_admission);
+            let profiles = Arc::clone(&profiles);
             Box::pin(async move {
                 enqueue_service_commands(
                     &runtime,
@@ -2923,6 +3912,7 @@ fn register_services(
                     &templates,
                     &serial,
                     &command_admission,
+                    &profiles,
                 )
                 .await
             })
@@ -2949,6 +3939,7 @@ fn register_services(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn enqueue_service_commands(
     runtime: &Runtime,
     call: &ServiceCall,
@@ -2957,6 +3948,7 @@ async fn enqueue_service_commands(
     templates: &TemplateEngine,
     serial: &tokio::sync::Mutex<()>,
     command_admission: &AsyncRwLock<bool>,
+    profiles: &LightProfileCatalog,
 ) -> Result<ServiceResult> {
     let guard = serial.lock().await;
     let ids = requested_entity_ids(call)?;
@@ -2965,6 +3957,7 @@ async fn enqueue_service_commands(
             "MQTT service target limit is {MAX_TARGETS_PER_SERVICE}"
         )));
     }
+    let mut light_diagnostics = Vec::new();
     let targets = {
         let discovered = entities
             .read()
@@ -2983,7 +3976,14 @@ async fn enqueue_service_commands(
                     entity_id, call.domain
                 )));
             }
-            let commands = build_entity_commands(runtime, call, &entity, templates)?;
+            let commands = build_entity_commands(
+                runtime,
+                call,
+                &entity,
+                templates,
+                profiles,
+                &mut light_diagnostics,
+            )?;
             if commands.len() != 1 && call.domain == "button" {
                 return Err(Error::Service(
                     "MQTT button press must produce exactly one command".into(),
@@ -2993,6 +3993,18 @@ async fn enqueue_service_commands(
         }
         targets
     };
+
+    for diagnostic in light_diagnostics {
+        if runtime.claim_service_diagnostic(diagnostic.code, &diagnostic.original_value) {
+            warn!(
+                code = diagnostic.code,
+                field = diagnostic.original_field,
+                value = %diagnostic.original_value,
+                "Got unknown color {}, falling back to white",
+                diagnostic.original_value
+            );
+        }
+    }
 
     let mut changed_states = Vec::new();
     if call.domain == "button" {
@@ -3262,6 +4274,8 @@ fn build_entity_commands(
     call: &ServiceCall,
     entity: &DiscoveredEntity,
     templates: &TemplateEngine,
+    profiles: &LightProfileCatalog,
+    light_diagnostics: &mut Vec<LightServiceDiagnostic>,
 ) -> Result<Vec<Command>> {
     let platform = entity.metadata.platform.as_str();
     let service = call.service.as_str();
@@ -3278,6 +4292,21 @@ fn build_entity_commands(
         .as_ref()
         .map(|state| state.attributes.clone())
         .unwrap_or_else(|| entity.attributes.clone());
+    let climate_plan = if let Some(climate) = entity.climate.as_ref() {
+        let request = ClimateCommand::parse_service_call(call)
+            .map_err(|error| Error::Service(error.to_string()))?;
+        let descriptor = match entity.shared_entity.as_ref() {
+            Some(SharedMqttEntity::Climate { descriptor, .. }) => descriptor,
+            _ => &climate.descriptor,
+        };
+        Some(
+            request
+                .resolve(descriptor, climate_unit_context(runtime.unit_system()))
+                .map_err(|error| Error::Service(error.to_string()))?,
+        )
+    } else {
+        None
+    };
     let normalized_light = match entity.shared_entity.as_ref() {
         Some(SharedMqttEntity::Light { descriptor, .. })
             if !(config_string(&entity.platform_config, "schema", "basic") == "basic"
@@ -3297,11 +4326,12 @@ fn build_entity_commands(
             )?;
             let request = LightCommand::parse_service_call(call)
                 .map_err(|error| Error::Service(error.to_string()))?;
-            Some(
-                request
-                    .normalize(descriptor, &snapshot)
-                    .map_err(|error| Error::Service(error.to_string()))?,
-            )
+            let context = LightNormalizationContext::new(&entity_id, profiles);
+            let command = request
+                .normalize_with_context(descriptor, &snapshot, &context)
+                .map_err(|error| Error::Service(error.to_string()))?;
+            light_diagnostics.extend(command.diagnostics.iter().cloned());
+            Some(command)
         }
         _ => None,
     };
@@ -3362,6 +4392,16 @@ fn build_entity_commands(
     };
     if let Some(plan) = fan_plan {
         return fan_effect_commands(runtime, call, entity, templates, plan.effects);
+    }
+    if let Some(plan) = climate_plan {
+        return climate_effect_commands(
+            runtime,
+            call,
+            entity,
+            templates,
+            plan.effects,
+            plan.context,
+        );
     }
     let service = match cover_action.as_ref() {
         Some(CoverAction::Open { .. }) => "open_cover",
@@ -3429,7 +4469,8 @@ fn build_entity_commands(
                         "MQTT light options require a command_template or schema: json".into(),
                     ));
                 }
-                let payload = render_command(call, entity, templates, "command_template", raw)?;
+                let payload =
+                    render_command(runtime, call, entity, templates, "command_template", raw)?;
                 output.push(make_command(
                     runtime,
                     entity,
@@ -3487,6 +4528,7 @@ fn build_entity_commands(
             let open = config_number(&entity.platform_config, "position_open", 100.0);
             let ranged = (closed + (open - closed) * percent / 100.0).round();
             let payload = render_typed_command(
+                runtime,
                 call,
                 entity,
                 templates,
@@ -3568,6 +4610,7 @@ fn build_entity_commands(
                     json!(ranged as i64)
                 };
                 render_typed_command(
+                    runtime,
                     call,
                     entity,
                     templates,
@@ -3605,6 +4648,7 @@ fn build_entity_commands(
             check_service_options(call, allowed)?;
             let on = service == "turn_on";
             let payload = render_command(
+                runtime,
                 call,
                 entity,
                 templates,
@@ -3669,6 +4713,7 @@ fn build_entity_commands(
             };
             let fallback = if on { "oscillate_on" } else { "oscillate_off" };
             let payload = render_command(
+                runtime,
                 call,
                 entity,
                 templates,
@@ -3707,6 +4752,7 @@ fn build_entity_commands(
                 ));
             }
             let payload = render_command(
+                runtime,
                 call,
                 entity,
                 templates,
@@ -3734,6 +4780,7 @@ fn build_entity_commands(
         }
         ("button", "press") => {
             let payload = render_command(
+                runtime,
                 call,
                 entity,
                 templates,
@@ -3770,7 +4817,8 @@ fn build_entity_commands(
                 ));
             }
             let raw = formatted_number(number);
-            let payload = render_command(call, entity, templates, "command_template", &raw)?;
+            let payload =
+                render_command(runtime, call, entity, templates, "command_template", &raw)?;
             let mut attrs = Map::new();
             attrs.insert("value".into(), json!(number));
             output.push(make_command(
@@ -3799,7 +4847,8 @@ fn build_entity_commands(
                     "select option is not in the configured options list".into(),
                 ));
             }
-            let payload = render_command(call, entity, templates, "command_template", option)?;
+            let payload =
+                render_command(runtime, call, entity, templates, "command_template", option)?;
             output.push(make_command(
                 runtime,
                 entity,
@@ -3819,7 +4868,8 @@ fn build_entity_commands(
                 .and_then(Value::as_str)
                 .ok_or_else(|| Error::Service("text.set_value requires string value".into()))?;
             validate_text_value(entity, text)?;
-            let payload = render_command(call, entity, templates, "command_template", text)?;
+            let payload =
+                render_command(runtime, call, entity, templates, "command_template", text)?;
             output.push(make_command(
                 runtime,
                 entity,
@@ -3880,6 +4930,7 @@ fn numeric_arg(call: &ServiceCall, key: &str, min: f64, max: f64) -> Result<f64>
 }
 
 fn render_command(
+    runtime: &Runtime,
     call: &ServiceCall,
     entity: &DiscoveredEntity,
     templates: &TemplateEngine,
@@ -3898,13 +4949,15 @@ fn render_command(
     let Some(template) = template else {
         return Ok(value.to_owned());
     };
-    let variables = command_variables(call, value, &entity.metadata.entity_id);
+    let variables = command_variables(runtime, call, value, entity);
     templates
         .render(template, &variables)
         .map_err(|error| Error::Service(format!("MQTT command template failed: {error}")))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_typed_command(
+    runtime: &Runtime,
     call: &ServiceCall,
     entity: &DiscoveredEntity,
     templates: &TemplateEngine,
@@ -3920,7 +4973,7 @@ fn render_typed_command(
     else {
         return Ok(value.to_owned());
     };
-    let mut variables = command_variables(call, value, &entity.metadata.entity_id);
+    let mut variables = command_variables(runtime, call, value, entity);
     variables.insert(variable_key.into(), variable_value);
     for key in ["position_open", "position_closed", "tilt_min", "tilt_max"] {
         if let Some(value) = entity.platform_config.get(key) {
@@ -3962,11 +5015,14 @@ fn make_command(
             optimistic_updates,
             context: call.context.clone(),
             switch_state: entity.metadata.platform == "switch",
+            climate_state: None,
+            entity_handle: entity_lifecycle_handle(entity).cloned(),
         }
     });
     Ok(Command {
         topic,
         payload: payload.into_bytes(),
+        publish: true,
         qos: qos(entity.qos)?,
         retain: entity.retain,
         optimistic,
@@ -4051,6 +5107,608 @@ fn fan_effect_commands(
     Ok(commands)
 }
 
+fn climate_effect_commands(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    effects: Vec<ClimateEffect>,
+    context: Context,
+) -> Result<Vec<Command>> {
+    let climate = entity
+        .climate
+        .as_ref()
+        .ok_or_else(|| Error::Service("MQTT climate entity has no descriptor".into()))?;
+    let descriptor = match entity.shared_entity.as_ref() {
+        Some(SharedMqttEntity::Climate { descriptor, .. }) => descriptor.clone(),
+        _ => climate.descriptor.clone(),
+    };
+    let mut state = climate
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let mut commands = Vec::new();
+    for effect in effects {
+        match effect {
+            ClimateEffect::TurnOn => commands.push(climate_turn_on(
+                runtime,
+                call,
+                entity,
+                templates,
+                &descriptor,
+                &mut state,
+                context.clone(),
+            )?),
+            ClimateEffect::TurnOff => commands.push(climate_turn_off(
+                runtime,
+                call,
+                entity,
+                templates,
+                &descriptor,
+                &mut state,
+                context.clone(),
+            )?),
+            ClimateEffect::Toggle => {
+                if state.snapshot.hvac_mode == Some(HvacMode::Off) {
+                    commands.push(climate_turn_on(
+                        runtime,
+                        call,
+                        entity,
+                        templates,
+                        &descriptor,
+                        &mut state,
+                        context.clone(),
+                    )?);
+                } else {
+                    commands.push(climate_turn_off(
+                        runtime,
+                        call,
+                        entity,
+                        templates,
+                        &descriptor,
+                        &mut state,
+                        context.clone(),
+                    )?);
+                }
+            }
+            ClimateEffect::SetHvacMode { hvac_mode } => commands.push(climate_mode_command(
+                runtime,
+                call,
+                entity,
+                templates,
+                &mut state,
+                hvac_mode,
+                context.clone(),
+            )?),
+            ClimateEffect::SetTemperature {
+                temperature,
+                target_temp_high,
+                target_temp_low,
+                hvac_mode,
+            } => commands.extend(climate_temperature_commands(
+                runtime,
+                call,
+                entity,
+                templates,
+                &mut state,
+                temperature,
+                target_temp_low,
+                target_temp_high,
+                hvac_mode,
+                context.clone(),
+            )?),
+            ClimateEffect::SetHumidity { humidity } => {
+                let update = climate_should_update(entity, "target_humidity_state_topic");
+                if update {
+                    state.snapshot.target_humidity = Some(humidity as f64);
+                }
+                commands.push(climate_topic_command(
+                    runtime,
+                    call,
+                    entity,
+                    templates,
+                    "target_humidity_command_topic",
+                    "target_humidity_command_template",
+                    &humidity.to_string(),
+                    climate_mutations(
+                        entity,
+                        "target_humidity_state_topic",
+                        ClimateStateMutation::TargetHumidity(humidity as f64),
+                    ),
+                    context.clone(),
+                )?);
+            }
+            ClimateEffect::SetFanMode { fan_mode } => {
+                let update = climate_should_update(entity, "fan_mode_state_topic");
+                if update {
+                    state.snapshot.fan_mode = Some(fan_mode.clone());
+                }
+                commands.push(climate_topic_command(
+                    runtime,
+                    call,
+                    entity,
+                    templates,
+                    "fan_mode_command_topic",
+                    "fan_mode_command_template",
+                    &fan_mode,
+                    climate_mutations(
+                        entity,
+                        "fan_mode_state_topic",
+                        ClimateStateMutation::FanMode(fan_mode.clone()),
+                    ),
+                    context.clone(),
+                )?);
+            }
+            ClimateEffect::SetPresetMode { preset_mode } => {
+                let update = entity.optimistic
+                    || !climate_topic_configured(entity, "preset_mode_state_topic");
+                if update {
+                    state.snapshot.preset_mode = Some(preset_mode.clone());
+                }
+                commands.push(climate_topic_command(
+                    runtime,
+                    call,
+                    entity,
+                    templates,
+                    "preset_mode_command_topic",
+                    "preset_mode_command_template",
+                    &preset_mode,
+                    climate_mutations(
+                        entity,
+                        "preset_mode_state_topic",
+                        ClimateStateMutation::PresetMode(preset_mode.clone()),
+                    ),
+                    context.clone(),
+                )?);
+            }
+            ClimateEffect::SetSwingMode { swing_mode } => {
+                let update = climate_should_update(entity, "swing_mode_state_topic");
+                if update {
+                    state.snapshot.swing_mode = Some(swing_mode.clone());
+                }
+                commands.push(climate_topic_command(
+                    runtime,
+                    call,
+                    entity,
+                    templates,
+                    "swing_mode_command_topic",
+                    "swing_mode_command_template",
+                    &swing_mode,
+                    climate_mutations(
+                        entity,
+                        "swing_mode_state_topic",
+                        ClimateStateMutation::SwingMode(swing_mode.clone()),
+                    ),
+                    context.clone(),
+                )?);
+            }
+            ClimateEffect::SetSwingHorizontalMode {
+                swing_horizontal_mode,
+            } => {
+                let update = climate_should_update(entity, "swing_horizontal_mode_state_topic");
+                if update {
+                    state.snapshot.swing_horizontal_mode = Some(swing_horizontal_mode.clone());
+                }
+                commands.push(climate_topic_command(
+                    runtime,
+                    call,
+                    entity,
+                    templates,
+                    "swing_horizontal_mode_command_topic",
+                    "swing_horizontal_mode_command_template",
+                    &swing_horizontal_mode,
+                    climate_mutations(
+                        entity,
+                        "swing_horizontal_mode_state_topic",
+                        ClimateStateMutation::SwingHorizontalMode(swing_horizontal_mode.clone()),
+                    ),
+                    context.clone(),
+                )?);
+            }
+        }
+    }
+    Ok(commands)
+}
+fn climate_turn_on_mode(descriptor: &ClimateDescriptor) -> Result<HvacMode> {
+    let modes = descriptor.hvac_modes().unwrap_or_default();
+    if modes.len() == 2 && modes.contains(&HvacMode::Off) {
+        return modes
+            .iter()
+            .copied()
+            .find(|mode| *mode != HvacMode::Off)
+            .ok_or_else(|| Error::Service("MQTT climate has no non-off HVAC mode".into()));
+    }
+    [HvacMode::HeatCool, HvacMode::Heat, HvacMode::Cool]
+        .into_iter()
+        .find(|mode| modes.contains(mode))
+        .ok_or_else(|| Error::Service("MQTT climate has no mode to turn on".into()))
+}
+fn climate_turn_on(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    descriptor: &ClimateDescriptor,
+    state: &mut MqttClimateState,
+    context: Context,
+) -> Result<Command> {
+    if climate_topic_configured(entity, "power_command_topic") {
+        return climate_topic_command(
+            runtime,
+            call,
+            entity,
+            templates,
+            "power_command_topic",
+            "power_command_template",
+            config_string(&entity.platform_config, "payload_on", "ON"),
+            Vec::new(),
+            context,
+        );
+    }
+    climate_mode_command(
+        runtime,
+        call,
+        entity,
+        templates,
+        state,
+        climate_turn_on_mode(descriptor)?,
+        context,
+    )
+}
+fn climate_turn_off(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    descriptor: &ClimateDescriptor,
+    state: &mut MqttClimateState,
+    context: Context,
+) -> Result<Command> {
+    if climate_topic_configured(entity, "power_command_topic") {
+        let update = entity.optimistic;
+        if update {
+            state.snapshot.hvac_mode = Some(HvacMode::Off);
+        }
+        return climate_topic_command(
+            runtime,
+            call,
+            entity,
+            templates,
+            "power_command_topic",
+            "power_command_template",
+            config_string(&entity.platform_config, "payload_off", "OFF"),
+            if update {
+                vec![ClimateStateMutation::HvacModeWithoutSetpointSwap(
+                    HvacMode::Off,
+                )]
+            } else {
+                Vec::new()
+            },
+            context,
+        );
+    }
+    if !descriptor
+        .hvac_modes()
+        .unwrap_or_default()
+        .contains(&HvacMode::Off)
+    {
+        return Err(Error::Service(
+            "MQTT climate cannot turn off because 'off' is not an advertised mode".into(),
+        ));
+    }
+    climate_mode_command(
+        runtime,
+        call,
+        entity,
+        templates,
+        state,
+        HvacMode::Off,
+        context,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn climate_temperature_commands(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    state: &mut MqttClimateState,
+    temperature: Option<f64>,
+    target_temp_low: Option<f64>,
+    target_temp_high: Option<f64>,
+    hvac_mode: Option<HvacMode>,
+    context: Context,
+) -> Result<Vec<Command>> {
+    let mut commands = Vec::new();
+    if let Some(hvac_mode) = hvac_mode {
+        commands.push(climate_mode_command(
+            runtime,
+            call,
+            entity,
+            templates,
+            state,
+            hvac_mode,
+            context.clone(),
+        )?);
+    }
+    if let Some(value) = temperature {
+        if climate_should_update(entity, "temperature_state_topic") {
+            state.snapshot.target_temperature = Some(value);
+            climate_park_range(state);
+        }
+        commands.push(climate_topic_command(
+            runtime,
+            call,
+            entity,
+            templates,
+            "temperature_command_topic",
+            "temperature_command_template",
+            &format!("{value:?}"),
+            climate_mutations(
+                entity,
+                "temperature_state_topic",
+                ClimateStateMutation::TargetTemperature(value),
+            ),
+            context.clone(),
+        )?);
+    }
+    if let Some(value) = target_temp_low {
+        if climate_should_update(entity, "temperature_low_state_topic") {
+            state.snapshot.target_temperature_low = Some(value);
+            climate_park_single(state);
+        }
+        commands.push(climate_topic_command(
+            runtime,
+            call,
+            entity,
+            templates,
+            "temperature_low_command_topic",
+            "temperature_low_command_template",
+            &format!("{value:?}"),
+            climate_mutations(
+                entity,
+                "temperature_low_state_topic",
+                ClimateStateMutation::TargetTemperatureLow(value),
+            ),
+            context.clone(),
+        )?);
+    }
+    if let Some(value) = target_temp_high {
+        if climate_should_update(entity, "temperature_high_state_topic") {
+            state.snapshot.target_temperature_high = Some(value);
+            climate_park_single(state);
+        }
+        commands.push(climate_topic_command(
+            runtime,
+            call,
+            entity,
+            templates,
+            "temperature_high_command_topic",
+            "temperature_high_command_template",
+            &format!("{value:?}"),
+            climate_mutations(
+                entity,
+                "temperature_high_state_topic",
+                ClimateStateMutation::TargetTemperatureHigh(value),
+            ),
+            context.clone(),
+        )?);
+    }
+    Ok(commands)
+}
+fn climate_should_update(entity: &DiscoveredEntity, state_topic: &str) -> bool {
+    entity.optimistic || !climate_topic_configured(entity, state_topic)
+}
+
+fn climate_mutations(
+    entity: &DiscoveredEntity,
+    state_topic: &str,
+    mutation: ClimateStateMutation,
+) -> Vec<ClimateStateMutation> {
+    // The operation is intentional even when its value equals the preflight
+    // cache. A prior command can await an ACK while telemetry changes it.
+    climate_should_update(entity, state_topic)
+        .then_some(mutation)
+        .into_iter()
+        .collect()
+}
+
+fn climate_mode_command(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    state: &mut MqttClimateState,
+    mode: HvacMode,
+    context: Context,
+) -> Result<Command> {
+    let update = climate_should_update(entity, "mode_state_topic");
+    if update {
+        state.snapshot.hvac_mode = Some(mode);
+        climate_swap_setpoints(entity, state, mode);
+    }
+    climate_topic_command(
+        runtime,
+        call,
+        entity,
+        templates,
+        "mode_command_topic",
+        "mode_command_template",
+        mode.as_str(),
+        climate_mutations(
+            entity,
+            "mode_state_topic",
+            ClimateStateMutation::HvacMode(mode),
+        ),
+        context,
+    )
+}
+fn climate_swap_setpoints(entity: &DiscoveredEntity, state: &mut MqttClimateState, mode: HvacMode) {
+    if !state.single_and_range_setpoints
+        || !matches!(mode, HvacMode::Cool | HvacMode::Heat | HvacMode::HeatCool)
+    {
+        return;
+    }
+    let single_is_optimistic = climate_should_update(entity, "temperature_state_topic");
+    let range_is_optimistic = entity.optimistic
+        || (!climate_topic_configured(entity, "temperature_low_state_topic")
+            && !climate_topic_configured(entity, "temperature_high_state_topic"));
+    if mode == HvacMode::HeatCool {
+        if single_is_optimistic {
+            climate_park_single(state);
+        }
+        if range_is_optimistic
+            && state.snapshot.target_temperature_low.is_none()
+            && state.snapshot.target_temperature_high.is_none()
+        {
+            (
+                state.snapshot.target_temperature_low,
+                state.snapshot.target_temperature_high,
+            ) = state.parked_target_temperature_range;
+        }
+    } else {
+        if single_is_optimistic && state.snapshot.target_temperature.is_none() {
+            state.snapshot.target_temperature = state.parked_target_temperature;
+        }
+        if range_is_optimistic {
+            climate_park_range(state);
+        }
+    }
+}
+fn climate_park_single(state: &mut MqttClimateState) {
+    if !state.single_and_range_setpoints {
+        return;
+    }
+    if let Some(temperature) = state.snapshot.target_temperature {
+        state.parked_target_temperature = Some(temperature);
+        state.snapshot.target_temperature = None;
+    }
+}
+fn climate_park_range(state: &mut MqttClimateState) {
+    if !state.single_and_range_setpoints
+        || (state.snapshot.target_temperature_low.is_none()
+            && state.snapshot.target_temperature_high.is_none())
+    {
+        return;
+    }
+    state.parked_target_temperature_range = (
+        state.snapshot.target_temperature_low,
+        state.snapshot.target_temperature_high,
+    );
+    state.snapshot.target_temperature_low = None;
+    state.snapshot.target_temperature_high = None;
+}
+#[allow(clippy::too_many_arguments)]
+fn climate_topic_command(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    topic_key: &str,
+    template_key: &str,
+    value: &str,
+    mutations: Vec<ClimateStateMutation>,
+    context: Context,
+) -> Result<Command> {
+    let topic = entity
+        .platform_config
+        .get(topic_key)
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let payload = if topic.is_some() {
+        render_command(runtime, call, entity, templates, template_key, value)?
+    } else {
+        String::new()
+    };
+    let publish = topic.is_some();
+    let mut command = make_command(
+        runtime,
+        entity,
+        call,
+        topic.unwrap_or_default(),
+        payload,
+        None,
+        Map::new(),
+        false,
+    )?;
+    command.publish = publish;
+    if !mutations.is_empty() {
+        attach_climate_state(runtime, entity, &mut command, mutations, context);
+    }
+    Ok(command)
+}
+fn attach_climate_state(
+    runtime: &Runtime,
+    entity: &DiscoveredEntity,
+    command: &mut Command,
+    mutations: Vec<ClimateStateMutation>,
+    context: Context,
+) {
+    let entity_id = mqtt_entity_id(entity);
+    let attributes = runtime
+        .get_state(&entity_id)
+        .map(|state| state.attributes)
+        .unwrap_or_else(|| entity.attributes.clone());
+    command.optimistic = Some(OptimisticState {
+        discovery_topic: entity.metadata.discovery_topic.clone(),
+        state: None,
+        attributes,
+        optimistic_updates: Map::new(),
+        context,
+        switch_state: false,
+        climate_state: Some(ClimateStateUpdate { mutations }),
+        entity_handle: entity_lifecycle_handle(entity).cloned(),
+    });
+}
+
+fn apply_climate_state_update(
+    entity: &DiscoveredEntity,
+    current: &mut MqttClimateState,
+    update: &ClimateStateUpdate,
+    context: &Context,
+) {
+    for mutation in &update.mutations {
+        match mutation {
+            ClimateStateMutation::HvacMode(mode) => {
+                current.snapshot.hvac_mode = Some(*mode);
+                climate_swap_setpoints(entity, current, *mode);
+            }
+            ClimateStateMutation::HvacModeWithoutSetpointSwap(mode) => {
+                current.snapshot.hvac_mode = Some(*mode);
+            }
+            ClimateStateMutation::TargetTemperature(value) => {
+                current.snapshot.target_temperature = Some(*value);
+                climate_park_range(current);
+            }
+            ClimateStateMutation::TargetTemperatureLow(value) => {
+                current.snapshot.target_temperature_low = Some(*value);
+                climate_park_single(current);
+            }
+            ClimateStateMutation::TargetTemperatureHigh(value) => {
+                current.snapshot.target_temperature_high = Some(*value);
+                climate_park_single(current);
+            }
+            ClimateStateMutation::TargetHumidity(value) => {
+                current.snapshot.target_humidity = Some(*value);
+            }
+            ClimateStateMutation::FanMode(value) => {
+                current.snapshot.fan_mode = Some(value.clone());
+            }
+            ClimateStateMutation::PresetMode(value) => {
+                current.snapshot.preset_mode = Some(value.clone());
+            }
+            ClimateStateMutation::SwingMode(value) => {
+                current.snapshot.swing_mode = Some(value.clone());
+            }
+            ClimateStateMutation::SwingHorizontalMode(value) => {
+                current.snapshot.swing_horizontal_mode = Some(value.clone());
+            }
+        }
+    }
+    current.snapshot.context = context.clone();
+}
+
 fn fan_power_command(
     runtime: &Runtime,
     call: &ServiceCall,
@@ -4059,6 +5717,7 @@ fn fan_power_command(
     on: bool,
 ) -> Result<Command> {
     let payload = render_command(
+        runtime,
         call,
         entity,
         templates,
@@ -4094,6 +5753,7 @@ fn fan_oscillation_command(
     };
     let fallback = if on { "oscillate_on" } else { "oscillate_off" };
     let payload = render_command(
+        runtime,
         call,
         entity,
         templates,
@@ -4126,6 +5786,7 @@ fn fan_direction_command(
     direction: &str,
 ) -> Result<Command> {
     let payload = render_command(
+        runtime,
         call,
         entity,
         templates,
@@ -4171,6 +5832,7 @@ fn fan_percentage_command(
         .map_err(|error| Error::Service(error.to_string()))?
         .ceil();
     let payload = render_typed_command(
+        runtime,
         call,
         entity,
         templates,
@@ -4216,6 +5878,7 @@ fn fan_preset_command(
         ));
     }
     let payload = render_command(
+        runtime,
         call,
         entity,
         templates,
@@ -4676,10 +6339,18 @@ fn normalized_json_light_command(
     Ok((Value::Object(message).to_string(), attributes))
 }
 
-fn command_variables(call: &ServiceCall, value: &str, entity_id: &str) -> Map<String, Value> {
+fn command_variables(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    value: &str,
+    entity: &DiscoveredEntity,
+) -> Map<String, Value> {
+    let entity_id = mqtt_entity_id(entity);
     let mut variables = Map::new();
     variables.insert("value".into(), Value::String(value.to_owned()));
-    variables.insert("entity_id".into(), Value::String(entity_id.to_owned()));
+    variables.insert("entity_id".into(), Value::String(entity_id));
+    variables.insert("name".into(), Value::String(entity.metadata.name.clone()));
+    variables.insert("this".into(), mqtt_template_state(runtime, entity));
     for (key, value) in &call.data {
         if key != "entity_id" {
             variables.insert(key.clone(), value.clone());
@@ -4723,31 +6394,33 @@ fn requested_entity_ids(call: &ServiceCall) -> Result<Vec<String>> {
 }
 
 fn render_value(
+    runtime: &Runtime,
     templates: &TemplateEngine,
     template: Option<&str>,
     payload: &str,
-    entity_id: &str,
+    entity: &DiscoveredEntity,
 ) -> Result<Value> {
     let Some(template) = template else {
         return Ok(Value::String(payload.to_owned()));
     };
-    let variables = value_variables(payload, entity_id);
+    let variables = mqtt_value_variables(runtime, entity, payload);
     templates
         .render_value(template, &variables)
         .map_err(|error| Error::InvalidInput(format!("MQTT value template failed: {error}")))
 }
 
 fn render_string(
+    runtime: &Runtime,
     templates: &TemplateEngine,
     template: Option<&str>,
     payload: &str,
-    entity_id: &str,
+    entity: &DiscoveredEntity,
 ) -> Result<String> {
     let Some(template) = template else {
         return Ok(payload.to_owned());
     };
     templates
-        .render(template, &value_variables(payload, entity_id))
+        .render(template, &mqtt_value_variables(runtime, entity, payload))
         .map_err(|error| Error::InvalidInput(format!("MQTT template failed: {error}")))
 }
 
@@ -4759,6 +6432,36 @@ fn value_variables(payload: &str, entity_id: &str) -> Map<String, Value> {
         variables.insert("value_json".into(), value_json);
     }
     variables
+}
+
+fn mqtt_value_variables(
+    runtime: &Runtime,
+    entity: &DiscoveredEntity,
+    payload: &str,
+) -> Map<String, Value> {
+    let entity_id = mqtt_entity_id(entity);
+    let mut variables = value_variables(payload, &entity_id);
+    variables.insert("name".into(), Value::String(entity.metadata.name.clone()));
+    variables.insert("this".into(), mqtt_template_state(runtime, entity));
+    variables
+}
+
+fn mqtt_template_state(runtime: &Runtime, entity: &DiscoveredEntity) -> Value {
+    let entity_id = mqtt_entity_id(entity);
+    let state = runtime.get_state(&entity_id);
+    let state_value = state
+        .as_ref()
+        .map(|state| state.state.clone())
+        .unwrap_or_else(|| "unknown".into());
+    let attributes = state
+        .map(|state| state.attributes)
+        .unwrap_or_else(|| entity.attributes.clone());
+    json!({
+        "entity_id": entity_id,
+        "name": entity.metadata.name,
+        "state": state_value,
+        "attributes": attributes,
+    })
 }
 
 fn state_string(entity: &DiscoveredEntity, value: Value) -> String {
@@ -4870,6 +6573,7 @@ fn formatted_number(value: f64) -> String {
 }
 
 fn render_topic_value(
+    runtime: &Runtime,
     entity: &DiscoveredEntity,
     topic_key: &str,
     payload: &str,
@@ -4882,6 +6586,17 @@ fn render_topic_value(
         "preset_mode_state_topic" => "preset_mode_value_template",
         "oscillation_state_topic" => "oscillation_value_template",
         "direction_state_topic" => "direction_value_template",
+        "action_topic" => "action_template",
+        "current_humidity_topic" => "current_humidity_template",
+        "current_temperature_topic" => "current_temperature_template",
+        "target_humidity_state_topic" => "target_humidity_state_template",
+        "mode_state_topic" => "mode_state_template",
+        "fan_mode_state_topic" => "fan_mode_state_template",
+        "swing_horizontal_mode_state_topic" => "swing_horizontal_mode_state_template",
+        "swing_mode_state_topic" => "swing_mode_state_template",
+        "temperature_state_topic" => "temperature_state_template",
+        "temperature_low_state_topic" => "temperature_low_state_template",
+        "temperature_high_state_topic" => "temperature_high_state_template",
         _ => "value_template",
     };
     let template = entity
@@ -4892,7 +6607,7 @@ fn render_topic_value(
     let Some(template) = template else {
         return Ok(Value::String(payload.to_owned()));
     };
-    let mut variables = value_variables(payload, &entity.metadata.entity_id);
+    let mut variables = mqtt_value_variables(runtime, entity, payload);
     for key in ["position_open", "position_closed", "tilt_min", "tilt_max"] {
         if let Some(value) = entity.platform_config.get(key) {
             variables.insert(key.into(), value.clone());
@@ -5078,7 +6793,201 @@ fn update_light_json(
     Ok(current)
 }
 
+fn climate_state_field_key(field: ClimateStateField) -> &'static str {
+    match field {
+        ClimateStateField::Action => "action_topic",
+        ClimateStateField::CurrentHumidity => "current_humidity_topic",
+        ClimateStateField::CurrentTemperature => "current_temperature_topic",
+        ClimateStateField::TargetHumidity => "target_humidity_state_topic",
+        ClimateStateField::HvacMode => "mode_state_topic",
+        ClimateStateField::FanMode => "fan_mode_state_topic",
+        ClimateStateField::SwingHorizontalMode => "swing_horizontal_mode_state_topic",
+        ClimateStateField::SwingMode => "swing_mode_state_topic",
+        ClimateStateField::PresetMode => "preset_mode_state_topic",
+        ClimateStateField::TargetTemperature => "temperature_state_topic",
+        ClimateStateField::TargetTemperatureLow => "temperature_low_state_topic",
+        ClimateStateField::TargetTemperatureHigh => "temperature_high_state_topic",
+    }
+}
+fn climate_state_text(value: &Value) -> String {
+    match value {
+        Value::Null => "None".into(),
+        Value::String(value) => value.clone(),
+        _ => value.to_string(),
+    }
+}
+fn climate_number_update(value: &str, field: &str) -> Result<Option<f64>> {
+    if value == "None" {
+        return Ok(None);
+    }
+    number_value(&Value::String(value.into()), field)
+        .map(Some)
+        .map_err(|error| Error::InvalidInput(error.to_string()))
+}
+fn apply_climate_state_field(
+    entity: &DiscoveredEntity,
+    field: ClimateStateField,
+    value: Value,
+    state: &mut MqttClimateState,
+) -> Result<bool> {
+    let text = climate_state_text(&value);
+    if text.is_empty() {
+        return Ok(false);
+    }
+    match field {
+        ClimateStateField::Action => {
+            if text == "None" {
+                state.snapshot.hvac_action = None;
+            } else {
+                state.snapshot.hvac_action = Some(text.parse::<HvacAction>().map_err(|error| {
+                    Error::InvalidInput(format!("invalid MQTT climate action: {error}"))
+                })?);
+            }
+        }
+        ClimateStateField::CurrentHumidity => {
+            state.snapshot.current_humidity = climate_number_update(&text, "current humidity")?;
+        }
+        ClimateStateField::CurrentTemperature => {
+            state.snapshot.current_temperature =
+                climate_number_update(&text, "current temperature")?;
+        }
+        ClimateStateField::TargetHumidity => {
+            state.snapshot.target_humidity = climate_number_update(&text, "target humidity")?;
+        }
+        ClimateStateField::HvacMode => {
+            if text == "None" {
+                state.snapshot.hvac_mode = None;
+            } else {
+                let mode = text.parse::<HvacMode>().map_err(|error| {
+                    Error::InvalidInput(format!("invalid MQTT climate HVAC mode: {error}"))
+                })?;
+                if !config_strings(&entity.platform_config, "modes")
+                    .iter()
+                    .any(|known| known == mode.as_str())
+                {
+                    return Err(Error::InvalidInput(format!(
+                        "unknown MQTT climate HVAC mode {text:?}"
+                    )));
+                }
+                state.snapshot.hvac_mode = Some(mode);
+            }
+        }
+        ClimateStateField::FanMode => {
+            state.snapshot.fan_mode = climate_mode_state_value(entity, "fan_modes", "fan", &text)?;
+        }
+        ClimateStateField::SwingHorizontalMode => {
+            state.snapshot.swing_horizontal_mode = climate_mode_state_value(
+                entity,
+                "swing_horizontal_modes",
+                "horizontal_swing",
+                &text,
+            )?;
+        }
+        ClimateStateField::SwingMode => {
+            state.snapshot.swing_mode =
+                climate_mode_state_value(entity, "swing_modes", "swing", &text)?;
+        }
+        ClimateStateField::PresetMode => {
+            if text == "None" || text == hass_climate::PRESET_NONE {
+                state.snapshot.preset_mode = Some(hass_climate::PRESET_NONE.into());
+            } else if config_strings(&entity.platform_config, "preset_modes")
+                .iter()
+                .any(|known| known == &text)
+            {
+                state.snapshot.preset_mode = Some(text);
+            } else {
+                return Err(Error::InvalidInput(format!(
+                    "unknown MQTT climate preset mode {text:?}"
+                )));
+            }
+        }
+        ClimateStateField::TargetTemperature => {
+            state.snapshot.target_temperature = climate_number_update(&text, "target temperature")?;
+            if state.snapshot.target_temperature.is_some() {
+                climate_park_range(state);
+            }
+        }
+        ClimateStateField::TargetTemperatureLow => {
+            state.snapshot.target_temperature_low =
+                climate_number_update(&text, "target temperature low")?;
+            if state.snapshot.target_temperature_low.is_some() {
+                climate_park_single(state);
+            }
+        }
+        ClimateStateField::TargetTemperatureHigh => {
+            state.snapshot.target_temperature_high =
+                climate_number_update(&text, "target temperature high")?;
+            if state.snapshot.target_temperature_high.is_some() {
+                climate_park_single(state);
+            }
+        }
+    }
+    Ok(true)
+}
+fn climate_mode_state_value(
+    entity: &DiscoveredEntity,
+    list_key: &str,
+    family: &str,
+    value: &str,
+) -> Result<Option<String>> {
+    if value == "None" {
+        return Ok(None);
+    }
+    let known = config_strings(&entity.platform_config, list_key);
+    if known.iter().any(|mode| mode == value) {
+        Ok(Some(value.to_owned()))
+    } else {
+        Err(Error::InvalidInput(format!(
+            "unknown MQTT climate {family} mode {value:?}"
+        )))
+    }
+}
+fn update_climate_reported_state(
+    runtime: &Runtime,
+    entity: &DiscoveredEntity,
+    topic: &str,
+    payload: &str,
+    templates: &TemplateEngine,
+    mut current: MqttClimateState,
+) -> Result<Option<MqttClimateState>> {
+    let Some(fields) = entity
+        .climate
+        .as_ref()
+        .and_then(|climate| climate.state_topics.get(topic))
+    else {
+        return Ok(None);
+    };
+    let mut changed = false;
+    for field in fields {
+        let key = climate_state_field_key(*field);
+        let value = match render_topic_value(runtime, entity, key, payload, templates) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(
+                    entity_id = %entity.metadata.entity_id,
+                    topic,
+                    field = key,
+                    error = %error,
+                    "ignoring invalid MQTT climate state field"
+                );
+                continue;
+            }
+        };
+        match apply_climate_state_field(entity, *field, value, &mut current) {
+            Ok(field_changed) => changed |= field_changed,
+            Err(error) => warn!(
+                entity_id = %entity.metadata.entity_id,
+                topic,
+                field = key,
+                error = %error,
+                "ignoring invalid MQTT climate state field"
+            ),
+        }
+    }
+    Ok(changed.then_some(current))
+}
 fn update_reported_state(
+    runtime: &Runtime,
     entity: &DiscoveredEntity,
     topic: &str,
     payload: &str,
@@ -5099,7 +7008,7 @@ fn update_reported_state(
         } else {
             entity.value_template.as_deref()
         };
-        let value = render_value(templates, template, payload, &entity.metadata.entity_id)?;
+        let value = render_value(runtime, templates, template, payload, entity)?;
         match entity.metadata.platform.as_str() {
             "cover" => {
                 let state = value.as_str().unwrap_or_default();
@@ -5186,7 +7095,7 @@ fn update_reported_state(
             _ => current.state = state_string(entity, value),
         }
     } else if let Some(topic_key) = entity.extra_state_topics.get(topic) {
-        let value = render_topic_value(entity, topic_key, payload, templates)?;
+        let value = render_topic_value(runtime, entity, topic_key, payload, templates)?;
         match topic_key.as_str() {
             "position_topic" => {
                 let value = value
@@ -5412,6 +7321,91 @@ fn apply_availability(
     }
 }
 
+fn publish_climate_state(
+    runtime: &Runtime,
+    entity: &DiscoveredEntity,
+    state: &MqttClimateState,
+    available: bool,
+    context: Context,
+) -> Result<Option<(State, bool)>> {
+    let climate = entity
+        .climate
+        .as_ref()
+        .ok_or_else(|| Error::Service("MQTT climate state is missing".into()))?;
+    let descriptor = match entity.shared_entity.as_ref() {
+        Some(SharedMqttEntity::Climate { descriptor, .. }) => descriptor,
+        _ => &climate.descriptor,
+    };
+    let mut next = state.clone();
+    next.snapshot.available = available;
+    next.snapshot.context = context;
+    *climate
+        .state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = next.clone();
+    let publication = descriptor
+        .publication(&next.snapshot, climate_unit_context(runtime.unit_system()))
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    let projected = publication.snapshot.clone();
+    let change = if let Some(handle) = entity_lifecycle_handle(entity) {
+        if !handle.status().is_active() {
+            return Ok(None);
+        }
+        handle.publish_publication(publication)?
+    } else {
+        let state = if projected.available {
+            projected.state.as_deref().unwrap_or("unknown")
+        } else {
+            "unavailable"
+        };
+        Some(runtime.set_state(
+            &entity.metadata.entity_id,
+            state,
+            projected.attributes,
+            projected.context,
+            false,
+        )?)
+    };
+    Ok(change.map(|change| (change.state, change.changed)))
+}
+fn reproject_climate_entities(
+    runtime: &Runtime,
+    entities: &RwLock<BTreeMap<String, DiscoveredEntity>>,
+    connected: bool,
+    availability_status: &HashMap<(String, String), bool>,
+    _last_values: &HashMap<String, LastValue>,
+) {
+    let discovered = entities
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .filter(|entity| entity.climate.is_some())
+        .cloned()
+        .collect::<Vec<_>>();
+    for entity in discovered {
+        if !mqtt_entity_is_active(&entity) {
+            continue;
+        }
+        let Some(climate) = entity.climate.as_ref() else {
+            continue;
+        };
+        let state = climate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let available = entity_available(&entity, connected, availability_status);
+        if let Err(error) = publish_climate_state(
+            runtime,
+            &entity,
+            &state,
+            available,
+            state.snapshot.context.clone(),
+        ) {
+            warn!(entity_id = %mqtt_entity_id(&entity), error = %error, "failed to reproject MQTT climate after Core unit update");
+        }
+    }
+}
 fn update_all_availability(
     runtime: &Runtime,
     entities: &RwLock<BTreeMap<String, DiscoveredEntity>>,
@@ -5505,6 +7499,7 @@ fn shared_entity_projection(
             let entity_snapshot = publication.snapshot.clone();
             Ok(Some((publication, entity_snapshot)))
         }
+        SharedMqttEntity::Climate { .. } => Ok(None),
         SharedMqttEntity::Button { .. } => Ok(None),
     }
 }
@@ -5899,6 +7894,17 @@ fn publish_discovered_state(
     attributes: Map<String, Value>,
     context: Context,
 ) {
+    if let Some(climate) = entity.climate.as_ref() {
+        let state = climate
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Err(error) = publish_climate_state(runtime, entity, &state, available, context) {
+            warn!(entity_id = %mqtt_entity_id(entity), error = %error, "failed to publish MQTT climate state");
+        }
+        return;
+    }
     match entity.shared_entity.as_ref() {
         Some(SharedMqttEntity::Switch(handle)) => {
             let is_on = match state {
@@ -6205,6 +8211,7 @@ mod async_publish_tests {
                 entity_lifecycle_managed: false,
             },
             shared_entity: None,
+            climate: None,
             switch_device_class: None,
             button_device_class: None,
             button_last_value: Arc::new(Mutex::new(None)),
@@ -6233,6 +8240,76 @@ mod async_publish_tests {
     }
 
     #[tokio::test]
+    async fn late_ack_cannot_publish_into_a_replacement_discovery_entity() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        let registries = hass_registry::Registries::new(runtime.clone()).unwrap();
+        let lifecycle = hass_entity::EntityLifecycle::new(runtime.clone(), registries).unwrap();
+        let mut handles = lifecycle
+            .register_provider_batch(
+                "retired",
+                vec![
+                    hass_switch::SwitchDescriptor::new("mqtt", "retired", "original")
+                        .with_unique_id("retired-publisher")
+                        .entity_spec(),
+                ],
+            )
+            .unwrap();
+        let retired_handle = handles.remove(0);
+        retired_handle.release().unwrap();
+        assert!(!retired_handle.status().is_active());
+
+        const TOPIC: &str = "homeassistant/switch/reused/config";
+        runtime
+            .set_state(
+                "switch.replacement",
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let entities = std::sync::RwLock::new(BTreeMap::from([(
+            TOPIC.into(),
+            discovered_switch("switch.replacement", TOPIC),
+        )]));
+        let availability_status = HashMap::new();
+        let mut last_values = HashMap::new();
+        let mut ready_continuations = VecDeque::new();
+        let mut completion = PublishCompletionContext {
+            runtime: &runtime,
+            entities: &entities,
+            connected: true,
+            availability_status: &availability_status,
+            last_values: &mut last_values,
+            ready_continuations: &mut ready_continuations,
+        };
+        let (reply, result) = oneshot::channel();
+        let mut pending = PendingPublish {
+            qos: QoS::AtLeastOnce,
+            reply: Some(reply),
+            remaining_commands: VecDeque::new(),
+            changed_states: Vec::new(),
+            deadline: None,
+            optimistic: Some(OptimisticState {
+                discovery_topic: TOPIC.into(),
+                state: Some("on".into()),
+                attributes: Map::new(),
+                optimistic_updates: Map::new(),
+                context: Context::default(),
+                switch_state: true,
+                climate_state: None,
+                entity_handle: Some(retired_handle),
+            }),
+        };
+        complete_publish(&mut completion, &mut pending);
+        assert_eq!(
+            runtime.get_state("switch.replacement").unwrap().state,
+            "off"
+        );
+        assert!(result.await.unwrap().unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn callback_timeout_returns_normally_and_applies_optimistic_state() {
         let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
         runtime
@@ -6258,6 +8335,8 @@ mod async_publish_tests {
                 optimistic_updates: Map::new(),
                 context: Context::default(),
                 switch_state: true,
+                climate_state: None,
+                entity_handle: None,
             }),
             deadline: Some(now - Duration::from_secs(1)),
         }]);
@@ -6298,6 +8377,7 @@ mod async_publish_tests {
         let command = |topic: &str| Command {
             topic: topic.into(),
             payload: b"value".to_vec(),
+            publish: true,
             qos: QoS::AtLeastOnce,
             retain: false,
             optimistic: None,
@@ -6373,6 +8453,8 @@ mod async_publish_tests {
             optimistic_updates: Map::from_iter([("percentage".into(), serde_json::json!(0))]),
             context: Context::default(),
             switch_state: false,
+            climate_state: None,
+            entity_handle: None,
         };
         // This represents another admitted effect changing the entity after
         // the command batch was preflighted but before its attribute update
@@ -6479,12 +8561,14 @@ mod async_publish_tests {
 
         let (reply, result) = oneshot::channel();
         let mut pending = VecDeque::new();
+        let entities = std::sync::RwLock::new(BTreeMap::new());
         queue_publish_command(
             &client,
             CommandRequest {
                 command: Command {
                     topic: "lab/command".into(),
                     payload: b"ON".to_vec(),
+                    publish: true,
                     qos: QoS::AtLeastOnce,
                     retain: false,
                     optimistic: Some(OptimisticState {
@@ -6494,12 +8578,15 @@ mod async_publish_tests {
                         optimistic_updates: Map::new(),
                         context: Context::default(),
                         switch_state: true,
+                        climate_state: None,
+                        entity_handle: None,
                     }),
                     entity_handle: None,
                 },
                 remaining_commands: VecDeque::from([Command {
                     topic: "lab/command/continuation".into(),
                     payload: b"OFF".to_vec(),
+                    publish: true,
                     qos: QoS::AtLeastOnce,
                     retain: false,
                     optimistic: None,
@@ -6508,6 +8595,7 @@ mod async_publish_tests {
                 changed_states: Vec::new(),
                 reply,
             },
+            &entities,
             &mut pending,
         );
 

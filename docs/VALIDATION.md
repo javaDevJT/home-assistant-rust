@@ -1,5 +1,51 @@
 # Validation evidence
 
+## Climate, light profiles and runtime units (53 crates)
+
+The final local candidate passes **1,374 tests across 158 targets**, with zero
+failed or ignored cases, workspace formatting and strict locked offline
+all-target Clippy. The optimized workspace build passes, followed by all 20
+isolated configuration scenarios against the optimized executable. The debug
+matrix is included in the workspace gate; neither matrix creates a database or
+extra file or echoes the ignored fixture secret.
+
+Optimized macOS binary SHA-256:
+`5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa`.
+Source publication and exact-source Linux CI remain pending.
+
+The climate SDK contributes 16 source-backed integration cases. MQTT passes
+six unit and 26 actual loopback wire cases, including all ten climate services,
+native/display unit separation, shared-topic field isolation, retained updates,
+registry lifecycle and removal, templates and profile normalization. Chained
+commands carry explicit cache operations at each publication's admission;
+unrelated and newer same-field telemetry survive held acknowledgments. An
+equal-valued preflight regression ensures later intent still applies after
+intervening telemetry. A separate reproduced regression verifies a released
+publisher's late ACK cannot update a replacement discovery entity.
+
+Both compiled-process cases pass. They exercise the real application driver,
+shared SDK publishers, registry disable/re-enable and config-entry unload,
+SQLite-backed identity restoration, custom CSV profile readiness and defaults,
+brightness precedence, zero-step off rerouting, unknown-color warning claims
+and renamed-ID profile selection. Climate uses native Celsius wire commands
+under Fahrenheit display settings and restores the persisted setting. Permanent
+discovery deletion removes the registry row, remains absent beyond two app
+registry synchronization ticks, and retains the process-lifetime component
+receipt.
+
+Light passes 27 package cases; all 149 color names/RGB values match the pinned
+AST. Four Core unit/diagnostic integration cases verify runtime isolation and
+request-local claims across factories, polls, provider groups, nested blocking
+calls and cancellation. Config tests retain legacy imperial storage, expose
+the canonical eight-key API dictionary, and apply Runtime settings only after
+successful persistence. Focused host profile-file tests pass for ready custom
+overrides, invalid rows, absent/non-file paths and UTF-8/IO failure behavior.
+
+Only synthetic registries, owned temporary SQLite files and numeric-loopback
+brokers/HTTP were used. Full integration parity, broader template/Python State
+representation, provider catalog coverage and orphan-device/trigger/tag cleanup
+remain open. The accepted 52-crate source receipt is preserved below.
+
 ## Native platforms, component receipts and units (52 crates)
 
 The frozen local candidate passes **1,321 tests across 154 targets**, with zero

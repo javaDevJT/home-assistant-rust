@@ -13,6 +13,7 @@ use std::task::{Context as TaskContext, Poll};
 
 use chrono::{DateTime, Duration, Utc};
 use hass_core::{Context, Error, HomeContext, Result, Runtime};
+use hass_units::{UnitSystemKind, validate_unit_system};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
@@ -832,7 +833,7 @@ pub trait ConfigEntryDriver: Send + Sync {
     }
 }
 
-/// Unit system exposed by the core config API.
+/// Legacy persisted unit-system fields; API output uses source `as_dict()`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UnitSystem {
@@ -848,47 +849,87 @@ pub struct UnitSystem {
 
 impl UnitSystem {
     fn metric() -> Self {
+        Self::from_kind(UnitSystemKind::Metric)
+    }
+
+    fn from_kind(kind: UnitSystemKind) -> Self {
+        let units = kind.unit_system().as_dict();
         Self {
-            name: "metric".into(),
-            length: "km".into(),
-            mass: "g".into(),
-            temperature: "°C".into(),
-            volume: "L".into(),
-            pressure: "Pa".into(),
-            wind_speed: "m/s".into(),
-            accumulated_precipitation: "mm".into(),
+            // Keep the existing stored shape readable. New records use the
+            // canonical source key; old records may still say "imperial".
+            name: kind.as_str().into(),
+            length: units["length"].into(),
+            mass: units["mass"].into(),
+            temperature: units["temperature"].into(),
+            volume: units["volume"].into(),
+            pressure: units["pressure"].into(),
+            wind_speed: units["wind_speed"].into(),
+            accumulated_precipitation: units["accumulated_precipitation"].into(),
         }
     }
 
-    fn imperial() -> Self {
-        Self {
-            name: "imperial".into(),
-            length: "mi".into(),
-            mass: "lb".into(),
-            temperature: "°F".into(),
-            volume: "gal".into(),
-            pressure: "psi".into(),
-            wind_speed: "mph".into(),
-            accumulated_precipitation: "in".into(),
-        }
+    fn from_key(key: &str) -> Result<Self> {
+        let kind = validate_unit_system(key).map_err(|error| {
+            Error::InvalidInput(format!(
+                "unit_system must be metric or us_customary (imperial is a deprecated alias): {error}"
+            ))
+        })?;
+        Ok(Self::from_kind(kind))
     }
 
-    fn validate(&self) -> Result<()> {
-        let expected = match self.name.as_str() {
-            "metric" => Self::metric(),
-            "imperial" => Self::imperial(),
-            _ => {
-                return Err(Error::InvalidInput(
-                    "unit_system.name must be metric or imperial".into(),
-                ));
+    fn from_value(value: &Value) -> Result<Self> {
+        if let Some(object) = value.as_object() {
+            for kind in [UnitSystemKind::Metric, UnitSystemKind::UsCustomary] {
+                if value == &json!(kind.unit_system().as_dict()) {
+                    return Ok(Self::from_kind(kind));
+                }
             }
-        };
-        if self != &expected {
+
+            // Retain the former native update extension for stored-shape
+            // bundles, while requiring its exact eight-field legacy shape.
+            if object.contains_key("name") && object.len() == 8 {
+                let stored: Self = serde_json::from_value(value.clone()).map_err(|error| {
+                    Error::InvalidInput(format!("invalid unit_system: {error}"))
+                })?;
+                stored.validate()?;
+                return Ok(stored);
+            }
+        }
+
+        Err(Error::InvalidInput(
+            "unit_system must be a supported key or a matching unit bundle".into(),
+        ))
+    }
+
+    fn kind(&self) -> Result<UnitSystemKind> {
+        let kind = validate_unit_system(&self.name)
+            .map_err(|error| Error::InvalidInput(format!("invalid unit_system.name: {error}")))?;
+        let expected = Self::from_kind(kind);
+        if (self.name != expected.name && self.name != "imperial")
+            || self.length != expected.length
+            || self.mass != expected.mass
+            || self.temperature != expected.temperature
+            || self.volume != expected.volume
+            || self.pressure != expected.pressure
+            || self.wind_speed != expected.wind_speed
+            || self.accumulated_precipitation != expected.accumulated_precipitation
+        {
             return Err(Error::InvalidInput(
                 "unit_system fields do not match the selected system".into(),
             ));
         }
-        Ok(())
+        Ok(kind)
+    }
+
+    fn validate(&self) -> Result<()> {
+        self.kind().map(|_| ())
+    }
+
+    fn api_json(&self) -> Value {
+        let kind = self
+            .kind()
+            .expect("CoreConfig unit system is validated before API serialization");
+        json!(kind.unit_system().as_dict())
     }
 }
 
@@ -959,7 +1000,7 @@ impl CoreConfig {
             "longitude": self.longitude,
             "elevation": self.elevation,
             "time_zone": self.time_zone,
-            "unit_system": self.unit_system,
+            "unit_system": self.unit_system.api_json(),
             "external_url": self.external_url,
             "internal_url": self.internal_url,
         })
@@ -3994,12 +4035,15 @@ impl ConfigEntries {
     }
 
     fn apply_runtime_core_config(&self, config: &CoreConfig) -> Result<()> {
+        let unit_system = config.unit_system.kind()?;
         self.runtime.set_home_context(HomeContext {
             latitude: config.latitude,
             longitude: config.longitude,
             elevation: config.elevation,
             time_zone: config.time_zone.clone(),
-        })
+        })?;
+        self.runtime.set_unit_system(unit_system);
+        Ok(())
     }
 
     fn replace_core_config(
@@ -4072,17 +4116,9 @@ impl ConfigEntries {
         }
         if let Some(value) = object.get("unit_system") {
             let name = value.as_str().ok_or_else(|| {
-                Error::InvalidInput("homeassistant.unit_system must be metric or imperial".into())
+                Error::InvalidInput("homeassistant.unit_system must be a unit-system key".into())
             })?;
-            config.unit_system = match name {
-                "metric" => UnitSystem::metric(),
-                "imperial" => UnitSystem::imperial(),
-                _ => {
-                    return Err(Error::InvalidInput(
-                        "homeassistant.unit_system must be metric or imperial".into(),
-                    ));
-                }
-            };
+            config.unit_system = UnitSystem::from_key(name)?;
         }
         if let Some(value) = object.get("external_url") {
             config.external_url = optional_url_value("external_url", value)?;
@@ -4263,19 +4299,9 @@ impl ConfigEntries {
         }
         if let Some(value) = object.get("unit_system") {
             if let Some(name) = value.as_str() {
-                config.unit_system = match name {
-                    "metric" => UnitSystem::metric(),
-                    "imperial" => UnitSystem::imperial(),
-                    _ => {
-                        return Err(Error::InvalidInput(
-                            "unit_system must be metric or imperial".into(),
-                        ));
-                    }
-                };
+                config.unit_system = UnitSystem::from_key(name)?;
             } else {
-                config.unit_system = serde_json::from_value(value.clone()).map_err(|error| {
-                    Error::InvalidInput(format!("invalid unit_system: {error}"))
-                })?;
+                config.unit_system = UnitSystem::from_value(value)?;
             }
         }
         if let Some(value) = object.get("external_url") {
@@ -7578,6 +7604,7 @@ mod tests {
                 }))
                 .unwrap();
             assert_eq!(manager.runtime.time_zone(), "America/New_York");
+            assert_eq!(manager.runtime.unit_system(), UnitSystemKind::UsCustomary);
             let entry = manager.create_entry(seed()).unwrap();
             entry_id = entry.entry_id;
             manager.setup_entry(&entry_id).unwrap();
@@ -7605,6 +7632,7 @@ mod tests {
             let runtime = runtime(store);
             let manager = ConfigEntries::new(runtime).unwrap();
             assert_eq!(manager.runtime.time_zone(), "America/New_York");
+            assert_eq!(manager.runtime.unit_system(), UnitSystemKind::UsCustomary);
             let restored = manager.get_entry(&entry_id).unwrap();
             assert_eq!(
                 manager.runtime.home_context(),
@@ -7640,7 +7668,12 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(updated["location_name"], "Apartment");
-        assert_eq!(updated["unit_system"]["name"], "imperial");
+        // The source API exposes UnitSystem.as_dict(), which has no system name.
+        assert_eq!(
+            updated["unit_system"],
+            json!(UnitSystemKind::UsCustomary.unit_system().as_dict())
+        );
+        assert_eq!(manager.runtime.unit_system(), UnitSystemKind::UsCustomary);
         let event = events.try_recv().unwrap();
         assert_eq!(event.event_type, "core_config_updated");
         assert_eq!(
@@ -7669,6 +7702,142 @@ mod tests {
             events.try_recv(),
             Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn core_config_canonical_unit_systems_use_sdk_api_bundles_and_preserve_location() {
+        let manager = ConfigEntries::new(runtime(Arc::new(MemoryStore::default()))).unwrap();
+        manager
+            .handle_ws(&json!({
+                "type":"config/core/update",
+                "location_name":"Cabin",
+                "latitude":42.0,
+                "longitude":-71.0,
+                "elevation":15.0,
+                "time_zone":"America/New_York"
+            }))
+            .unwrap();
+        let home_context = manager.runtime.home_context();
+
+        for (key, kind) in [
+            ("metric", UnitSystemKind::Metric),
+            ("us_customary", UnitSystemKind::UsCustomary),
+        ] {
+            let updated = manager
+                .handle_ws(&json!({"type":"config/core/update", "unit_system":key}))
+                .unwrap();
+            let units = &updated["unit_system"];
+            assert_eq!(units, &json!(kind.unit_system().as_dict()), "{key}");
+            let units = units.as_object().unwrap();
+            assert_eq!(units.len(), 8, "{key}");
+            assert!(units.contains_key("area"), "{key}");
+            assert!(!units.contains_key("name"), "{key}");
+            assert_eq!(manager.runtime.unit_system(), kind, "{key}");
+            assert_eq!(manager.runtime.home_context(), home_context, "{key}");
+            assert_eq!(manager.runtime.time_zone(), "America/New_York", "{key}");
+        }
+
+        // The canonical API dictionary remains a supported native round-trip
+        // input extension; Home Assistant's websocket accepts normalized keys.
+        let canonical = manager.core_config().to_json()["unit_system"].clone();
+        let round_trip = manager
+            .handle_ws(&json!({
+                "type":"config/core/update",
+                "unit_system":canonical
+            }))
+            .unwrap();
+        assert_eq!(
+            round_trip["unit_system"],
+            json!(UnitSystemKind::UsCustomary.unit_system().as_dict())
+        );
+    }
+
+    #[test]
+    fn legacy_imperial_storage_restores_without_rewriting_its_record() {
+        let store = Arc::new(MemoryStore::default());
+        let mut legacy_units = UnitSystem::from_kind(UnitSystemKind::UsCustomary);
+        legacy_units.name = "imperial".into();
+        let persisted = PersistedDocument {
+            document_version: DOCUMENT_VERSION,
+            entries: Vec::new(),
+            core_config: CoreConfig {
+                unit_system: legacy_units.clone(),
+                ..CoreConfig::default()
+            },
+            core_config_initialized: true,
+            pending_cleanup: Vec::new(),
+        };
+        store
+            .set_data(METADATA_KEY, &serde_json::to_value(persisted).unwrap())
+            .unwrap();
+
+        let manager = ConfigEntries::new(runtime(store.clone())).unwrap();
+
+        assert_eq!(manager.runtime.unit_system(), UnitSystemKind::UsCustomary);
+        assert_eq!(manager.core_config().unit_system.name, "imperial");
+        assert_eq!(
+            manager.core_config().to_json()["unit_system"],
+            json!(UnitSystemKind::UsCustomary.unit_system().as_dict())
+        );
+        let stored = store.get_data(METADATA_KEY).unwrap().unwrap();
+        assert_eq!(stored["core_config"]["unit_system"]["name"], "imperial");
+        assert_eq!(
+            stored["core_config"]["unit_system"],
+            serde_json::to_value(legacy_units).unwrap()
+        );
+    }
+
+    #[test]
+    fn invalid_unit_bundle_is_rejected_before_runtime_or_storage_changes() {
+        let store = Arc::new(MemoryStore::default());
+        let manager = ConfigEntries::new(runtime(store.clone())).unwrap();
+        let mut events = manager.runtime.subscribe();
+        let stored_before = store.get_data(METADATA_KEY).unwrap().unwrap();
+        let mut mismatched = json!(UnitSystemKind::UsCustomary.unit_system().as_dict());
+        mismatched["length"] = json!("km");
+
+        assert!(
+            manager
+                .handle_ws(&json!({
+                    "type":"config/core/update",
+                    "unit_system":mismatched
+                }))
+                .is_err()
+        );
+        assert_eq!(manager.runtime.unit_system(), UnitSystemKind::Metric);
+        assert_eq!(manager.core_config().unit_system.name, "metric");
+        assert_eq!(
+            store.get_data(METADATA_KEY).unwrap().unwrap(),
+            stored_before
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn unit_system_persistence_failure_does_not_change_runtime_selection() {
+        let store = Arc::new(FailingMetadataStore::default());
+        let runtime = Runtime::new(store.clone()).unwrap();
+        let manager = ConfigEntries::new(runtime).unwrap();
+        let stored_before = store.get_data(METADATA_KEY).unwrap().unwrap();
+        store.fail_metadata.store(true, Ordering::SeqCst);
+
+        assert!(
+            manager
+                .handle_ws(&json!({
+                    "type":"config/core/update",
+                    "unit_system":"us_customary"
+                }))
+                .is_err()
+        );
+        assert_eq!(manager.runtime.unit_system(), UnitSystemKind::Metric);
+        assert_eq!(manager.core_config().unit_system.name, "metric");
+        assert_eq!(
+            store.get_data(METADATA_KEY).unwrap().unwrap(),
+            stored_before
+        );
     }
 
     #[test]

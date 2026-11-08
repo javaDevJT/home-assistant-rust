@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use hass_core::{Context, Event, MemoryStore, Runtime, ServiceCall};
 use hass_entity::EntityLifecycle;
+use hass_light::LightProfileCatalog;
 use hass_mqtt::{MqttConfig, MqttIntegration};
 use hass_registry::{EntityUpdate, Registries};
 use serde_json::{Map, Value, json};
@@ -1693,7 +1694,10 @@ async fn shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_l
     .expect("retained discovery removal must release every shared lifecycle lease");
     assert_eq!(runtime.loaded_components().components(), component_receipts);
     for (_, _, entity_id) in renames {
-        wait_state(&runtime, entity_id, "unavailable").await;
+        // Empty discovery deletes the registry row; an ordinary unload instead
+        // retains it and may restore an unavailable placeholder.
+        wait_removed(&runtime, entity_id).await;
+        assert!(registries.entity(entity_id).is_none());
     }
 
     for (topic, payload) in DISCOVERIES {
@@ -3203,4 +3207,1481 @@ async fn canceling_start_signals_and_reaps_the_connected_event_loop() {
         .await
         .expect("the loopback broker task should finish")
         .unwrap();
+}
+
+fn loopback_config(broker: &LocalBroker, client_id: &str) -> MqttConfig {
+    serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: {client_id}\nqos: 1\ndiscovery_prefix: homeassistant\nmax_payload_bytes: 4096\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap()
+}
+
+async fn assert_no_published_command(broker: &mut LocalBroker, duration: Duration) {
+    let deadline = tokio::time::Instant::now() + duration;
+    loop {
+        match tokio::time::timeout_at(deadline, broker.events.recv()).await {
+            Ok(Some(BrokerEvent::Published { topic, .. })) => {
+                panic!("unexpected MQTT command was published to {topic}");
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("broker event stream ended while checking for commands"),
+            Err(_) => return,
+        }
+    }
+}
+
+async fn wait_removed_for(runtime: &Runtime, entity_id: &str, reason: &str) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if runtime.get_state(entity_id).is_none() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{entity_id} was not removed after {reason}"));
+}
+
+#[tokio::test]
+async fn shared_climate_discovery_projects_all_topics_and_tracks_registry_lifecycle() {
+    const DISCOVERY_TOPIC: &str = "homeassistant/climate/loft/config";
+    let discovery = json!({
+        "name": "Loft Climate",
+        "unique_id": "climate-loft-wire",
+        "modes": ["off", "heat", "cool"],
+        "temperature_unit": "C",
+        "availability_topic": "lab/loft/availability",
+        "mode_state_topic": "lab/loft/mode",
+        "mode_command_topic": "lab/loft/set-mode",
+        "temperature_state_topic": "lab/loft/temperature",
+        "temperature_command_topic": "lab/loft/set-temperature",
+        "temperature_low_state_topic": "lab/loft/low",
+        "temperature_low_command_topic": "lab/loft/set-low",
+        "temperature_high_state_topic": "lab/loft/high",
+        "temperature_high_command_topic": "lab/loft/set-high",
+        "current_temperature_topic": "lab/loft/current-temperature",
+        "current_humidity_topic": "lab/loft/current-humidity",
+        "target_humidity_state_topic": "lab/loft/target-humidity",
+        "target_humidity_command_topic": "lab/loft/set-humidity",
+        "fan_modes": ["low", "high"],
+        "fan_mode_state_topic": "lab/loft/fan",
+        "fan_mode_command_topic": "lab/loft/set-fan",
+        "preset_modes": ["eco", "boost"],
+        "preset_mode_state_topic": "lab/loft/preset",
+        "preset_mode_command_topic": "lab/loft/set-preset",
+        "swing_modes": ["off", "vertical"],
+        "swing_mode_state_topic": "lab/loft/swing",
+        "swing_mode_command_topic": "lab/loft/set-swing",
+        "swing_horizontal_modes": ["off", "left"],
+        "swing_horizontal_mode_state_topic": "lab/loft/horizontal",
+        "swing_horizontal_mode_command_topic": "lab/loft/set-horizontal",
+        "action_topic": "lab/loft/mode",
+        "power_command_topic": "lab/loft/power"
+    });
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        loopback_config(&broker, "mqtt-climate-lifecycle"),
+        lifecycle.clone(),
+        registries.clone(),
+        "mqtt-entry-climate-lifecycle",
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    assert_eq!(runtime.loaded_components().components(), ["mqtt"]);
+
+    broker
+        .publish(
+            DISCOVERY_TOPIC,
+            serde_json::to_vec(&discovery).unwrap(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[
+            ("lab/loft/availability", 1),
+            ("lab/loft/mode", 1),
+            ("lab/loft/temperature", 1),
+            ("lab/loft/low", 1),
+            ("lab/loft/high", 1),
+            ("lab/loft/current-temperature", 1),
+            ("lab/loft/current-humidity", 1),
+            ("lab/loft/target-humidity", 1),
+            ("lab/loft/fan", 1),
+            ("lab/loft/preset", 1),
+            ("lab/loft/swing", 1),
+            ("lab/loft/horizontal", 1),
+        ])
+        .await;
+    let entity_id = "climate.loft_climate";
+    wait_state(&runtime, entity_id, "unavailable").await;
+    let receipts = runtime.loaded_components().components();
+    for expected in ["climate", "mqtt.climate"] {
+        assert!(receipts.iter().any(|component| component == expected));
+    }
+    let metadata = integration
+        .entity_metadata()
+        .into_iter()
+        .find(|entity| entity.unique_id == "climate-loft-wire")
+        .unwrap();
+    assert!(metadata.entity_lifecycle_managed);
+    assert_eq!(metadata.entity_id, entity_id);
+    let registry_entry = registries
+        .entities()
+        .into_iter()
+        .find(|entity| entity.domain == "climate" && entity.unique_id == "climate-loft-wire")
+        .unwrap();
+    assert_eq!(registry_entry.entity_id, entity_id);
+    assert_eq!(
+        registry_entry.config_entry_id.as_deref(),
+        Some("mqtt-entry-climate-lifecycle")
+    );
+
+    broker
+        .publish("lab/loft/availability", b"online".to_vec(), true)
+        .await;
+    wait_state(&runtime, entity_id, "unknown").await;
+    for (topic, value) in [
+        ("lab/loft/mode", "heat"),
+        ("lab/loft/mode", "heating"),
+        ("lab/loft/temperature", "21.5"),
+        ("lab/loft/low", "19"),
+        ("lab/loft/high", "23"),
+        ("lab/loft/current-temperature", "18.25"),
+        ("lab/loft/current-humidity", "42"),
+        ("lab/loft/target-humidity", "50"),
+        ("lab/loft/fan", "high"),
+        ("lab/loft/preset", "eco"),
+        ("lab/loft/swing", "vertical"),
+        ("lab/loft/horizontal", "left"),
+    ] {
+        broker.publish(topic, value.as_bytes().to_vec(), true).await;
+    }
+    wait_state_attribute(&runtime, entity_id, "heat", "temperature", &json!(21.5)).await;
+    let state = runtime.get_state(entity_id).unwrap();
+    assert_eq!(state.attributes["hvac_action"], "heating");
+    assert_eq!(state.attributes["temperature"], 21.5);
+    assert_eq!(state.attributes["target_temp_low"], 19.0);
+    assert_eq!(state.attributes["target_temp_high"], 23.0);
+    assert_eq!(state.attributes["current_temperature"], 18.2);
+    assert_eq!(state.attributes["current_humidity"], 42.0);
+    assert_eq!(state.attributes["humidity"], 50.0);
+    assert_eq!(state.attributes["fan_mode"], "high");
+    assert_eq!(state.attributes["preset_mode"], "eco");
+    assert_eq!(state.attributes["swing_mode"], "vertical");
+    assert_eq!(state.attributes["swing_horizontal_mode"], "left");
+
+    let renamed_id = "climate.upstairs_loft";
+    registries
+        .update_entity(
+            entity_id,
+            EntityUpdate {
+                new_entity_id: Some(renamed_id.into()),
+                name: Some(Some("Upstairs Loft".into())),
+                ..EntityUpdate::default()
+            },
+        )
+        .unwrap();
+    wait_state(&runtime, renamed_id, "heat").await;
+    assert_eq!(
+        integration
+            .entity_metadata()
+            .into_iter()
+            .find(|entity| entity.unique_id == "climate-loft-wire")
+            .unwrap()
+            .entity_id,
+        renamed_id
+    );
+    assert_eq!(
+        runtime.get_state(renamed_id).unwrap().attributes["friendly_name"],
+        "Upstairs Loft"
+    );
+
+    registries
+        .update_entity(
+            renamed_id,
+            EntityUpdate {
+                disabled_by: Some(Some("user".into())),
+                ..EntityUpdate::default()
+            },
+        )
+        .unwrap();
+    wait_removed_for(&runtime, renamed_id, "registry disable").await;
+    assert!(
+        runtime
+            .call_service_async(service_call("climate", "turn_off", renamed_id))
+            .await
+            .is_err(),
+        "the registry-disabled target must not accept a climate service"
+    );
+    registries
+        .update_entity(
+            renamed_id,
+            EntityUpdate {
+                disabled_by: Some(None),
+                ..EntityUpdate::default()
+            },
+        )
+        .unwrap();
+    wait_state(&runtime, renamed_id, "heat").await;
+
+    broker
+        .publish("lab/loft/availability", b"offline".to_vec(), true)
+        .await;
+    wait_state(&runtime, renamed_id, "unavailable").await;
+    broker.publish(DISCOVERY_TOPIC, Vec::new(), true).await;
+    wait_removed_for(&runtime, renamed_id, "discovery removal").await;
+    assert!(registries.entity(renamed_id).is_none());
+    assert!(
+        integration
+            .entity_metadata()
+            .iter()
+            .all(|entity| entity.unique_id != "climate-loft-wire")
+    );
+    broker
+        .publish(
+            DISCOVERY_TOPIC,
+            serde_json::to_vec(&discovery).unwrap(),
+            true,
+        )
+        .await;
+    wait_state(&runtime, renamed_id, "unavailable").await;
+    wait_metadata_entity_id(&integration, "climate-loft-wire", renamed_id).await;
+    assert!(
+        runtime
+            .loaded_components()
+            .components()
+            .iter()
+            .any(|name| name == "mqtt.climate")
+    );
+
+    integration.shutdown().await.unwrap();
+    lifecycle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn retained_climate_discovery_update_replaces_live_lifecycle_registration() {
+    const DISCOVERY_TOPIC: &str = "homeassistant/climate/update/config";
+    let initial = json!({
+        "name": "Original Zone",
+        "unique_id": "climate-retained-update-wire",
+        "modes": ["off", "heat"],
+        "mode_state_topic": "lab/update/mode-v1",
+        "mode_command_topic": "lab/update/set-mode-v1"
+    });
+    let updated = json!({
+        "name": "Updated Zone",
+        "unique_id": "climate-retained-update-wire",
+        "modes": ["off", "heat", "cool"],
+        "temperature_unit": "C",
+        "mode_state_topic": "lab/update/mode-v2",
+        "mode_command_topic": "lab/update/set-mode-v2",
+        "fan_modes": ["quiet", "boost"],
+        "fan_mode_state_topic": "lab/update/fan",
+        "fan_mode_command_topic": "lab/update/set-fan"
+    });
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        loopback_config(&broker, "mqtt-climate-retained-update"),
+        lifecycle.clone(),
+        registries.clone(),
+        "mqtt-entry-climate-retained-update",
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    broker
+        .publish(DISCOVERY_TOPIC, serde_json::to_vec(&initial).unwrap(), true)
+        .await;
+    broker
+        .wait_for_subscriptions(&[("lab/update/mode-v1", 1)])
+        .await;
+    broker
+        .publish("lab/update/mode-v1", b"heat".to_vec(), true)
+        .await;
+    wait_state(&runtime, "climate.original_zone", "heat").await;
+
+    let registered = registries
+        .entities()
+        .into_iter()
+        .find(|entity| {
+            entity.domain == "climate" && entity.unique_id == "climate-retained-update-wire"
+        })
+        .unwrap();
+    let current_id = "climate.upstairs_zone";
+    registries
+        .update_entity(
+            &registered.entity_id,
+            EntityUpdate {
+                new_entity_id: Some(current_id.into()),
+                ..EntityUpdate::default()
+            },
+        )
+        .unwrap();
+    wait_state(&runtime, current_id, "heat").await;
+
+    broker
+        .publish(DISCOVERY_TOPIC, serde_json::to_vec(&updated).unwrap(), true)
+        .await;
+    broker
+        .wait_for_subscriptions(&[("lab/update/mode-v2", 1), ("lab/update/fan", 1)])
+        .await;
+    broker
+        .publish("lab/update/mode-v2", b"cool".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/update/fan", b"quiet".to_vec(), true)
+        .await;
+    wait_state_attribute(&runtime, current_id, "cool", "fan_mode", &json!("quiet")).await;
+    let metadata = integration.entity_metadata();
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].unique_id, "climate-retained-update-wire");
+    assert_eq!(metadata[0].entity_id, current_id);
+    assert!(metadata[0].entity_lifecycle_managed);
+    assert!(runtime.get_state("climate.original_zone").is_none());
+    let entries = registries
+        .entities()
+        .into_iter()
+        .filter(|entity| {
+            entity.domain == "climate" && entity.unique_id == "climate-retained-update-wire"
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries.len(),
+        1,
+        "a retained update must keep one registry entry"
+    );
+    assert_eq!(entries[0].entity_id, current_id);
+
+    runtime
+        .call_service_async(service_call_with_data(
+            "climate",
+            "set_hvac_mode",
+            current_id,
+            json!({"hvac_mode":"heat"}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/update/set-mode-v2")
+            .await
+            .0,
+        json!("heat")
+    );
+
+    integration.shutdown().await.unwrap();
+    lifecycle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn climate_services_publish_all_families_and_resolve_hvac_fallbacks() {
+    let discovery = json!({
+        "name": "Service Climate",
+        "unique_id": "climate-services-wire",
+        "modes": ["off", "heat", "cool"],
+        "temperature_unit": "C",
+        "optimistic": true,
+        "mode_state_topic": "lab/service/mode",
+        "mode_command_topic": "lab/service/set-mode",
+        "temperature_state_topic": "lab/service/temperature",
+        "temperature_command_topic": "lab/service/set-temperature",
+        "temperature_low_state_topic": "lab/service/low",
+        "temperature_low_command_topic": "lab/service/set-low",
+        "temperature_high_state_topic": "lab/service/high",
+        "temperature_high_command_topic": "lab/service/set-high",
+        "target_humidity_state_topic": "lab/service/humidity",
+        "target_humidity_command_topic": "lab/service/set-humidity",
+        "fan_modes": ["low", "high"],
+        "fan_mode_state_topic": "lab/service/fan",
+        "fan_mode_command_topic": "lab/service/set-fan",
+        "preset_modes": ["eco", "boost"],
+        "preset_mode_state_topic": "lab/service/preset",
+        "preset_mode_command_topic": "lab/service/set-preset",
+        "swing_modes": ["off", "vertical"],
+        "swing_mode_state_topic": "lab/service/swing",
+        "swing_mode_command_topic": "lab/service/set-swing",
+        "swing_horizontal_modes": ["off", "left"],
+        "swing_horizontal_mode_state_topic": "lab/service/horizontal",
+        "swing_horizontal_mode_command_topic": "lab/service/set-horizontal",
+        "action_topic": "lab/service/action"
+    });
+    let two_mode_discovery = json!({
+        "name": "Two Mode Climate",
+        "unique_id": "climate-two-mode-wire",
+        "modes": ["off", "cool"],
+        "mode_state_topic": "lab/two-mode/mode",
+        "mode_command_topic": "lab/two-mode/set-mode"
+    });
+    let no_off_discovery = json!({
+        "name": "No Off Climate",
+        "unique_id": "climate-no-off-wire",
+        "modes": ["heat", "cool"],
+        "mode_state_topic": "lab/no-off/mode",
+        "mode_command_topic": "lab/no-off/set-mode"
+    });
+    let power_discovery = json!({
+        "name": "Power Climate",
+        "unique_id": "climate-power-wire",
+        "modes": ["off", "heat"],
+        "power_command_topic": "lab/power/power",
+        "payload_on": "POWER",
+        "payload_off": "SLEEP"
+    });
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let integration = MqttIntegration::start(
+        runtime.clone(),
+        loopback_config(&broker, "mqtt-climate-services"),
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    for (topic, discovery) in [
+        ("homeassistant/climate/service/config", discovery),
+        ("homeassistant/climate/two-mode/config", two_mode_discovery),
+        ("homeassistant/climate/no-off/config", no_off_discovery),
+        ("homeassistant/climate/power/config", power_discovery),
+    ] {
+        broker
+            .publish(topic, serde_json::to_vec(&discovery).unwrap(), true)
+            .await;
+    }
+    broker
+        .wait_for_subscriptions(&[
+            ("lab/service/mode", 1),
+            ("lab/service/temperature", 1),
+            ("lab/service/low", 1),
+            ("lab/service/high", 1),
+            ("lab/service/humidity", 1),
+            ("lab/service/fan", 1),
+            ("lab/service/preset", 1),
+            ("lab/service/swing", 1),
+            ("lab/service/horizontal", 1),
+            ("lab/two-mode/mode", 1),
+            ("lab/no-off/mode", 1),
+        ])
+        .await;
+    broker
+        .publish("lab/service/mode", b"off".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/two-mode/mode", b"off".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/no-off/mode", b"heat".to_vec(), true)
+        .await;
+    wait_state(&runtime, "climate.service_climate", "off").await;
+    wait_state(&runtime, "climate.two_mode_climate", "off").await;
+    wait_state(&runtime, "climate.no_off_climate", "heat").await;
+    wait_state(&runtime, "climate.power_climate", "off").await;
+
+    let mut turn_on = service_call("climate", "turn_on", "climate.service_climate");
+    turn_on.context.parent_id = Some("climate-service-parent".into());
+    turn_on.context.user_id = Some("wire-user".into());
+    runtime.call_service_async(turn_on).await.unwrap();
+    let (payload, qos, retain) = wait_published(&mut broker, "lab/service/set-mode").await;
+    assert_eq!(payload, json!("heat"));
+    assert_eq!(qos, 1);
+    assert!(!retain);
+    let state = runtime.get_state("climate.service_climate").unwrap();
+    assert_eq!(
+        state.context.parent_id.as_deref(),
+        Some("climate-service-parent")
+    );
+    assert_eq!(state.context.user_id.as_deref(), Some("wire-user"));
+
+    runtime
+        .call_service_async(service_call(
+            "climate",
+            "turn_off",
+            "climate.service_climate",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/service/set-mode").await.0,
+        json!("off")
+    );
+    runtime
+        .call_service_async(service_call("climate", "toggle", "climate.service_climate"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/service/set-mode").await.0,
+        json!("heat"),
+        "turn_on fallback prefers heat when heat_cool is not advertised"
+    );
+    runtime
+        .call_service_async(service_call(
+            "climate",
+            "turn_on",
+            "climate.two_mode_climate",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/two-mode/set-mode").await.0,
+        json!("cool"),
+        "with exactly off plus one other mode, turn_on selects that other mode"
+    );
+    runtime
+        .call_service_async(service_call("climate", "turn_on", "climate.power_climate"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/power/power").await.0,
+        json!("POWER"),
+        "a configured MQTT power command takes the direct turn_on path"
+    );
+    runtime
+        .call_service_async(service_call("climate", "turn_off", "climate.power_climate"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/power/power").await.0,
+        json!("SLEEP"),
+        "a configured MQTT power command takes the direct turn_off path"
+    );
+    assert!(
+        runtime
+            .call_service_async(service_call(
+                "climate",
+                "turn_off",
+                "climate.no_off_climate"
+            ))
+            .await
+            .is_err(),
+        "turn_off without an advertised off mode must fail"
+    );
+    assert_no_published_command(&mut broker, Duration::from_millis(50)).await;
+
+    broker
+        .publish("lab/service/mode", b"None".to_vec(), true)
+        .await;
+    wait_state(&runtime, "climate.service_climate", "unknown").await;
+    runtime
+        .call_service_async(service_call("climate", "toggle", "climate.service_climate"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/service/set-mode").await.0,
+        json!("off"),
+        "toggle from unknown uses the turn_off fallback"
+    );
+
+    for (service, data, topic, expected) in [
+        (
+            "set_hvac_mode",
+            json!({"hvac_mode":"cool"}),
+            "lab/service/set-mode",
+            json!("cool"),
+        ),
+        (
+            "set_temperature",
+            json!({"temperature":23}),
+            "lab/service/set-temperature",
+            json!(23.0),
+        ),
+        (
+            "set_humidity",
+            json!({"humidity":55}),
+            "lab/service/set-humidity",
+            json!(55),
+        ),
+        (
+            "set_fan_mode",
+            json!({"fan_mode":"high"}),
+            "lab/service/set-fan",
+            json!("high"),
+        ),
+        (
+            "set_preset_mode",
+            json!({"preset_mode":"eco"}),
+            "lab/service/set-preset",
+            json!("eco"),
+        ),
+        (
+            "set_swing_mode",
+            json!({"swing_mode":"vertical"}),
+            "lab/service/set-swing",
+            json!("vertical"),
+        ),
+        (
+            "set_swing_horizontal_mode",
+            json!({"swing_horizontal_mode":"left"}),
+            "lab/service/set-horizontal",
+            json!("left"),
+        ),
+    ] {
+        let call = service_call_with_data("climate", service, "climate.service_climate", data);
+        runtime
+            .call_service_async(call)
+            .await
+            .unwrap_or_else(|error| panic!("{service} failed: {error}"));
+        let (payload, qos, retain) = wait_published(&mut broker, topic).await;
+        assert_eq!(payload, expected, "wrong payload for {service}");
+        assert_eq!(qos, 1, "wrong QoS for {service}");
+        assert!(!retain, "command for {service} must not be retained");
+    }
+
+    let range = service_call_with_data(
+        "climate",
+        "set_temperature",
+        "climate.service_climate",
+        json!({"target_temp_low":19,"target_temp_high":24}),
+    );
+    runtime.call_service_async(range).await.unwrap();
+    let (low, low_qos, low_retain) = wait_published(&mut broker, "lab/service/set-low").await;
+    let (high, high_qos, high_retain) = wait_published(&mut broker, "lab/service/set-high").await;
+    assert_eq!(low, json!(19.0));
+    assert_eq!(high, json!(24.0));
+    assert_eq!((low_qos, high_qos), (1, 1));
+    assert!(!low_retain && !high_retain);
+
+    integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn climate_topic_templates_receive_entity_name_state_and_attributes() {
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let integration = MqttIntegration::start(
+        runtime.clone(),
+        loopback_config(&broker, "mqtt-climate-templates"),
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    let discovery = json!({
+        "name": "Template Climate",
+        "unique_id": "climate-template-wire",
+        "modes": ["off", "heat", "cool"],
+        "temperature_unit": "C",
+        "mode_state_topic": "lab/template/mode",
+        "mode_command_topic": "lab/template/set-mode",
+        "mode_command_template": "{{ name }}|{{ value }}|{{ this.state }}",
+        "current_temperature_topic": "lab/template/current-temperature",
+        "temperature_state_topic": "lab/template/temperature",
+        "temperature_state_template": "{% if this.attributes.current_temperature == 18 %}{{ value }}{% else %}0{% endif %}"
+    });
+    broker
+        .publish(
+            "homeassistant/climate/template/config",
+            serde_json::to_vec(&discovery).unwrap(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[
+            ("lab/template/mode", 1),
+            ("lab/template/current-temperature", 1),
+            ("lab/template/temperature", 1),
+        ])
+        .await;
+    broker
+        .publish("lab/template/mode", b"heat".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/template/current-temperature", b"18".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.template_climate",
+        "heat",
+        "current_temperature",
+        &json!(18.0),
+    )
+    .await;
+
+    runtime
+        .call_service_async(service_call_with_data(
+            "climate",
+            "set_hvac_mode",
+            "climate.template_climate",
+            json!({"hvac_mode":"cool"}),
+        ))
+        .await
+        .unwrap();
+    let (mode_payload, qos, retain) = wait_published(&mut broker, "lab/template/set-mode").await;
+    assert_eq!(mode_payload, json!("Template Climate|cool|heat"));
+    assert_eq!(qos, 1);
+    assert!(!retain);
+
+    broker
+        .publish("lab/template/temperature", b"22".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.template_climate",
+        "heat",
+        "temperature",
+        &json!(22.0),
+    )
+    .await;
+    assert_eq!(
+        runtime
+            .get_state("climate.template_climate")
+            .unwrap()
+            .attributes["current_temperature"],
+        18.0
+    );
+
+    integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn climate_native_units_reproject_and_keep_captured_commands_native_across_ack_wait() {
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let integration = MqttIntegration::start(
+        runtime.clone(),
+        loopback_config(&broker, "mqtt-climate-units"),
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+
+    let default_discovery = json!({
+        "name": "Default Unit",
+        "unique_id": "climate-default-unit-wire",
+        "modes": ["off", "heat", "cool"],
+        "optimistic": true,
+        "initial": 21,
+        "mode_command_topic": "lab/default/set-mode",
+        "temperature_command_topic": "lab/default/set-temperature"
+    });
+    let fahrenheit_discovery = json!({
+        "name": "Fahrenheit Unit",
+        "unique_id": "climate-fahrenheit-unit-wire",
+        "modes": ["off", "heat", "cool"],
+        "temperature_unit": "F",
+        "availability_topic": "lab/fahrenheit/availability",
+        "mode_state_topic": "lab/fahrenheit/mode",
+        "mode_command_topic": "lab/fahrenheit/set-mode",
+        "temperature_state_topic": "lab/fahrenheit/temperature",
+        "temperature_command_topic": "lab/fahrenheit/set-temperature",
+        "optimistic": false
+    });
+    broker
+        .publish(
+            "homeassistant/climate/default/config",
+            serde_json::to_vec(&default_discovery).unwrap(),
+            true,
+        )
+        .await;
+    broker
+        .publish(
+            "homeassistant/climate/fahrenheit/config",
+            serde_json::to_vec(&fahrenheit_discovery).unwrap(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[
+            ("lab/fahrenheit/availability", 1),
+            ("lab/fahrenheit/mode", 1),
+            ("lab/fahrenheit/temperature", 1),
+        ])
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.default_unit",
+        "off",
+        "temperature",
+        &json!(21.0),
+    )
+    .await;
+    wait_state(&runtime, "climate.fahrenheit_unit", "unavailable").await;
+    broker
+        .publish("lab/fahrenheit/availability", b"online".to_vec(), true)
+        .await;
+    wait_state(&runtime, "climate.fahrenheit_unit", "unknown").await;
+    broker
+        .publish("lab/fahrenheit/mode", b"heat".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/fahrenheit/temperature", b"68".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.fahrenheit_unit",
+        "heat",
+        "temperature",
+        &json!(20.0),
+    )
+    .await;
+
+    runtime.set_unit_system(hass_core::UnitSystemKind::UsCustomary);
+    runtime
+        .fire_event("core_config_updated", Map::new(), Context::default())
+        .unwrap();
+    wait_state_attribute(
+        &runtime,
+        "climate.default_unit",
+        "off",
+        "temperature",
+        &json!(70.0),
+    )
+    .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.fahrenheit_unit",
+        "heat",
+        "temperature",
+        &json!(68.0),
+    )
+    .await;
+    let setup_us_default = json!({
+        "name": "Setup US Default",
+        "unique_id": "climate-setup-us-default-wire",
+        "modes": ["off", "heat", "cool"],
+        "optimistic": true,
+        "initial": 70,
+        "precision": 0.1,
+        "mode_command_topic": "lab/setup-us/set-mode",
+        "temperature_command_topic": "lab/setup-us/set-temperature"
+    });
+    broker
+        .publish(
+            "homeassistant/climate/setup-us/config",
+            serde_json::to_vec(&setup_us_default).unwrap(),
+            true,
+        )
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.setup_us_default",
+        "off",
+        "temperature",
+        &json!(70.0),
+    )
+    .await;
+    assert_no_published_command(&mut broker, Duration::from_millis(50)).await;
+
+    runtime.set_unit_system(hass_core::UnitSystemKind::Metric);
+    runtime
+        .fire_event("core_config_updated", Map::new(), Context::default())
+        .unwrap();
+    wait_state_attribute(
+        &runtime,
+        "climate.default_unit",
+        "off",
+        "temperature",
+        &json!(21.0),
+    )
+    .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.fahrenheit_unit",
+        "heat",
+        "temperature",
+        &json!(20.0),
+    )
+    .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.setup_us_default",
+        "off",
+        "temperature",
+        &json!(21.1),
+    )
+    .await;
+    assert_no_published_command(&mut broker, Duration::from_millis(50)).await;
+
+    broker.hold_acknowledgments(true);
+    let pending = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call_with_data(
+                    "climate",
+                    "set_temperature",
+                    "climate.fahrenheit_unit",
+                    json!({"temperature":20,"hvac_mode":"heat"}),
+                ))
+                .await
+        }
+    });
+    let first = broker
+        .wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/fahrenheit/set-mode"))
+        .await;
+    assert!(matches!(
+        first,
+        BrokerEvent::Published { payload, qos: 1, retain: false, .. }
+            if payload == b"heat"
+    ));
+    let first_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/fahrenheit/set-mode"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+
+    runtime.set_unit_system(hass_core::UnitSystemKind::UsCustomary);
+    runtime
+        .fire_event("core_config_updated", Map::new(), Context::default())
+        .unwrap();
+    wait_state_attribute(
+        &runtime,
+        "climate.default_unit",
+        "off",
+        "temperature",
+        &json!(70.0),
+    )
+    .await;
+    assert_no_published_command(&mut broker, Duration::from_millis(75)).await;
+
+    broker.acknowledge(first_id);
+    let second = broker
+        .wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/fahrenheit/set-temperature"))
+        .await;
+    assert!(matches!(
+        second,
+        BrokerEvent::Published { payload, qos: 1, retain: false, .. }
+            if payload == b"68.0"
+    ));
+    let second_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/fahrenheit/set-temperature"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    broker.acknowledge(second_id);
+
+    broker
+        .publish("lab/fahrenheit/mode", b"None".to_vec(), true)
+        .await;
+    wait_state(&runtime, "climate.fahrenheit_unit", "unknown").await;
+    broker
+        .publish("lab/fahrenheit/availability", b"offline".to_vec(), true)
+        .await;
+    wait_state(&runtime, "climate.fahrenheit_unit", "unavailable").await;
+    assert_no_published_command(&mut broker, Duration::from_millis(50)).await;
+
+    integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn light_profiles_and_legacy_basic_template_share_the_loopback_driver() {
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let profiles = Arc::new(LightProfileCatalog::from_csv_sources([
+        "id,x,y,brightness\nDeskProfile,,,91\n",
+    ]));
+    let integration = MqttIntegration::start_with_entity_lifecycle_and_profiles(
+        runtime.clone(),
+        loopback_config(&broker, "mqtt-light-profile-wire"),
+        lifecycle.clone(),
+        registries.clone(),
+        "mqtt-entry-light-profile-wire",
+        profiles,
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    let profile_light = json!({
+        "name": "Profile Light",
+        "unique_id": "profile-light-wire",
+        "schema": "json",
+        "state_topic": "lab/profile/state",
+        "command_topic": "lab/profile/set",
+        "supported_color_modes": ["rgb"],
+        "brightness": true
+    });
+    let legacy_light = json!({
+        "name": "Legacy Light",
+        "unique_id": "legacy-light-wire",
+        "schema": "basic",
+        "command_topic": "lab/legacy/set",
+        "command_template": "{\"entity\":\"{{ entity_id }}\",\"state\":\"{{ value }}\",\"brightness\":{{ brightness }}}",
+        "brightness": true
+    });
+    broker
+        .publish(
+            "homeassistant/light/profile/config",
+            serde_json::to_vec(&profile_light).unwrap(),
+            true,
+        )
+        .await;
+    broker
+        .publish(
+            "homeassistant/light/legacy/config",
+            serde_json::to_vec(&legacy_light).unwrap(),
+            true,
+        )
+        .await;
+    wait_metadata_entity_id(&integration, "profile-light-wire", "light.profile_light").await;
+    broker
+        .wait_for_subscriptions(&[("lab/profile/state", 1)])
+        .await;
+    wait_state(&runtime, "light.profile_light", "unknown").await;
+
+    runtime
+        .call_service_async(service_call_with_data(
+            "light",
+            "turn_on",
+            "light.profile_light",
+            json!({"profile":"DeskProfile"}),
+        ))
+        .await
+        .unwrap();
+    let (profile_payload, qos, retain) = wait_published(&mut broker, "lab/profile/set").await;
+    assert_eq!(profile_payload["brightness"], 91);
+    assert_eq!(qos, 1);
+    assert!(!retain);
+
+    runtime
+        .call_service_async(service_call_with_data(
+            "light",
+            "turn_on",
+            "light.profile_light",
+            json!({"color_name":"No Such Color"}),
+        ))
+        .await
+        .unwrap();
+    let (fallback, _, _) = wait_published(&mut broker, "lab/profile/set").await;
+    assert_eq!(fallback["color"], json!({"r":255,"g":255,"b":255}));
+
+    runtime
+        .call_service_async(service_call_with_data(
+            "light",
+            "turn_on",
+            "light.legacy_light",
+            json!({"brightness":37}),
+        ))
+        .await
+        .unwrap();
+    let outgoing = broker
+        .wait_for(|event| {
+            matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/legacy/set")
+        })
+        .await;
+    assert!(matches!(
+        outgoing,
+        BrokerEvent::Published { payload, qos: 1, retain: false, .. }
+            if payload == br#"{"entity":"light.legacy_light","state":"ON","brightness":37}"#
+    ));
+
+    integration.shutdown().await.unwrap();
+    lifecycle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn climate_optimistic_command_ack_preserves_new_inbound_telemetry() {
+    let mut broker = LocalBroker::start().await;
+    broker.hold_acknowledgments(true);
+    let runtime = runtime();
+    let integration = MqttIntegration::start(
+        runtime.clone(),
+        loopback_config(&broker, "mqtt-climate-telemetry-ack"),
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    let discovery = json!({
+        "name": "Telemetry Climate",
+        "unique_id": "climate-telemetry-ack-wire",
+        "modes": ["off", "heat"],
+        "temperature_unit": "C",
+        "optimistic": true,
+        "mode_state_topic": "lab/telemetry/mode",
+        "current_temperature_topic": "lab/telemetry/current-temperature",
+        "current_humidity_topic": "lab/telemetry/current-humidity",
+        "action_topic": "lab/telemetry/action",
+        "fan_modes": ["low", "high"],
+        "fan_mode_state_topic": "lab/telemetry/fan",
+        "fan_mode_command_topic": "lab/telemetry/set-fan"
+    });
+    broker
+        .publish(
+            "homeassistant/climate/telemetry/config",
+            serde_json::to_vec(&discovery).unwrap(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[
+            ("lab/telemetry/mode", 1),
+            ("lab/telemetry/current-temperature", 1),
+            ("lab/telemetry/current-humidity", 1),
+            ("lab/telemetry/action", 1),
+            ("lab/telemetry/fan", 1),
+        ])
+        .await;
+    broker
+        .publish("lab/telemetry/mode", b"off".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/telemetry/current-temperature", b"20".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/telemetry/current-humidity", b"40".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/telemetry/action", b"idle".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/telemetry/fan", b"low".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.telemetry_climate",
+        "off",
+        "current_temperature",
+        &json!(20.0),
+    )
+    .await;
+
+    let call = service_call_with_data(
+        "climate",
+        "set_fan_mode",
+        "climate.telemetry_climate",
+        json!({"fan_mode":"high"}),
+    );
+    let mut service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.call_service_async(call).await }
+    });
+    let outgoing = broker
+        .wait_for(|event| {
+            matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/telemetry/set-fan")
+        })
+        .await;
+    assert!(matches!(
+        outgoing,
+        BrokerEvent::Published { payload, qos: 1, retain: false, .. }
+            if payload == b"high"
+    ));
+    let packet_id = match broker
+        .wait_for(|event| {
+            matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/telemetry/set-fan")
+        })
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+
+    broker
+        .publish("lab/telemetry/current-temperature", b"21.5".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/telemetry/current-humidity", b"44".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/telemetry/action", b"heating".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.telemetry_climate",
+        "off",
+        "current_temperature",
+        &json!(21.5),
+    )
+    .await;
+    broker.acknowledge(packet_id);
+    tokio::time::timeout(Duration::from_secs(3), &mut service)
+        .await
+        .expect("the held climate command should complete after PUBACK")
+        .unwrap()
+        .unwrap();
+
+    wait_state_attribute(
+        &runtime,
+        "climate.telemetry_climate",
+        "off",
+        "fan_mode",
+        &json!("high"),
+    )
+    .await;
+    let state = runtime.get_state("climate.telemetry_climate").unwrap();
+    assert_eq!(state.attributes["current_temperature"], 21.5);
+    assert_eq!(state.attributes["current_humidity"], 44.0);
+    assert_eq!(state.attributes["hvac_action"], "heating");
+
+    broker
+        .publish("lab/telemetry/fan", b"low".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.telemetry_climate",
+        "off",
+        "fan_mode",
+        &json!("low"),
+    )
+    .await;
+    let call = service_call_with_data(
+        "climate",
+        "set_fan_mode",
+        "climate.telemetry_climate",
+        json!({"fan_mode":"high"}),
+    );
+    let mut service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.call_service_async(call).await }
+    });
+    let outgoing = broker
+        .wait_for(|event| {
+            matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/telemetry/set-fan")
+        })
+        .await;
+    assert!(matches!(
+        outgoing,
+        BrokerEvent::Published { payload, qos: 1, retain: false, .. }
+            if payload == b"high"
+    ));
+    let packet_id = match broker
+        .wait_for(|event| {
+            matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/telemetry/set-fan")
+        })
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    broker
+        .publish("lab/telemetry/current-temperature", b"22.5".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/telemetry/fan", b"low".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.telemetry_climate",
+        "off",
+        "current_temperature",
+        &json!(22.5),
+    )
+    .await;
+    broker.acknowledge(packet_id);
+    tokio::time::timeout(Duration::from_secs(3), &mut service)
+        .await
+        .expect("the second held climate command should complete after PUBACK")
+        .unwrap()
+        .unwrap();
+    let state = runtime.get_state("climate.telemetry_climate").unwrap();
+    assert_eq!(state.attributes["fan_mode"], "low");
+    assert_eq!(state.attributes["current_temperature"], 22.5);
+
+    integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn climate_equal_preflight_temperature_is_admitted_before_held_ack() {
+    let mut broker = LocalBroker::start().await;
+    broker.hold_acknowledgments(true);
+    let runtime = runtime();
+    let integration = MqttIntegration::start(
+        runtime.clone(),
+        loopback_config(&broker, "mqtt-climate-equal-preflight"),
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+
+    let discovery = json!({
+        "name": "Equal Preflight Climate",
+        "unique_id": "climate-equal-preflight-wire",
+        "modes": ["off", "heat"],
+        "temperature_unit": "C",
+        "optimistic": true,
+        "mode_state_topic": "lab/equal/mode",
+        "mode_command_topic": "lab/equal/set-mode",
+        "temperature_state_topic": "lab/equal/target",
+        "temperature_command_topic": "lab/equal/set-temperature",
+        "current_temperature_topic": "lab/equal/current-temperature",
+        "current_humidity_topic": "lab/equal/current-humidity",
+        "action_topic": "lab/equal/action"
+    });
+    broker
+        .publish(
+            "homeassistant/climate/equal/config",
+            serde_json::to_vec(&discovery).unwrap(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[
+            ("lab/equal/mode", 1),
+            ("lab/equal/target", 1),
+            ("lab/equal/current-temperature", 1),
+            ("lab/equal/current-humidity", 1),
+            ("lab/equal/action", 1),
+        ])
+        .await;
+
+    for (topic, payload) in [
+        ("lab/equal/mode", b"heat".as_slice()),
+        ("lab/equal/target", b"22".as_slice()),
+        ("lab/equal/current-temperature", b"20".as_slice()),
+        ("lab/equal/current-humidity", b"40".as_slice()),
+        ("lab/equal/action", b"idle".as_slice()),
+    ] {
+        broker.publish(topic, payload.to_vec(), true).await;
+    }
+    wait_state_attribute(
+        &runtime,
+        "climate.equal_preflight_climate",
+        "heat",
+        "temperature",
+        &json!(22.0),
+    )
+    .await;
+
+    let mut service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call_with_data(
+                    "climate",
+                    "set_temperature",
+                    "climate.equal_preflight_climate",
+                    json!({"hvac_mode":"heat","temperature":22}),
+                ))
+                .await
+        }
+    });
+    assert!(matches!(
+        broker
+            .wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/equal/set-mode"))
+            .await,
+        BrokerEvent::Published { payload, qos: 1, retain: false, .. } if payload == b"heat"
+    ));
+    let mode_packet_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/equal/set-mode"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+
+    broker
+        .publish("lab/equal/target", b"19".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/equal/current-temperature", b"21".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/equal/current-humidity", b"44".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/equal/action", b"heating".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.equal_preflight_climate",
+        "heat",
+        "temperature",
+        &json!(19.0),
+    )
+    .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.equal_preflight_climate",
+        "heat",
+        "current_humidity",
+        &json!(44.0),
+    )
+    .await;
+
+    broker.acknowledge(mode_packet_id);
+    let temperature_command = broker
+        .wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/equal/set-temperature"))
+        .await;
+    assert!(matches!(
+        temperature_command,
+        BrokerEvent::Published { payload, qos: 1, retain: false, .. }
+            if serde_json::from_slice::<Value>(&payload).unwrap() == json!(22.0)
+    ));
+    let temperature_packet_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/equal/set-temperature"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+
+    // MQTT publishes the projected state on the next update callback. This
+    // packet makes the admitted command's cached target observable before its
+    // PUBACK completes.
+    broker
+        .publish("lab/equal/current-temperature", b"21.5".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.equal_preflight_climate",
+        "heat",
+        "temperature",
+        &json!(22.0),
+    )
+    .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.equal_preflight_climate",
+        "heat",
+        "current_temperature",
+        &json!(21.5),
+    )
+    .await;
+
+    // A later device report for that same field wins over the in-flight command.
+    broker
+        .publish("lab/equal/target", b"19".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "climate.equal_preflight_climate",
+        "heat",
+        "temperature",
+        &json!(19.0),
+    )
+    .await;
+    broker.acknowledge(temperature_packet_id);
+    tokio::time::timeout(Duration::from_secs(3), &mut service)
+        .await
+        .expect("the equal-value climate command should finish after its PUBACK")
+        .unwrap()
+        .unwrap();
+
+    let state = runtime
+        .get_state("climate.equal_preflight_climate")
+        .unwrap();
+    assert_eq!(state.attributes["temperature"], 19.0);
+    assert_eq!(state.attributes["current_temperature"], 21.5);
+    assert_eq!(state.attributes["current_humidity"], 44.0);
+    assert_eq!(state.attributes["hvac_action"], "heating");
+
+    integration.shutdown().await.unwrap();
 }

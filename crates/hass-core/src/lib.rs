@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use chrono::{DateTime, Utc};
+pub use hass_units::UnitSystemKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use thiserror::Error;
@@ -624,16 +625,45 @@ pub type ServiceExecutionScope = Arc<dyn Fn() -> Box<dyn Any + Send> + Send + Sy
 
 thread_local! {
     static ACTIVE_SERVICE_EXECUTION_SCOPES: RefCell<Vec<ServiceExecutionScope>> = RefCell::new(Vec::new());
+    static ACTIVE_SERVICE_DIAGNOSTIC_CLAIMS: RefCell<Vec<ServiceDiagnosticClaims>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) type ServiceDiagnosticClaims = Arc<Mutex<BTreeSet<(String, String)>>>;
+
+struct ActiveServiceDiagnosticClaimsGuard;
+
+impl ActiveServiceDiagnosticClaimsGuard {
+    fn enter(claims: ServiceDiagnosticClaims) -> Self {
+        ACTIVE_SERVICE_DIAGNOSTIC_CLAIMS.with(|active| active.borrow_mut().push(claims));
+        Self
+    }
+}
+
+impl Drop for ActiveServiceDiagnosticClaimsGuard {
+    fn drop(&mut self) {
+        ACTIVE_SERVICE_DIAGNOSTIC_CLAIMS.with(|active| {
+            active
+                .borrow_mut()
+                .pop()
+                .expect("service diagnostic scopes are entered and left in stack order");
+        });
+    }
+}
+
+pub(crate) fn enter_service_diagnostic_claims(
+    claims: ServiceDiagnosticClaims,
+) -> Box<dyn Any + Send> {
+    Box::new(ActiveServiceDiagnosticClaimsGuard::enter(claims))
 }
 
 pub(crate) fn active_service_execution_scope() -> Option<ServiceExecutionScope> {
     ACTIVE_SERVICE_EXECUTION_SCOPES.with(|scopes| scopes.borrow().last().cloned())
 }
 
-struct ActiveServiceExecutionScopeGuard;
+pub(crate) struct ActiveServiceExecutionScopeGuard;
 
 impl ActiveServiceExecutionScopeGuard {
-    fn enter(scope: ServiceExecutionScope) -> Self {
+    pub(crate) fn enter(scope: ServiceExecutionScope) -> Self {
         ACTIVE_SERVICE_EXECUTION_SCOPES.with(|scopes| scopes.borrow_mut().push(scope));
         Self
     }
@@ -651,6 +681,7 @@ impl Drop for ActiveServiceExecutionScopeGuard {
 }
 
 pub(crate) struct ServiceExecutionScopeGuard {
+    _reentered_scope_guard: ActiveServiceExecutionScopeGuard,
     _scope_guard: Box<dyn Any + Send>,
     _active_scope_guard: ActiveServiceExecutionScopeGuard,
 }
@@ -659,7 +690,12 @@ impl ServiceExecutionScopeGuard {
     pub(crate) fn enter(scope: &ServiceExecutionScope) -> Self {
         let active_scope_guard = ActiveServiceExecutionScopeGuard::enter(Arc::clone(scope));
         let scope_guard = scope();
+        // Callbacks may install their own inherited scopes as part of scope
+        // construction. Reassert the composite call scope afterward so any
+        // owned child work captures all inherited and runtime-owned context.
+        let reentered_scope_guard = ActiveServiceExecutionScopeGuard::enter(Arc::clone(scope));
         Self {
+            _reentered_scope_guard: reentered_scope_guard,
             _scope_guard: scope_guard,
             _active_scope_guard: active_scope_guard,
         }
@@ -835,6 +871,7 @@ struct RuntimeInner {
     /// public Home Assistant event (broker payloads may contain private data).
     signals: broadcast::Sender<Event>,
     home_context: RwLock<HomeContext>,
+    unit_system: RwLock<UnitSystemKind>,
     services: RwLock<BTreeMap<String, BTreeMap<String, RegisteredService>>>,
     entity_services: RwLock<BTreeMap<(String, String), BTreeMap<String, RegisteredEntityService>>>,
     service_registration: Mutex<()>,
@@ -878,6 +915,7 @@ impl Runtime {
                 events,
                 signals,
                 home_context: RwLock::new(HomeContext::default()),
+                unit_system: RwLock::new(UnitSystemKind::Metric),
                 services: RwLock::new(BTreeMap::new()),
                 entity_services: RwLock::new(BTreeMap::new()),
                 service_registration: Mutex::new(()),
@@ -989,6 +1027,42 @@ impl Runtime {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// Return this runtime's current unit system.
+    pub fn unit_system(&self) -> UnitSystemKind {
+        *self
+            .inner
+            .unit_system
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Apply the configuration owner's already-persisted unit system.
+    ///
+    /// This only changes the runtime context. The configuration owner is
+    /// responsible for persistence and any user-facing configuration events.
+    pub fn set_unit_system(&self, kind: UnitSystemKind) {
+        *self
+            .inner
+            .unit_system
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = kind;
+    }
+
+    /// Claim a diagnostic once within the current service invocation.
+    ///
+    /// Calls made outside a service invocation are not deduplicated.
+    pub fn claim_service_diagnostic(&self, code: &str, original_value: &str) -> bool {
+        ACTIVE_SERVICE_DIAGNOSTIC_CLAIMS.with(|active| {
+            let Some(claims) = active.borrow().last().cloned() else {
+                return true;
+            };
+            claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert((code.to_owned(), original_value.to_owned()))
+        })
     }
 
     /// Apply the configuration owner's already-persisted location and timezone.
