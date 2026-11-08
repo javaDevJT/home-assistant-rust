@@ -11,7 +11,11 @@ extra file or echoes the ignored fixture secret.
 
 Optimized macOS binary SHA-256:
 `5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa`.
-Source publication and exact-source Linux CI remain pending.
+Published source `49e056ac1a5df561d36ee410e95a57d8fbc51db8` passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602).
+Root independently verified the matching head, completed status and successful
+conclusion. The 57-member SDK enrollment and adapter work are outside this
+immutable source receipt.
 
 The climate SDK contributes 16 source-backed integration cases. MQTT passes
 six unit and 26 actual loopback wire cases, including all ten climate services,

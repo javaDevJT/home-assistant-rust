@@ -296,7 +296,7 @@ Root owns the metadata-only publication follow-up. GitHub metadata confirms
 `javaDevJT/home-assistant-rust` is a fork of `home-assistant/core`, with
 `rust-rewrite` as its default branch.
 
-The next candidate enrolls `hass-climate` as member 53. SDK owner v188 and
+The accepted 53-member source enrolled `hass-climate`. SDK owner v188 and
 read-only reviewer v189 released their scopes; root requires explicit native
 units, retains target exclusions, matches scalar mode coercion and the source's
 zero-low range check. Core v190 and config v191 released the unit context,
@@ -313,8 +313,12 @@ loss, root explicitly stopped/interrupted v193 before taking over its surviving
 edits. Both MQTT implementation and wire files are now root-owned; the complete
 package passes six unit and 26 wire tests. Root owns shared manifests, the
 ready profile-file loader, driver injection, process acceptance,
-documentation integration and Git. Candidate 53 has no full-workspace or
-exact-source CI receipt yet; climate remains unported in the inventory.
+documentation integration and Git. Published source
+`49e056ac1a5df561d36ee410e95a57d8fbc51db8` passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602),
+with the matching head, completed status and success independently verified.
+The inventory is 55 partial / 1,510 unported / zero complete; only climate was
+newly promoted.
 
 Review v204 found same-identity retained-update lease collisions, standalone
 update publication gaps, shared-topic sibling-field loss and stale optimistic
@@ -344,8 +348,11 @@ host interpreter's Unicode 17 data. Siren v197 released 21 passing tests after
 correcting those two boundaries from read-only v205's findings. The
 source-only v200 contract is in MQTT-PLATFORMS-PORT.md; root confirms preserving
 vacuum's pinned publish-topic validator for its state subscription field.
-Those packages remain isolated until root reviews and enrolls them. They do
-not establish provider acceptance or change integration statuses. All owners
+Root has now enrolled those SDKs as members 54-57, normalized their manifests,
+removed generated standalone lockfiles and refreshed the workspace lock.
+All 52 SDK tests and strict all-target lint checks pass after enrollment.
+Reusable wire support from v208 is ready for root integration. These packages
+do not establish provider acceptance or change integration statuses. All owners
 use native Luna/max, with provider/tier controls unexposed.
 
 ### Accepted native media and asynchronous services (44 crates)

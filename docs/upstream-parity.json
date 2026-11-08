@@ -43911,7 +43911,7 @@
           "bleak",
           "fjaraskupan"
         ],
-        "name": "Fj\u00e4r\u00e5skupan",
+        "name": "Fjäråskupan",
         "requirements": [
           "fjaraskupan==2.3.4"
         ]
@@ -49185,7 +49185,7 @@
         "documentation": "https://www.home-assistant.io/integrations/gc100",
         "domain": "gc100",
         "iot_class": "local_polling",
-        "name": "Global Cach\u00e9 GC-100",
+        "name": "Global Caché GC-100",
         "quality_scale": "legacy",
         "requirements": [
           "python-gc100==1.0.3a0"
@@ -50640,7 +50640,7 @@
           "dacite",
           "gios"
         ],
-        "name": "GIO\u015a",
+        "name": "GIOŚ",
         "quality_scale": "platinum",
         "requirements": [
           "gios==7.1.1"
@@ -63740,7 +63740,7 @@
         "loggers": [
           "hydropeak_opendata"
         ],
-        "name": "Hydro-Qu\u00e9bec Peak Events",
+        "name": "Hydro-Québec Peak Events",
         "quality_scale": "bronze",
         "requirements": [
           "hydropeak-opendata==0.2.0"
@@ -65174,7 +65174,7 @@
         "loggers": [
           "georss_ign_sismologia_client"
         ],
-        "name": "IGN Sismolog\u00eda",
+        "name": "IGN Sismología",
         "quality_scale": "legacy",
         "requirements": [
           "georss-ign-sismologia-client==0.8"
@@ -68883,7 +68883,7 @@
           "geopy",
           "pyipma"
         ],
-        "name": "Instituto Portugu\u00eas do Mar e Atmosfera (IPMA)",
+        "name": "Instituto Português do Mar e Atmosfera (IPMA)",
         "requirements": [
           "pyipma==3.0.10"
         ]
@@ -70583,7 +70583,7 @@
         "documentation": "https://www.home-assistant.io/integrations/itach",
         "domain": "itach",
         "iot_class": "assumed_state",
-        "name": "Global Cach\u00e9 iTach TCP/IP to IR",
+        "name": "Global Caché iTach TCP/IP to IR",
         "quality_scale": "legacy",
         "requirements": [
           "pyitachip2ir2==0.0.8"
@@ -81671,7 +81671,7 @@
         "loggers": [
           "pylutron_caseta"
         ],
-        "name": "Lutron Cas\u00e9ta",
+        "name": "Lutron Caséta",
         "requirements": [
           "pylutron-caseta==0.30.1"
         ],
@@ -85673,7 +85673,7 @@
         "loggers": [
           "meteireann"
         ],
-        "name": "Met \u00c9ireann",
+        "name": "Met Éireann",
         "requirements": [
           "PyMetEireann==2024.11.0"
         ]
@@ -85765,7 +85765,7 @@
         "loggers": [
           "meteofrance_api"
         ],
-        "name": "M\u00e9t\u00e9o-France",
+        "name": "Météo-France",
         "requirements": [
           "meteofrance-api==1.5.0"
         ]
@@ -88590,7 +88590,7 @@
         "domain": "moehlenhoff_alpha2",
         "integration_type": "hub",
         "iot_class": "local_push",
-        "name": "M\u00f6hlenhoff Alpha 2",
+        "name": "Möhlenhoff Alpha 2",
         "requirements": [
           "moehlenhoff-alpha2==1.4.0"
         ]
@@ -94919,7 +94919,7 @@
       "manifest": {
         "domain": "nexity",
         "integration_type": "virtual",
-        "name": "Nexity Eug\u00e9nie",
+        "name": "Nexity Eugénie",
         "supported_by": "overkiz"
       },
       "manifest_blob_oid": "31275f80eb439ed74cd2e1e58d57f2b954bf9a8d",
@@ -96646,7 +96646,7 @@
         "domain": "nobo_hub",
         "integration_type": "hub",
         "iot_class": "local_push",
-        "name": "Nob\u00f8 Ecohub",
+        "name": "Nobø Ecohub",
         "quality_scale": "platinum",
         "requirements": [
           "pynobo==1.9.0"
@@ -125689,7 +125689,7 @@
         "domain": "skoda",
         "integration_type": "device",
         "iot_class": "cloud_polling",
-        "name": "\u0160koda",
+        "name": "Škoda",
         "quality_scale": "bronze",
         "requirements": [
           "skoda-public-api==1.4.0"
@@ -144893,7 +144893,7 @@
         "loggers": [
           "pytradfri"
         ],
-        "name": "IKEA TR\u00c5DFRI",
+        "name": "IKEA TRÅDFRI",
         "requirements": [
           "pytradfri[async]==14.0.0"
         ]
@@ -150159,7 +150159,7 @@
       "manifest": {
         "domain": "vagner_pool",
         "integration_type": "virtual",
-        "name": "V\u00c1GNER POOL",
+        "name": "VÁGNER POOL",
         "supported_by": "pooldose"
       },
       "manifest_blob_oid": "792a7049c5655519eb48f73f0340b5ed0097b14d",
@@ -150454,7 +150454,7 @@
         "loggers": [
           "vasttrafik"
         ],
-        "name": "V\u00e4sttrafik",
+        "name": "Västtrafik",
         "quality_scale": "legacy",
         "requirements": [
           "vtjp==0.2.1"
@@ -155115,7 +155115,7 @@
         "domain": "wattwaechter",
         "integration_type": "device",
         "iot_class": "local_polling",
-        "name": "WattW\u00e4chter",
+        "name": "WattWächter",
         "quality_scale": "platinum",
         "requirements": [
           "aio-wattwaechter==1.3.0"
@@ -169788,7 +169788,7 @@
         ],
         "remaining": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. Unit-system config now persists canonical API bundles, restores legacy imperial storage without rewriting it, rejects invalid bundles before runtime/storage effects, and preserves runtime selection after persistence failure. The compiled MQTT process fixture confirms that config-entry disable removes all six managed platform entities, re-enable restores them, and SQLite restart preserves registry IDs. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage including sensor preferences, and exhaustive pinned config acceptance remain open.",
         "status": "partial",
-        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
+        "verification": "The 53-crate source 49e056ac1a5df561d36ee410e95a57d8fbc51db8 passes exact-source Linux CI [42483179602](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602); root verified the matching head, completed status and successful conclusion. Local validation passes 1,374 tests across 158 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. The final macOS artifact SHA-256 is 5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa. Focused evidence and prior accepted receipts remain in docs/VALIDATION.md and status_policy.historical_candidate_receipts. Complete integration parity remains unclaimed."
       },
       {
         "domain": "counter",
@@ -170209,7 +170209,7 @@
         ],
         "remaining": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent dispatch, cancellation, context and results. Four Core runtime tests now cover shared-but-isolated UnitSystem state and request diagnostic claims across grouped providers, polls, nested calls, and cancellation. The compiled process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider and direct light.turn_off, cover.open_cover, fan.turn_on, and climate lifecycle calls reach real broker commands; switch/button Script device actions are also exercised. Other core services, full selector/exclusion variants, Python service/template/State-object representation, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
+        "verification": "The 53-crate source 49e056ac1a5df561d36ee410e95a57d8fbc51db8 passes exact-source Linux CI [42483179602](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602); root verified the matching head, completed status and successful conclusion. Local validation passes 1,374 tests across 158 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. The final macOS artifact SHA-256 is 5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa. Focused evidence and prior accepted receipts remain in docs/VALIDATION.md and status_policy.historical_candidate_receipts. Complete integration parity remains unclaimed."
       },
       {
         "domain": "http",
@@ -170490,7 +170490,7 @@
         ],
         "remaining": "The native target catalog maps climate to its separate `hass_climate` SDK namespace. SDK logger listing reports the supplied catalog and does not establish that those SDKs emitted logs. Rust regex rejects Python lookaround/backreferences. Full attribution, renamed-logger repairs, remaining loader/discovery/frontend workflows and exhaustive pinned integration acceptance remain open.",
         "status": "partial",
-        "verification": "Published revision 216bb1f1271e8f2cf7dd6ae4c4161cda4df34bff records 517 tests/66 targets for 25 crates. The current 27-crate tree passes formatting, strict Clippy and 578 tests/71 targets, including all 16 logger cases: dynamic LogTracer targets/regex, critical severity, original span/event/TRACE fields and transport-only context under independent logger thresholds. Release/CLI and exact CI receipts remain separate. This inventory writer did not run tests."
+        "verification": "The 53-crate source 49e056ac1a5df561d36ee410e95a57d8fbc51db8 passes exact-source Linux CI [42483179602](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602); root verified the matching head, completed status and successful conclusion. Local validation passes 1,374 tests across 158 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. The final macOS artifact SHA-256 is 5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa. Focused evidence and prior accepted receipts remain in docs/VALIDATION.md and status_policy.historical_candidate_receipts. Complete integration parity remains unclaimed."
       },
       {
         "domain": "media_player",
@@ -170671,7 +170671,7 @@
         ],
         "remaining": "MQTT now uses native switch, button, light, cover, fan, and climate SDK paths. Six unit and 26 wire tests cover discovery/config, QoS callback completion, cancellation/timeouts/late ACKs, per-target driver-owned fan effect chains, cover direction/toggle/tilt, and the climate's ten service families, twelve state attributes, native-unit/cache/ACK behavior, and templates. Pending optimistic completion is bound to the original entity handle, preventing a released publisher's late ACK from changing a replacement entity. The process fixtures exercise all six managed platforms, climate registry disable/reload with SQLite entity identity, and ready custom light profiles, transition/brightness, zero-step off rerouting, and once-per-call warnings. Additional MQTT platform adapters, discovery/manifest/schema variants, exhaustive pinned protocol acceptance, and orphan-device/trigger/tag cleanup remain open.",
         "status": "partial",
-        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
+        "verification": "The 53-crate source 49e056ac1a5df561d36ee410e95a57d8fbc51db8 passes exact-source Linux CI [42483179602](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602); root verified the matching head, completed status and successful conclusion. Local validation passes 1,374 tests across 158 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. The final macOS artifact SHA-256 is 5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa. Focused evidence and prior accepted receipts remain in docs/VALIDATION.md and status_policy.historical_candidate_receipts. Complete integration parity remains unclaimed."
       },
       {
         "domain": "network",
@@ -172688,7 +172688,7 @@
         ],
         "remaining": "Typed light descriptors/snapshots, live capabilities, service validation/normalization, color conversion, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Twenty-seven package cases check the 149-entry source-exact named-color palette, built-in and custom CSV profiles, context defaults, profile application, transition/brightness behavior, and zero-brightness-step rerouting; process fixtures also cover ready profiles and once-per-call warnings. Other provider setup/catalog coverage, Python coercion edge cases, localization/translations, frontend/UI, and exhaustive pinned acceptance remain open. The SDK also keeps explicit range/finite-value guards where the pinned accessors do not validate provider values.",
         "status": "partial",
-        "verification": "The 52-crate source 83aaa07027efe8a233ed441a097b7b566a88f9a6 passes exact-source Linux CI [42466298539](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42466298539); head verified, status completed, conclusion success. Local validation passes 1,321 tests across 154 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. Artifact hash and focused/independent evidence are recorded in status_policy.current_local_candidate_receipt and docs/VALIDATION.md. Complete integration parity remains unclaimed."
+        "verification": "The 53-crate source 49e056ac1a5df561d36ee410e95a57d8fbc51db8 passes exact-source Linux CI [42483179602](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602); root verified the matching head, completed status and successful conclusion. Local validation passes 1,374 tests across 158 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. The final macOS artifact SHA-256 is 5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa. Focused evidence and prior accepted receipts remain in docs/VALIDATION.md and status_policy.historical_candidate_receipts. Complete integration parity remains unclaimed."
       },
       {
         "domain": "climate",
@@ -172773,7 +172773,7 @@
         ],
         "remaining": "Only the shared MQTT climate provider is accepted. Additional climate providers, Python service/template/State-object representation, broader platform/UI behavior, and exhaustive pinned acceptance remain open. Registry sensor preferences and MQTT orphan-device/trigger/tag cleanup are outside this pass.",
         "status": "partial",
-        "verification": "Candidate53 local gates pass 1,374 tests across 158 targets with zero failures or ignored cases, six MQTT unit and 26 wire tests, strict locked offline all-target Clippy, formatting, the optimized workspace build, and all 20 optimized CLI cases. The final optimized macOS binary is 28,949,248 bytes with SHA-256 5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa. Source commit/publication and exact-source Linux CI remain pending; source52 publication and CI receipts remain historical in docs/PARITY.md."
+        "verification": "The 53-crate source 49e056ac1a5df561d36ee410e95a57d8fbc51db8 passes exact-source Linux CI [42483179602](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602); root verified the matching head, completed status and successful conclusion. Local validation passes 1,374 tests across 158 targets with zero failed/ignored cases, workspace formatting, strict locked offline all-target Clippy, optimized workspace build, and all 20 native CLI cases. The final macOS artifact SHA-256 is 5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa. Focused evidence and prior accepted receipts remain in docs/VALIDATION.md and status_policy.historical_candidate_receipts. Complete integration parity remains unclaimed."
       }
     ],
     "partial": 55,
@@ -172838,11 +172838,17 @@
       },
       "optimized_macos_binary_sha256": "5a9c46c86a3d68281cb786c2a8876adac7f02132e0d8f30c21731510c19381fa",
       "optimized_macos_binary_size_bytes": 28949248,
-      "source_commit": null,
-      "source_publication": "pending",
-      "exact_source_linux_ci_run": null,
-      "exact_source_linux_ci": "pending",
-      "note": "The post-guard 53-crate local workspace gate passes 1,374 tests across 158 targets with zero failures or ignored cases, six MQTT unit tests and 26 wire tests, strict locked offline all-target Clippy, and formatting. The final optimized workspace build and all 20 optimized CLI cases pass; CLI checks create no database or extra files and do not echo ignored secrets. The optimized macOS binary hash and size are recorded above. Source commit/publication and exact-source Linux CI remain pending; no candidate53 source commit exists yet. Units is a shared library, not an integration domain."
+      "source_commit": "49e056ac1a5df561d36ee410e95a57d8fbc51db8",
+      "source_publication": "published",
+      "exact_source_linux_ci_run": {
+        "id": 42483179602,
+        "url": "https://github.com/javaDevJT/home-assistant-rust/actions/runs/42483179602",
+        "head_sha": "49e056ac1a5df561d36ee410e95a57d8fbc51db8",
+        "status": "completed",
+        "conclusion": "success"
+      },
+      "exact_source_linux_ci": "passed",
+      "note": "Published native53 source 49e056ac1a5df561d36ee410e95a57d8fbc51db8 passes exact-source Linux CI run 42483179602. Local gates pass 1,374 tests across 158 targets with zero failures or ignored cases, six MQTT unit tests and 26 wire tests, strict locked offline all-target Clippy, formatting, the optimized workspace build and 20 optimized CLI cases. The CLI matrix creates no database/extra files or ignored-secret echo. The final macOS binary hash/size are recorded above. Units is a shared library, not an integration domain."
     }
   },
   "title": "Pinned Home Assistant Core porting inventory"
