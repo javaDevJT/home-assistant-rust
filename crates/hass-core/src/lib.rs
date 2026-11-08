@@ -4,11 +4,13 @@
 //! contracts used by the Rust rewrite. It implements a bounded core runtime;
 //! it does not run Python integrations or control devices by itself.
 
+mod components;
 mod service_dispatch;
 #[cfg(test)]
 mod service_snapshot_tests;
 mod service_tasks;
 
+pub use components::LoadedComponents;
 pub use service_tasks::{OwnedServiceCall, ServiceCallCancellationHandle};
 
 use std::any::Any;
@@ -838,6 +840,7 @@ struct RuntimeInner {
     service_registration: Mutex<()>,
     service_tasks: Arc<service_tasks::ServiceTaskTracker>,
     service_target_resolver: Mutex<Option<InstalledServiceTargetResolver>>,
+    loaded_components: LoadedComponents,
 }
 
 /// Shared, cloneable access to the state machine, event bus, and service registry.
@@ -880,8 +883,14 @@ impl Runtime {
                 service_registration: Mutex::new(()),
                 service_tasks: Arc::new(service_tasks::ServiceTaskTracker::new()),
                 service_target_resolver: Mutex::new(None),
+                loaded_components: LoadedComponents::default(),
             }),
         })
+    }
+
+    /// Return this runtime's shared, process-lifetime component receipts.
+    pub fn loaded_components(&self) -> LoadedComponents {
+        self.inner.loaded_components.clone()
     }
 
     /// Return current states sorted by entity ID.

@@ -12661,7 +12661,29 @@
         "crates/hass-api/tests/network_protocol.rs::validation_rejects_unknown_fields_and_wrong_nested_types",
         "crates/hass-api/tests/network_protocol.rs::saved_preferences_survive_owner_restart_and_old_manager_goes_weak",
         "crates/hass-api/tests/network_protocol.rs::missing_config_returns_null_urls_and_missing_manager_is_generic",
-        "crates/hass/tests/network_process.rs::compiled_process_network_admin_selection_and_urls_survive_restart"
+        "crates/hass/tests/network_process.rs::compiled_process_network_admin_selection_and_urls_survive_restart",
+        "docs/COMPONENTS-PORT.md",
+        "crates/hass-core/src/components.rs",
+        "crates/hass-core/src/lib.rs",
+        "crates/hass-core/tests/components.rs",
+        "crates/hass-core/tests/components.rs#records_bare_names_and_sorted_dotted_platform_names",
+        "crates/hass-core/tests/components.rs#arbitrary_dotted_name_is_only_in_components",
+        "crates/hass-core/tests/components.rs#recording_is_idempotent_and_receipts_are_retained",
+        "crates/hass-core/tests/components.rs#runtime_clones_share_receipts_and_fresh_runtimes_start_empty",
+        "crates/hass-core/tests/components.rs#concurrent_receipts_are_preserved_and_sorted",
+        "crates/hass-api/src/extensions.rs",
+        "crates/hass-api/tests/components_protocol.rs",
+        "crates/hass-api/tests/components_protocol.rs#dynamic_receipts_are_live_sorted_shared_and_isolated_by_runtime",
+        "crates/hass-api/tests/components_protocol.rs#static_callers_keep_configured_names_and_missing_names_default_empty",
+        "crates/hass/src/main.rs",
+        "crates/hass/src/integration_drivers.rs",
+        "crates/hass/src/logging.rs",
+        "crates/hass/src/logging.rs#loaded_catalog_uses_success_receipts_not_registered_services",
+        "crates/hass/src/logging.rs#loaded_catalog_receipts_survive_entry_unload_and_are_runtime_scoped",
+        "crates/hass/src/spotify/player.rs",
+        "crates/hass/src/system_sensors.rs",
+        "crates/hass/src/system_sensors.rs#yaml_platforms_share_one_provider_and_shutdown_removes_generated_states",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
       ],
       "manifest": {
         "codeowners": [
@@ -12678,7 +12700,7 @@
       },
       "manifest_blob_oid": "bdadbef32797d22b4cf39f27846abde8309e7815",
       "manifest_path": "homeassistant/components/api/manifest.json",
-      "outstanding_acceptance": "Native HTTP/WebSocket fixtures cover config-subentry flows and Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The API also exposes an admin-only SSDP callback feed over its bounded WebSocket queue, with cached replay, live add/remove, overflow termination and shutdown coverage. Network adapter inventory/configuration and saved Core URL reads are limited to the `network`, `network/configure`, and `network/url` WebSocket commands, with admin writes, any-auth URL reads, strict fields and omitted-config `{}` default; no additional network event, service, or HTTP route is introduced. The config-subentry API test passes through graceful fixture teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, history, and complete network API semantics require acceptance.",
+      "outstanding_acceptance": "Authenticated GET /api/components now reports sorted process-lifetime receipts from successful setup; configured HTTP and WebSocket get_config snapshots use the same receipt set, while embedded callers without a receipt provider keep their configured static names. MQTT, Spotify/media-player, and time/date/uptime producers record only after setup, and unload retains names. Logger filtering uses canonical domains from all_components; in-progress discovery-handler supplementation and component_loaded event parity remain open, and SDK namespace metadata does not claim tracing-event emission. Remaining pinned endpoint, error, auth/permission, subscription, connection, history, and complete API semantics require acceptance.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -22706,7 +22728,12 @@
         "crates/hass-button/src/lib.rs#clearing_device_class_tombstones_stale_provider_fallback",
         "crates/hass-button/src/lib.rs#lifecycle_records_timestamp_before_provider_failure_without_rollback",
         "crates/hass-button/src/lib.rs#source_interval_metadata_remains_separate_from_polling",
-        "crates/hass-mqtt/tests/wire.rs#shared_button_presses_ack_independently_and_report_their_timestamp_states"
+        "crates/hass-mqtt/tests/wire.rs#shared_button_presses_ack_independently_and_report_their_timestamp_states",
+        "crates/hass-script/src/lib.rs",
+        "crates/hass-script/src/lib.rs#switch_and_button_device_action_yaml_validates_common_metadata_and_fields",
+        "crates/hass-script/src/lib.rs#button_device_action_calls_press_service_and_propagates_provider_errors",
+        "crates/hass-script/src/lib.rs#missing_device_action_uuid_fails_only_when_registry_is_available",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
       ],
       "manifest": {
         "codeowners": [
@@ -22720,7 +22747,7 @@
       },
       "manifest_blob_oid": "a21de7ce9c528ee6832088d27d5e8bbcf542e2d9",
       "manifest_path": "homeassistant/components/button/manifest.json",
-      "outstanding_acceptance": "Typed button descriptors, timestamp projection, press services, and actual MQTT press publication have focused SDK and wire evidence. Other provider adapters, broader action support, default localized names/translations, frontend/UI, the full platform catalog, and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "Typed button descriptors, timestamp projection, press services, actual MQTT press publication, and button.press Script device actions have focused SDK, wire, Script, and compiled-process evidence. Other provider adapters, default localized names/translations, frontend/UI, the full platform catalog, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -26715,7 +26742,7 @@
       },
       "manifest_blob_oid": "32aacff2c6fc2096829df4a1270b2f8346e28e31",
       "manifest_path": "homeassistant/components/config/manifest.json",
-      "outstanding_acceptance": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage, and exhaustive pinned config acceptance remain open.",
+      "outstanding_acceptance": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. The compiled MQTT process fixture confirms that config-entry disable removes all five managed platform entities, re-enable restores them, and SQLite restart preserves registry IDs. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage, and exhaustive pinned config acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -27577,7 +27604,22 @@
       "component_directory": "homeassistant/components/cover/",
       "config_flow_classes": [],
       "domain": "cover",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "docs/COVER-PORT.md",
+        "crates/hass-cover/README.md",
+        "crates/hass-cover/src/lib.rs",
+        "crates/hass-cover/src/lib.rs#cover_device_classes_match_the_pinned_enum_and_parse_case_insensitively",
+        "crates/hass-cover/src/lib.rs#cover_speed_labels_match_the_pinned_enum",
+        "crates/hass-cover/src/lib.rs#descriptor_preserves_entity_identity_class_and_explicit_features",
+        "crates/hass-cover/src/lib.rs#snapshot_projects_source_states_nulls_positions_tilt_and_inferred_features",
+        "crates/hass-cover/src/lib.rs#service_calls_validate_schema_fields_percentages_and_feature_masks",
+        "crates/hass-cover/src/lib.rs#command_speed_filter_toggle_fallbacks_and_tilt_toggle_match_source",
+        "crates/hass-cover/src/lib.rs#lifecycle_publishes_cover_state_and_retains_live_capabilities_offline",
+        "crates/hass-mqtt/src/lib.rs",
+        "crates/hass-mqtt/tests/wire.rs#shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases",
+        "crates/hass-mqtt/tests/wire.rs#shared_cover_toggle_remembers_observed_direction_and_exposes_tilt_toggle",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -27590,10 +27632,10 @@
       },
       "manifest_blob_oid": "9b860a12144f66d4574d1e0144b8663ff8d4f444",
       "manifest_path": "homeassistant/components/cover/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Typed cover descriptors/snapshots, feature projection, validated services, command resolution, observed-direction toggle memory, tilt toggle, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Cover device conditions/triggers and state reproduction, provider setup/unload and device-specific mappings beyond MQTT, service/UI metadata and frontend behavior, significant-change scheduling, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -41926,7 +41968,26 @@
       "component_directory": "homeassistant/components/fan/",
       "config_flow_classes": [],
       "domain": "fan",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "docs/FAN-PORT.md",
+        "crates/hass-fan/README.md",
+        "crates/hass-fan/src/lib.rs",
+        "crates/hass-fan/src/service.rs",
+        "crates/hass-fan/src/tests.rs",
+        "crates/hass-fan/src/tests.rs#pinned_feature_bits_services_and_entity_defaults_are_preserved",
+        "crates/hass-fan/src/tests.rs#attributes_keep_null_zero_and_capability_gating_distinct",
+        "crates/hass-fan/src/tests.rs#descriptor_publication_carries_provider_capabilities_as_live_metadata",
+        "crates/hass-fan/src/tests.rs#percentage_helpers_match_pinned_integer_floor_and_ceil_boundaries",
+        "crates/hass-fan/src/tests.rs#reported_power_state_controls_publication_and_toggle_independently_of_speed",
+        "crates/hass-fan/src/tests.rs#service_validation_preserves_coercion_requirements_and_target_context",
+        "crates/hass-fan/src/tests.rs#commands_check_features_presets_and_preserve_source_effect_order",
+        "crates/hass-fan/src/tests.rs#lifecycle_keeps_capabilities_live_scopes_state_and_honors_registry_removal",
+        "crates/hass-mqtt/src/lib.rs",
+        "crates/hass-mqtt/tests/wire.rs#shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases",
+        "crates/hass-mqtt/tests/wire.rs#shared_fan_uses_reported_power_inclusive_speeds_and_zero_command_order",
+        "crates/hass-mqtt/tests/wire.rs#fan_effect_chains_are_ack_sequenced_driver_owned_and_stopped_on_release_or_shutdown",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -41939,10 +42000,10 @@
       },
       "manifest_blob_oid": "d85b303d8413c434419f0665c0fedbc585f570da",
       "manifest_path": "homeassistant/components/fan/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Typed fan state/capability projection, service planning, reported power state, inclusive speed boundaries, ordered multi-effect commands, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Exact cv.boolean alias coverage remains unverified, and the pinned optional set_direction.direction schema/method mismatch is preserved for host handling. Other provider setup/catalog coverage, localization/UI, broader automation/reproduce behavior, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -58633,7 +58694,7 @@
       },
       "manifest_blob_oid": "c10e99e845466af084100ace7aad05ce5309020a",
       "manifest_path": "homeassistant/components/homeassistant/manifest.json",
-      "outstanding_acceptance": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent provider dispatch, cancellation, context, and results; the compiled-process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider. Other core services, full selector/exclusion variants, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent dispatch, cancellation, context and results. The compiled process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider and direct light.turn_off, cover.open_cover, and fan.turn_on calls produce real broker commands; switch/button Script device actions are also exercised. Other core services, full selector/exclusion variants, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -78208,7 +78269,30 @@
       "component_directory": "homeassistant/components/light/",
       "config_flow_classes": [],
       "domain": "light",
-      "local_evidence_paths": [],
+      "local_evidence_paths": [
+        "docs/LIGHT-PORT.md",
+        "crates/hass-light/README.md",
+        "crates/hass-light/src/lib.rs",
+        "crates/hass-light/src/color.rs",
+        "crates/hass-light/src/color.rs#source_math_golden_values_cover_rgb_hs_xy_and_white_channels",
+        "crates/hass-light/src/color.rs#source_math_golden_values_cover_rgbww_temperature_endpoints",
+        "crates/hass-light/src/color.rs#mccamy_temperature_singularity_is_explicit",
+        "crates/hass-light/src/service.rs",
+        "crates/hass-light/src/service.rs#parses_targets_and_normalizes_brightness_and_color_to_native_mode",
+        "crates/hass-light/src/service.rs#brightness_steps_use_current_light_state_and_clamp_to_home_assistant_range",
+        "crates/hass-light/src/service.rs#zero_brightness_turns_on_request_into_off_and_filters_on_only_fields",
+        "crates/hass-light/src/service.rs#xy_to_temperature_uses_the_pinned_singularity_fallback",
+        "crates/hass-light/src/service.rs#rejects_schema_conflicts_unknown_target_fields_and_invalid_color_arrays",
+        "crates/hass-light/src/tests.rs",
+        "crates/hass-light/src/tests.rs#descriptor_projects_pinned_capabilities_and_rejects_invalid_mode_sets",
+        "crates/hass-light/src/tests.rs#snapshot_projects_native_color_attributes_and_null_inactive_modes",
+        "crates/hass-light/src/tests.rs#state_mode_validation_allows_effect_only_onoff_and_brightness_modes",
+        "crates/hass-light/tests/lifecycle.rs",
+        "crates/hass-light/tests/lifecycle.rs#publication_updates_light_capabilities_while_unavailable",
+        "crates/hass-mqtt/src/lib.rs",
+        "crates/hass-mqtt/tests/wire.rs#shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+      ],
       "manifest": {
         "codeowners": [
           "@home-assistant/core"
@@ -78221,10 +78305,10 @@
       },
       "manifest_blob_oid": "2130241b6dcd4230f9e6705d859f24a4fa1ac6c9",
       "manifest_path": "homeassistant/components/light/manifest.json",
-      "outstanding_acceptance": "No behaviorally accepted native adapter for this domain is evidenced in the current worktree inventory. Port this pinned component source and its listed tests, preserving the exact manifest requirements/dependencies and proving setup, state, service, failure, unload, and protocol behavior before calling it partial or complete.",
+      "outstanding_acceptance": "Typed light descriptors/snapshots, live capabilities, service validation/normalization, color conversion, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Core profile application/default transitions, the full CSS color_name mapping and warning behavior, light-specific gamut clipping, Python coercion edge cases, other provider setup/catalog coverage, localization/translations, frontend/UI, and exhaustive pinned acceptance remain open. The SDK also keeps explicit range/finite-value guards where the pinned accessors do not validate provider values.",
       "platform_expressions": [],
       "platforms_static": [],
-      "port_status": "unported",
+      "port_status": "partial",
       "primary_batch": "01_runtime_native_candidates",
       "protocol_families": [],
       "protocol_family_evidence": {},
@@ -90055,7 +90139,17 @@
         "crates/hass/src/integration_driver_lifecycle_tests.rs#normal_shutdown_unloads_and_unregisters_for_same_manager_restart",
         "crates/hass/src/integration_driver_lifecycle_tests.rs#canceled_startup_joins_setup_and_unregisters_its_driver",
         "crates/hass/src/integration_driver_lifecycle_tests.rs#dropped_pending_shutdown_still_unloads_disconnects_and_allows_restart",
-        "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+        "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces",
+        "crates/hass-mqtt/src/lib.rs#callback_timeout_advances_one_continuation_and_late_ack_does_not_repeat_it",
+        "crates/hass-mqtt/src/lib.rs#attribute_only_optimism_uses_the_state_cached_at_completion",
+        "crates/hass-mqtt/src/lib.rs#failed_or_unsupported_discovery_does_not_record_component_receipts",
+        "crates/hass-mqtt/tests/wire.rs#shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases",
+        "crates/hass-mqtt/tests/wire.rs#shared_fan_uses_reported_power_inclusive_speeds_and_zero_command_order",
+        "crates/hass-mqtt/tests/wire.rs#fan_effect_chains_are_ack_sequenced_driver_owned_and_stopped_on_release_or_shutdown",
+        "crates/hass-mqtt/tests/wire.rs#shared_cover_toggle_remembers_observed_direction_and_exposes_tilt_toggle",
+        "crates/hass-light/src/lib.rs",
+        "crates/hass-cover/src/lib.rs",
+        "crates/hass-fan/src/lib.rs"
       ],
       "manifest": {
         "after_dependencies": [
@@ -90090,7 +90184,7 @@
       },
       "manifest_blob_oid": "ad9f55bd55815237942b2a149f64e88bd71eeeab",
       "manifest_path": "homeassistant/components/mqtt/manifest.json",
-      "outstanding_acceptance": "MQTT setup/reconnect, direct and generic switch service calls, button press publication, and QoS 0/1/2 callback completion have focused local-broker and compiled-process evidence. QoS callbacks wait for write/PUBACK/PUBCOMP as appropriate and cover cancellation, callback timeout, offline live attributes, context, changed states, and shutdown quiescence. Additional MQTT platform adapters, discovery/manifest/schema variants, and exhaustive pinned protocol acceptance remain open.",
+      "outstanding_acceptance": "MQTT now uses native switch, button, light, cover, and fan SDK paths. Five unit and 18 wire tests cover discovery/config, QoS callback completion, cancellation/timeouts/late ACKs, per-target driver-owned fan effect chains, cover direction/toggle/tilt behavior, and release/shutdown guards. The compiled process fixture exercises all five managed platforms, broker commands, entry disable/absence/reload, and SQLite-backed entity identity. Additional MQTT platform adapters, discovery/manifest/schema variants, and exhaustive pinned protocol acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -121516,7 +121610,28 @@
         "crates/hass-script/src/lib.rs",
         "crates/hass-script/src/lib.rs#service_response_variables_feed_later_sync_and_async_actions",
         "crates/hass-script/src/lib.rs#response_capability_mismatches_fail_before_service_effects",
-        "crates/hass-script/src/lib.rs#script_service_returns_stop_response_and_turn_on_rejects_response"
+        "crates/hass-script/src/lib.rs#script_service_returns_stop_response_and_turn_on_rejects_response",
+        "crates/hass-script/src/lib.rs#strict_schema_and_pure_validation_reject_unsupported_constructs",
+        "crates/hass-script/src/lib.rs#switch_and_button_device_action_yaml_validates_common_metadata_and_fields",
+        "crates/hass-script/src/lib.rs#switch_device_action_resolves_renamed_registry_uuid_and_keeps_literals",
+        "crates/hass-script/src/lib.rs#button_device_action_calls_press_service_and_propagates_provider_errors",
+        "crates/hass-script/src/lib.rs#switch_device_action_awaits_provider_and_cancels_on_script_turn_off",
+        "crates/hass-script/src/lib.rs#missing_device_action_uuid_fails_only_when_registry_is_available",
+        "crates/hass-script/src/lib.rs#scheduling_modes_enforce_single_restart_queue_parallel_and_cancel",
+        "crates/hass-script/src/lib.rs#actions_cover_conditions_choose_repeat_variables_stop_and_service_errors",
+        "crates/hass-script/src/lib.rs#recursion_is_rejected_without_deadlocking_actor",
+        "crates/hass-script/src/lib.rs#async_action_preserves_context_variables_and_lineage_before_legacy_recursion",
+        "crates/hass-script/src/lib.rs#cancelled_async_action_drops_the_provider_future",
+        "crates/hass-script/src/lib.rs#expired_async_action_drops_the_provider_future",
+        "crates/hass-script/src/lib.rs#async_action_provider_errors_do_not_become_success",
+        "crates/hass-script/src/lib.rs#scenes_use_services_snapshot_metadata_and_restore_after_restart",
+        "crates/hass-script/src/lib.rs#scenes_await_async_provider_commands_serially_with_context_and_lineage",
+        "crates/hass-script/src/lib.rs#scene_without_a_real_entity_service_fails_instead_of_injecting_state",
+        "crates/hass-script/src/lib.rs#shared_sequence_api_preserves_context_and_validates_values",
+        "crates/hass-script/src/lib.rs#script_choose_conditions_evaluate_legacy_and_registry_sun_conditions",
+        "crates/hass-script/src/lib.rs#script_sun_condition_offsets_accept_clocks_and_preserve_microseconds",
+        "crates/hass-script/src/lib.rs#script_sun_elevation_condition_matches_selector_and_degree_units",
+        "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
       ],
       "manifest": {
         "codeowners": [
@@ -121534,7 +121649,7 @@
       },
       "manifest_blob_oid": "d2252689a0a7de24d49f4a31ca3bfb85012ff88e",
       "manifest_path": "homeassistant/components/script/manifest.json",
-      "outstanding_acceptance": "Only the implemented script subset is present; upstream sequencing, modes, cancellation, tracing, UI/config flow, and all pinned fixtures remain to be accepted.",
+      "outstanding_acceptance": "Switch and button device actions now validate YAML, resolve registry UUIDs across renames, preserve literal IDs, await provider calls, and cover context, errors and cancellation in the 23-test Script package and compiled process. Upstream sequencing/modes beyond the implemented subset, tracing, broader device actions, UI/config flow, and exhaustive pinned fixtures remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -122556,7 +122671,35 @@
         "crates/hass-sensor/PROVENANCE/UNIT-TABLES.md",
         "crates/hass-sun/src/integration.rs",
         "crates/hass-system-sensors/src/lib.rs",
-        "crates/hass/src/system_sensors.rs"
+        "crates/hass/src/system_sensors.rs",
+        "crates/hass-sensor/tests/projection.rs#pinned_sensor_device_classes_use_their_complete_converter_families",
+        "crates/hass-sensor/tests/projection.rs#projection_preserves_converter_identity_errors_and_optional_results",
+        "crates/hass-sensor/tests/projection.rs#suggested_and_unitless_conversions_use_effective_display_units",
+        "docs/UNITS-PORT.md",
+        "crates/hass-units/README.md",
+        "crates/hass-units/src/lib.rs",
+        "crates/hass-units/src/unit_system.rs",
+        "crates/hass-units/tests/conversions.rs",
+        "crates/hass-units/tests/conversions.rs#supported_unit_counts_match_the_pinned_converter_tables",
+        "crates/hass-units/tests/conversions.rs#golden_conversions_cover_every_converter_family",
+        "crates/hass-units/tests/conversions.rs#supported_conversions_compose_for_all_families_except_rounded_beaufort",
+        "crates/hass-units/tests/conversions.rs#temperature_is_affine_but_delta_is_a_scale_only_conversion",
+        "crates/hass-units/tests/conversions.rs#identity_and_none_boundaries_match_the_pinned_wrappers",
+        "crates/hass-units/tests/conversions.rs#invalid_units_preserve_side_and_original_message_unit",
+        "crates/hass-units/tests/conversions.rs#reciprocal_energy_distance_zero_matches_both_source_entry_points",
+        "crates/hass-units/tests/conversions.rs#beaufort_rounding_uses_ties_to_even_and_rejects_non_real_f64_results",
+        "crates/hass-units/tests/conversions.rs#reciprocal_nonzero_underflow_is_not_an_optional_zero_reading",
+        "crates/hass-units/tests/conversions.rs#beaufort_exceptional_values_preserve_rounding_and_power_errors",
+        "crates/hass-units/tests/unit_system.rs",
+        "crates/hass-units/tests/unit_system.rs#canonical_defaults_and_dictionary_shape_match_the_pinned_source",
+        "crates/hass-units/tests/unit_system.rs#system_lookup_and_validation_keep_source_key_rules_distinct",
+        "crates/hass-units/tests/unit_system.rs#every_pinned_selection_domain_is_accepted_and_keeps_its_source_boundary",
+        "crates/hass-units/tests/unit_system.rs#custom_systems_validate_selections_and_preserve_joined_source_errors",
+        "crates/hass-units/tests/unit_system.rs#custom_conversion_table_replaces_builtins_and_preserves_none_keys",
+        "crates/hass-units/tests/unit_system.rs#canonical_conversion_tables_cover_source_device_classes_and_exceptions",
+        "crates/hass-units/tests/unit_system.rs#canonical_tables_match_every_explicit_source_mapping",
+        "crates/hass-units/tests/unit_system.rs#all_source_conversion_entry_points_use_their_pinned_converter_families",
+        "crates/hass-units/tests/unit_system.rs#missing_source_units_and_converter_errors_remain_distinguishable"
       ],
       "manifest": {
         "after_dependencies": [
@@ -122573,7 +122716,7 @@
       },
       "manifest_blob_oid": "f2531f6d3ccc2eb1c730ac1c9d58fdc31d3cac50",
       "manifest_path": "homeassistant/components/sensor/manifest.json",
-      "outstanding_acceptance": "The shared native sensor SDK implements source-ordered enum/optional validation, exact integer/u64/bool state handling, Python-compatible float formatting (16 golden values), native projection, and all 57 pinned unit rules across 270 unit entries and 62 classes. Thirteen native unit spelling aliases retain raw source metadata while publishing compatible spellings. Sun and system-sensor consumers use the SDK. Conversion families remain partial; complete platform setup/storage/provider catalog, statistics/history restore, UI/WebSocket consumers, and exhaustive pinned fixtures remain open. No physical sensors, host telemetry, or real account traffic have been tested.",
+      "outstanding_acceptance": "Native projection and native-unit metadata are implemented alongside all 41 sensor-class converter mappings across the 31 pinned conversion families. The standalone UnitSystem maps all 118 pinned source rows without content defects, but global selection is not integrated with app preferences or sensor registry/readback. Selected-unit persistence, display precision, restore/statistics/history, complete provider setup/catalog, UI/WebSocket consumers, and exhaustive pinned fixtures remain open. No physical sensors, host telemetry, or real account traffic were tested.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -134634,7 +134777,12 @@
         "crates/hass/tests/mqtt_process.rs#compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces",
         "crates/hass/src/integration_driver_lifecycle_tests.rs#normal_shutdown_unloads_and_unregisters_for_same_manager_restart",
         "crates/hass/src/integration_driver_lifecycle_tests.rs#canceled_startup_joins_setup_and_unregisters_its_driver",
-        "crates/hass/src/integration_driver_lifecycle_tests.rs#dropped_pending_shutdown_still_unloads_disconnects_and_allows_restart"
+        "crates/hass/src/integration_driver_lifecycle_tests.rs#dropped_pending_shutdown_still_unloads_disconnects_and_allows_restart",
+        "crates/hass-script/src/lib.rs",
+        "crates/hass-script/src/lib.rs#switch_and_button_device_action_yaml_validates_common_metadata_and_fields",
+        "crates/hass-script/src/lib.rs#switch_device_action_resolves_renamed_registry_uuid_and_keeps_literals",
+        "crates/hass-script/src/lib.rs#switch_device_action_awaits_provider_and_cancels_on_script_turn_off",
+        "crates/hass-script/src/lib.rs#missing_device_action_uuid_fails_only_when_registry_is_available"
       ],
       "manifest": {
         "after_dependencies": [
@@ -134651,7 +134799,7 @@
       },
       "manifest_blob_oid": "0ea122d9ffe74d3709526e23602bf6e50bffab7b",
       "manifest_path": "homeassistant/components/switch/manifest.json",
-      "outstanding_acceptance": "Native switch descriptors, state projection, assumed_state live publication, strict service targets/commands, and actual MQTT switch commands have focused SDK, wire, and process evidence. Switch device conditions and triggers are implemented in the automation engine. Remaining switch automation actions, device enumeration, the generic switch.is_on/switch.is_off state-condition registry, reproduce/significant-change semantics, switch-as-light, full provider coverage, translations, and frontend/UI behavior remain open.",
+      "outstanding_acceptance": "Native switch descriptors, state projection, assumed_state live publication, strict service targets/commands, and actual MQTT switch commands have focused SDK, wire, and process evidence. Switch turn_on/turn_off device actions now have Script YAML/runtime and compiled-process coverage; device enumeration, the generic switch.is_on/switch.is_off condition registry, reproduce/significant-change semantics, switch-as-light, full provider coverage, translations, and frontend/UI remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -156034,7 +156182,11 @@
         "crates/hass-api/tests/network_protocol.rs::validation_rejects_unknown_fields_and_wrong_nested_types",
         "crates/hass-api/tests/network_protocol.rs::saved_preferences_survive_owner_restart_and_old_manager_goes_weak",
         "crates/hass-api/tests/network_protocol.rs::missing_config_returns_null_urls_and_missing_manager_is_generic",
-        "crates/hass/tests/network_process.rs::compiled_process_network_admin_selection_and_urls_survive_restart"
+        "crates/hass/tests/network_process.rs::compiled_process_network_admin_selection_and_urls_survive_restart",
+        "docs/COMPONENTS-PORT.md",
+        "crates/hass-api/src/extensions.rs",
+        "crates/hass-api/tests/components_protocol.rs",
+        "crates/hass-api/tests/components_protocol.rs#dynamic_receipts_are_live_sorted_shared_and_isolated_by_runtime"
       ],
       "manifest": {
         "codeowners": [
@@ -156051,7 +156203,7 @@
       },
       "manifest_blob_oid": "315411ea4cf88f1fddfc571ccbe3742826cbc63c",
       "manifest_path": "homeassistant/components/websocket_api/manifest.json",
-      "outstanding_acceptance": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused actual-transport fixtures for both subsets pass. The Tag private subscription feed also has actual-transport evidence. An admin-only SSDP discovery feed uses a bounded callback queue; tests cover cached replay before live updates, overflow termination, unsubscribe and server-shutdown cleanup. Network adds only `network` inventory and `network/configure` preferences for admins, plus `network/url` for any authenticated reader; command fields are strict and omitted config defaults to `{}`. Only supported command/channel subsets are implemented: no network event, service, or HTTP route is added, and remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
+      "outstanding_acceptance": "The WebSocket get_config snapshot uses dynamic successful-setup component receipts when the optional provider is configured; static embedded callers retain their configured component list. This adds no component_loaded event. Component-loaded event parity and in-progress logger discovery supplementation remain open. Repairs/config-subentry, Tag, SSDP and Network command/channel subsets have focused transport evidence; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
       "platform_expressions": [],
       "platforms_static": [],
       "port_status": "partial",
@@ -168802,7 +168954,7 @@
         "domain": "api",
         "local_evidence": [
           {
-            "line_count": 697,
+            "line_count": 961,
             "path": "crates/hass-api/src/http.rs",
             "public_functions": [],
             "test_functions_present": [
@@ -168890,11 +169042,80 @@
             "test_functions_present": [
               "compiled_process_network_admin_selection_and_urls_survive_restart"
             ]
+          },
+          {
+            "path": "docs/COMPONENTS-PORT.md",
+            "line_count": 58
+          },
+          {
+            "path": "crates/hass-core/src/components.rs",
+            "line_count": 129
+          },
+          {
+            "path": "crates/hass-core/src/lib.rs",
+            "line_count": 4812
+          },
+          {
+            "path": "crates/hass-core/tests/components.rs",
+            "line_count": 78,
+            "test_functions_present": [
+              "records_bare_names_and_sorted_dotted_platform_names",
+              "arbitrary_dotted_name_is_only_in_components",
+              "recording_is_idempotent_and_receipts_are_retained",
+              "runtime_clones_share_receipts_and_fresh_runtimes_start_empty",
+              "concurrent_receipts_are_preserved_and_sorted"
+            ]
+          },
+          {
+            "path": "crates/hass-api/src/extensions.rs",
+            "line_count": 521
+          },
+          {
+            "path": "crates/hass-api/tests/components_protocol.rs",
+            "line_count": 273,
+            "test_functions_present": [
+              "dynamic_receipts_are_live_sorted_shared_and_isolated_by_runtime",
+              "static_callers_keep_configured_names_and_missing_names_default_empty"
+            ]
+          },
+          {
+            "path": "crates/hass/src/main.rs",
+            "line_count": 847
+          },
+          {
+            "path": "crates/hass/src/integration_drivers.rs",
+            "line_count": 1550
+          },
+          {
+            "path": "crates/hass/src/logging.rs",
+            "line_count": 368,
+            "test_functions_present": [
+              "loaded_catalog_uses_success_receipts_not_registered_services",
+              "loaded_catalog_receipts_survive_entry_unload_and_are_runtime_scoped"
+            ]
+          },
+          {
+            "path": "crates/hass/src/spotify/player.rs",
+            "line_count": 1558
+          },
+          {
+            "path": "crates/hass/src/system_sensors.rs",
+            "line_count": 1379,
+            "test_functions_present": [
+              "yaml_platforms_share_one_provider_and_shutdown_removes_generated_states"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/mqtt_process.rs",
+            "line_count": 1338,
+            "test_functions_present": [
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+            ]
           }
         ],
-        "remaining": "Native HTTP/WebSocket fixtures cover config-subentry flows and Repairs issue/list/data/ignore/fix-flow subsets, including persisted child records, private-data redaction, parent/child identity, role boundaries, and terminal next_flow results. The API also exposes an admin-only SSDP callback feed over its bounded WebSocket queue, with cached replay, live add/remove, overflow termination and shutdown coverage. Network adapter inventory/configuration and saved Core URL reads are limited to the `network`, `network/configure`, and `network/url` WebSocket commands, with admin writes, any-auth URL reads, strict fields and omitted-config `{}` default; no additional network event, service, or HTTP route is introduced. The config-subentry API test passes through graceful fixture teardown. Remaining pinned endpoint, error, auth/permission, subscription, connection, history, and complete network API semantics require acceptance.",
+        "remaining": "Authenticated GET /api/components now reports sorted process-lifetime receipts from successful setup; configured HTTP and WebSocket get_config snapshots use the same receipt set, while embedded callers without a receipt provider keep their configured static names. MQTT, Spotify/media-player, and time/date/uptime producers record only after setup, and unload retains names. Logger filtering uses canonical domains from all_components; in-progress discovery-handler supplementation and component_loaded event parity remain open, and SDK namespace metadata does not claim tracing-event emission. Remaining pinned endpoint, error, auth/permission, subscription, connection, history, and complete API semantics require acceptance.",
         "status": "partial",
-        "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests."
+        "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "application_credentials",
@@ -169324,11 +169545,27 @@
             "test_functions_present": [
               "shared_button_presses_ack_independently_and_report_their_timestamp_states"
             ]
+          },
+          {
+            "path": "crates/hass-script/src/lib.rs",
+            "line_count": 5778,
+            "test_functions_present": [
+              "switch_and_button_device_action_yaml_validates_common_metadata_and_fields",
+              "button_device_action_calls_press_service_and_propagates_provider_errors",
+              "missing_device_action_uuid_fails_only_when_registry_is_available"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/mqtt_process.rs",
+            "line_count": 1338,
+            "test_functions_present": [
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+            ]
           }
         ],
-        "remaining": "Typed button descriptors, timestamp projection, press services, and actual MQTT press publication have focused SDK and wire evidence. Other provider adapters, broader action support, default localized names/translations, frontend/UI, the full platform catalog, and exhaustive pinned acceptance remain open.",
+        "remaining": "Typed button descriptors, timestamp projection, press services, actual MQTT press publication, and button.press Script device actions have focused SDK, wire, Script, and compiled-process evidence. Other provider adapters, default localized names/translations, frontend/UI, the full platform catalog, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "config",
@@ -169488,16 +169725,16 @@
           },
           {
             "path": "crates/hass/tests/mqtt_process.rs",
-            "line_count": 1065,
+            "line_count": 1338,
             "public_functions": [],
             "test_functions_present": [
               "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
             ]
           }
         ],
-        "remaining": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage, and exhaustive pinned config acceptance remain open.",
+        "remaining": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. The compiled MQTT process fixture confirms that config-entry disable removes all five managed platform entities, re-enable restores them, and SQLite restart preserves registry IDs. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage, and exhaustive pinned config acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "counter",
@@ -169898,16 +170135,16 @@
           },
           {
             "path": "crates/hass/tests/mqtt_process.rs",
-            "line_count": 1065,
+            "line_count": 1338,
             "public_functions": [],
             "test_functions_present": [
               "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
             ]
           }
         ],
-        "remaining": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent provider dispatch, cancellation, context, and results; the compiled-process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider. Other core services, full selector/exclusion variants, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
+        "remaining": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent dispatch, cancellation, context and results. The compiled process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider and direct light.turn_off, cover.open_cover, and fan.turn_on calls produce real broker commands; switch/button Script device actions are also exercised. Other core services, full selector/exclusion variants, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "http",
@@ -170271,7 +170508,7 @@
         "domain": "mqtt",
         "local_evidence": [
           {
-            "line_count": 5027,
+            "line_count": 6521,
             "path": "crates/hass-mqtt/src/lib.rs",
             "public_functions": [
               "validate",
@@ -170282,17 +170519,28 @@
             ],
             "test_functions_present": [
               "callback_timeout_returns_normally_and_applies_optimistic_state",
+              "callback_timeout_advances_one_continuation_and_late_ack_does_not_repeat_it",
+              "attribute_only_optimism_uses_the_state_cached_at_completion",
+              "failed_or_unsupported_discovery_does_not_record_component_receipts",
               "rumqttc_queue_error_returns_error_without_optimistic_state"
             ]
           },
           {
-            "line_count": 2134,
+            "line_count": 3206,
             "path": "crates/hass-mqtt/tests/wire.rs",
             "public_functions": [],
             "test_functions_present": [
               "real_wire_discovery_state_availability_service_reconnect_and_shutdown",
               "strict_config_validation_and_password_redaction",
+              "startup_returns_an_error_after_a_bounded_connection_wait",
+              "json_light_reports_features_and_publishes_supported_commands",
+              "cover_and_fan_services_publish_and_topics_report_state",
+              "shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases",
+              "shared_fan_uses_reported_power_inclusive_speeds_and_zero_command_order",
+              "fan_effect_chains_are_ack_sequenced_driver_owned_and_stopped_on_release_or_shutdown",
+              "shared_cover_toggle_remembers_observed_direction_and_exposes_tilt_toggle",
               "shared_switch_lifecycle_projects_metadata_state_targets_and_commands",
+              "button_number_select_and_text_use_local_mqtt_wire",
               "qos0_completes_after_write_and_returns_no_queued_response",
               "qos1_out_of_order_acks_cancellation_and_shutdown_are_deterministic",
               "qos2_service_waits_for_pubcomp",
@@ -170327,16 +170575,28 @@
           },
           {
             "path": "crates/hass/tests/mqtt_process.rs",
-            "line_count": 1065,
+            "line_count": 1338,
             "public_functions": [],
             "test_functions_present": [
               "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
             ]
+          },
+          {
+            "path": "crates/hass-light/src/lib.rs",
+            "line_count": 1049
+          },
+          {
+            "path": "crates/hass-cover/src/lib.rs",
+            "line_count": 1583
+          },
+          {
+            "path": "crates/hass-fan/src/lib.rs",
+            "line_count": 800
           }
         ],
-        "remaining": "MQTT setup/reconnect, direct and generic switch service calls, button press publication, and QoS 0/1/2 callback completion have focused local-broker and compiled-process evidence. QoS callbacks wait for write/PUBACK/PUBCOMP as appropriate and cover cancellation, callback timeout, offline live attributes, context, changed states, and shutdown quiescence. Additional MQTT platform adapters, discovery/manifest/schema variants, and exhaustive pinned protocol acceptance remain open.",
+        "remaining": "MQTT now uses native switch, button, light, cover, and fan SDK paths. Five unit and 18 wire tests cover discovery/config, QoS callback completion, cancellation/timeouts/late ACKs, per-target driver-owned fan effect chains, cover direction/toggle/tilt behavior, and release/shutdown guards. The compiled process fixture exercises all five managed platforms, broker commands, entry disable/absence/reload, and SQLite-backed entity identity. Additional MQTT platform adapters, discovery/manifest/schema variants, and exhaustive pinned protocol acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "network",
@@ -170692,7 +170952,7 @@
         "domain": "script",
         "local_evidence": [
           {
-            "line_count": 4939,
+            "line_count": 5778,
             "path": "crates/hass-script/src/lib.rs",
             "public_functions": [
               "validate_config",
@@ -170702,16 +170962,42 @@
               "run_sequence"
             ],
             "test_functions_present": [
+              "strict_schema_and_pure_validation_reject_unsupported_constructs",
+              "switch_and_button_device_action_yaml_validates_common_metadata_and_fields",
+              "switch_device_action_resolves_renamed_registry_uuid_and_keeps_literals",
+              "button_device_action_calls_press_service_and_propagates_provider_errors",
+              "switch_device_action_awaits_provider_and_cancels_on_script_turn_off",
+              "missing_device_action_uuid_fails_only_when_registry_is_available",
+              "scheduling_modes_enforce_single_restart_queue_parallel_and_cancel",
+              "actions_cover_conditions_choose_repeat_variables_stop_and_service_errors",
+              "recursion_is_rejected_without_deadlocking_actor",
+              "async_action_preserves_context_variables_and_lineage_before_legacy_recursion",
+              "cancelled_async_action_drops_the_provider_future",
+              "expired_async_action_drops_the_provider_future",
+              "async_action_provider_errors_do_not_become_success",
+              "scenes_use_services_snapshot_metadata_and_restore_after_restart",
+              "scenes_await_async_provider_commands_serially_with_context_and_lineage",
+              "scene_without_a_real_entity_service_fails_instead_of_injecting_state",
+              "shared_sequence_api_preserves_context_and_validates_values",
               "script_choose_conditions_evaluate_legacy_and_registry_sun_conditions",
+              "script_sun_condition_offsets_accept_clocks_and_preserve_microseconds",
               "service_response_variables_feed_later_sync_and_async_actions",
               "response_capability_mismatches_fail_before_service_effects",
-              "script_service_returns_stop_response_and_turn_on_rejects_response"
+              "script_service_returns_stop_response_and_turn_on_rejects_response",
+              "script_sun_elevation_condition_matches_selector_and_degree_units"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/mqtt_process.rs",
+            "line_count": 1338,
+            "test_functions_present": [
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
             ]
           }
         ],
-        "remaining": "Native legacy and registry-backed Sun conditions have focused script tests, but only a subset of the script integration is implemented. Upstream sequencing, modes, cancellation, tracing, UI/config flow, full Sun feature review, and exhaustive pinned fixtures remain open.",
+        "remaining": "Switch and button device actions now validate YAML, resolve registry UUIDs across renames, preserve literal IDs, await provider calls, and cover context, errors and cancellation in the 23-test Script package and compiled process. Upstream sequencing/modes beyond the implemented subset, tracing, broader device actions, UI/config flow, and exhaustive pinned fixtures remain open.",
         "status": "partial",
-        "verification": "Root reports 18 hass-script cases passed in the 44-crate local workspace run; strict all-target Clippy and formatting also pass. Root reports 1,158 tests across 129 targets (zero failures or ignored cases) in the 44-crate local workspace run, plus strict all-target Clippy, formatting, optimized build, and seven optimized CLI checks. Optimized macOS binary SHA-256 is 8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f. Published source 90fd6b15e01c176ce2e65ceb992705843da2b089 passes exact-source Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045 (formatting, strict all-target Clippy, full tests and CLI); this inventory writer did not run tests. Full script and Sun feature acceptance remain open."
+        "verification": "Root reports 18 hass-script cases passed in the 44-crate local workspace run; strict all-target Clippy and formatting also pass. Root reports 1,158 tests across 129 targets (zero failures or ignored cases) in the 44-crate local workspace run, plus strict all-target Clippy, formatting, optimized build, and seven optimized CLI checks. Optimized macOS binary SHA-256 is 8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f. Published source 90fd6b15e01c176ce2e65ceb992705843da2b089 passes exact-source Linux CI https://github.com/javaDevJT/home-assistant-rust/actions/runs/42431349045 (formatting, strict all-target Clippy, full tests and CLI); this inventory writer did not run tests. Full script and Sun feature acceptance remain open. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "sensor",
@@ -170737,6 +171023,9 @@
               "native_unit_aliases_keep_raw_metadata_and_publish_compatible_spelling",
               "unit_selection_obeys_priority_and_converts_only_matching_classes",
               "common_pressure_length_energy_and_power_conversions_are_class_gated",
+              "pinned_sensor_device_classes_use_their_complete_converter_families",
+              "projection_preserves_converter_identity_errors_and_optional_results",
+              "suggested_and_unitless_conversions_use_effective_display_units",
               "warning_only_mismatches_and_value_errors_are_separate",
               "enum_options_are_validated_only_for_enum_class",
               "lifecycle_publishes_projected_values_across_rename_disable_and_unload"
@@ -170753,11 +171042,58 @@
           },
           {
             "path": "crates/hass/src/system_sensors.rs"
+          },
+          {
+            "path": "docs/UNITS-PORT.md",
+            "line_count": 186
+          },
+          {
+            "path": "crates/hass-units/README.md",
+            "line_count": 13
+          },
+          {
+            "path": "crates/hass-units/src/lib.rs",
+            "line_count": 880
+          },
+          {
+            "path": "crates/hass-units/src/unit_system.rs",
+            "line_count": 798
+          },
+          {
+            "path": "crates/hass-units/tests/conversions.rs",
+            "line_count": 452,
+            "test_functions_present": [
+              "supported_unit_counts_match_the_pinned_converter_tables",
+              "golden_conversions_cover_every_converter_family",
+              "supported_conversions_compose_for_all_families_except_rounded_beaufort",
+              "temperature_is_affine_but_delta_is_a_scale_only_conversion",
+              "identity_and_none_boundaries_match_the_pinned_wrappers",
+              "invalid_units_preserve_side_and_original_message_unit",
+              "reciprocal_energy_distance_zero_matches_both_source_entry_points",
+              "beaufort_rounding_uses_ties_to_even_and_rejects_non_real_f64_results",
+              "reciprocal_nonzero_underflow_is_not_an_optional_zero_reading",
+              "beaufort_exceptional_values_preserve_rounding_and_power_errors"
+            ]
+          },
+          {
+            "path": "crates/hass-units/tests/unit_system.rs",
+            "line_count": 598,
+            "test_functions_present": [
+              "canonical_defaults_and_dictionary_shape_match_the_pinned_source",
+              "system_lookup_and_validation_keep_source_key_rules_distinct",
+              "every_pinned_selection_domain_is_accepted_and_keeps_its_source_boundary",
+              "custom_systems_validate_selections_and_preserve_joined_source_errors",
+              "custom_conversion_table_replaces_builtins_and_preserves_none_keys",
+              "canonical_conversion_tables_cover_source_device_classes_and_exceptions",
+              "canonical_tables_match_every_explicit_source_mapping",
+              "all_source_conversion_entry_points_use_their_pinned_converter_families",
+              "missing_source_units_and_converter_errors_remain_distinguishable"
+            ]
           }
         ],
-        "remaining": "Statistics/history restore, UI/WebSocket consumers, additional conversion families, complete platform setup/storage, the full provider catalog, and exhaustive pinned fixtures remain open. No physical sensors, host telemetry, or real account traffic were used.",
+        "remaining": "The shared sensor SDK covers the pinned native-unit rules and all 41 sensor-class converter mappings across the 31 hass-units converter families. UnitSystem source mappings are independently checked, but global UnitSystem selection is not yet integrated with app preferences or sensor registry/readback. Remaining work includes selected-unit persistence, display precision, restore, statistics/history, full platform/provider setup, UI/WebSocket consumers, and exhaustive pinned fixtures. No physical sensors, host telemetry, or real account traffic were tested.",
         "status": "partial",
-        "verification": "Root reports two unit-table tests and 11 projection tests passing. Static source validation confirms all 57 pinned unit rules across 270 entries and 62 classes; 13 native unit spelling aliases preserve raw source metadata, and 16 float-format golden values pass. Sun and system-sensor consumers use the SDK. Conversion families remain partial. No physical sensors, host telemetry, or real account traffic were used. This inventory writer did not run tests; 46-worktree tests, strict Clippy, formatting, optimized build, and ten optimized CLI checks passed. Optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e. Published source aade9aa33ecccce1b627359f7fd1023353bb5f49 passes exact-source Linux CI [run 42438729634](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42438729634), including formatting, strict all-target Clippy, full workspace tests, and CLI validation."
+        "verification": "Root reports two unit-table tests and 11 projection tests passing. Static source validation confirms all 57 pinned unit rules across 270 entries and 62 classes; 13 native unit spelling aliases preserve raw source metadata, and 16 float-format golden values pass. Sun and system-sensor consumers use the SDK. Conversion families remain partial. No physical sensors, host telemetry, or real account traffic were used. This inventory writer did not run tests; 46-worktree tests, strict Clippy, formatting, optimized build, and ten optimized CLI checks passed. Optimized macOS binary SHA-256 is 9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e. Published source aade9aa33ecccce1b627359f7fd1023353bb5f49 passes exact-source Linux CI [run 42438729634](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42438729634), including formatting, strict all-target Clippy, full workspace tests, and CLI validation. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "spotify",
@@ -171209,16 +171545,26 @@
           },
           {
             "path": "crates/hass/tests/mqtt_process.rs",
-            "line_count": 1065,
+            "line_count": 1338,
             "public_functions": [],
             "test_functions_present": [
               "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
             ]
+          },
+          {
+            "path": "crates/hass-script/src/lib.rs",
+            "line_count": 5778,
+            "test_functions_present": [
+              "switch_and_button_device_action_yaml_validates_common_metadata_and_fields",
+              "switch_device_action_resolves_renamed_registry_uuid_and_keeps_literals",
+              "switch_device_action_awaits_provider_and_cancels_on_script_turn_off",
+              "missing_device_action_uuid_fails_only_when_registry_is_available"
+            ]
           }
         ],
-        "remaining": "Native switch descriptors, state projection, assumed_state live publication, strict service targets/commands, and actual MQTT switch commands have focused SDK, wire, and process evidence. Switch device conditions and triggers are implemented in the automation engine. Remaining switch automation actions, device enumeration, the generic switch.is_on/switch.is_off state-condition registry, reproduce/significant-change semantics, switch-as-light, full provider coverage, translations, and frontend/UI behavior remain open.",
+        "remaining": "Native switch descriptors, state projection, assumed_state live publication, strict service targets/commands, and actual MQTT switch commands have focused SDK, wire, and process evidence. Switch turn_on/turn_off device actions now have Script YAML/runtime and compiled-process coverage; device enumeration, the generic switch.is_on/switch.is_off condition registry, reproduce/significant-change semantics, switch-as-light, full provider coverage, translations, and frontend/UI remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "system_health",
@@ -171863,11 +172209,26 @@
             "test_functions_present": [
               "compiled_process_network_admin_selection_and_urls_survive_restart"
             ]
+          },
+          {
+            "path": "docs/COMPONENTS-PORT.md",
+            "line_count": 58
+          },
+          {
+            "path": "crates/hass-api/src/extensions.rs",
+            "line_count": 521
+          },
+          {
+            "path": "crates/hass-api/tests/components_protocol.rs",
+            "line_count": 273,
+            "test_functions_present": [
+              "dynamic_receipts_are_live_sorted_shared_and_isolated_by_runtime"
+            ]
           }
         ],
-        "remaining": "Repairs issue/list/data/ignore commands use the ordinary public event path, and config-subentry list/update/delete commands enforce typed fields, privacy and role boundaries; focused actual-transport fixtures for both subsets pass. The Tag private subscription feed also has actual-transport evidence. An admin-only SSDP discovery feed uses a bounded callback queue; tests cover cached replay before live updates, overflow termination, unsubscribe and server-shutdown cleanup. Network adds only `network` inventory and `network/configure` preferences for admins, plus `network/url` for any authenticated reader; command fields are strict and omitted config defaults to `{}`. Only supported command/channel subsets are implemented: no network event, service, or HTTP route is added, and remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
+        "remaining": "The WebSocket get_config snapshot uses dynamic successful-setup component receipts when the optional provider is configured; static embedded callers retain their configured component list. This adds no component_loaded event. Component-loaded event parity and in-progress logger discovery supplementation remain open. Repairs/config-subentry, Tag, SSDP and Network command/channel subsets have focused transport evidence; remaining upstream commands, auth lifecycle, connection behavior, feature event payloads, flow lifecycle, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests."
+        "verification": "Root reports the separate 31-crate Network candidate gate: 737 tests across 87 targets (0 failed, 0 ignored), formatting, strict locked workspace all-target Clippy, optimized build and CLI example/empty-temp no-database checks pass. This candidate includes four actual WebSocket network-command cases and one compiled-process restart case; optimized macOS candidate binary SHA-256 is `d53d9d1caa008998e6712f9bc78616bfc0870b4a77a93d44fe752b6e158dffc`. Source publication and CI remain pending. The inventory writer did not run tests. Final52 local-only gate details are in status_policy.current_local_candidate_receipt; source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       },
       {
         "domain": "zeroconf",
@@ -172045,12 +172406,225 @@
         "remaining": "Native home/YAML/storage zones, WGS-84 geometry, person/tracker occupancy, authorized live collection CRUD, actual YAML reload and saved core-location propagation have fixtures. Zone conditions/triggers, Unicode entity-registry identity, translations/UI flows and exhaustive pinned fixture acceptance remain open.",
         "status": "partial",
         "verification": "Primary crate, protocol and compiled-process acceptance is recorded in docs/PORTING.md; exact full-workspace revisions are in docs/VALIDATION.md."
+      },
+      {
+        "domain": "cover",
+        "local_evidence": [
+          {
+            "path": "docs/COVER-PORT.md",
+            "line_count": 72
+          },
+          {
+            "path": "crates/hass-cover/README.md",
+            "line_count": 5
+          },
+          {
+            "path": "crates/hass-cover/src/lib.rs",
+            "line_count": 1583,
+            "test_functions_present": [
+              "cover_device_classes_match_the_pinned_enum_and_parse_case_insensitively",
+              "cover_speed_labels_match_the_pinned_enum",
+              "descriptor_preserves_entity_identity_class_and_explicit_features",
+              "snapshot_projects_source_states_nulls_positions_tilt_and_inferred_features",
+              "service_calls_validate_schema_fields_percentages_and_feature_masks",
+              "command_speed_filter_toggle_fallbacks_and_tilt_toggle_match_source",
+              "lifecycle_publishes_cover_state_and_retains_live_capabilities_offline"
+            ]
+          },
+          {
+            "path": "crates/hass-mqtt/src/lib.rs",
+            "line_count": 6521
+          },
+          {
+            "path": "crates/hass-mqtt/tests/wire.rs",
+            "line_count": 3206,
+            "test_functions_present": [
+              "shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases",
+              "shared_cover_toggle_remembers_observed_direction_and_exposes_tilt_toggle"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/mqtt_process.rs",
+            "line_count": 1338,
+            "test_functions_present": [
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+            ]
+          }
+        ],
+        "remaining": "Typed cover descriptors/snapshots, feature projection, validated services, command resolution, observed-direction toggle memory, tilt toggle, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Cover device conditions/triggers and state reproduction, provider setup/unload and device-specific mappings beyond MQTT, service/UI metadata and frontend behavior, significant-change scheduling, and exhaustive pinned acceptance remain open.",
+        "status": "partial",
+        "verification": "Focused SDK, MQTT wire, and compiled-process evidence is included in the final52 local candidate gate recorded at status_policy.current_local_candidate_receipt. Source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+      },
+      {
+        "domain": "fan",
+        "local_evidence": [
+          {
+            "path": "docs/FAN-PORT.md",
+            "line_count": 101
+          },
+          {
+            "path": "crates/hass-fan/README.md",
+            "line_count": 13
+          },
+          {
+            "path": "crates/hass-fan/src/lib.rs",
+            "line_count": 800
+          },
+          {
+            "path": "crates/hass-fan/src/service.rs",
+            "line_count": 513
+          },
+          {
+            "path": "crates/hass-fan/src/tests.rs",
+            "line_count": 681,
+            "test_functions_present": [
+              "pinned_feature_bits_services_and_entity_defaults_are_preserved",
+              "attributes_keep_null_zero_and_capability_gating_distinct",
+              "descriptor_publication_carries_provider_capabilities_as_live_metadata",
+              "percentage_helpers_match_pinned_integer_floor_and_ceil_boundaries",
+              "reported_power_state_controls_publication_and_toggle_independently_of_speed",
+              "service_validation_preserves_coercion_requirements_and_target_context",
+              "commands_check_features_presets_and_preserve_source_effect_order",
+              "lifecycle_keeps_capabilities_live_scopes_state_and_honors_registry_removal"
+            ]
+          },
+          {
+            "path": "crates/hass-mqtt/src/lib.rs",
+            "line_count": 6521
+          },
+          {
+            "path": "crates/hass-mqtt/tests/wire.rs",
+            "line_count": 3206,
+            "test_functions_present": [
+              "shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases",
+              "shared_fan_uses_reported_power_inclusive_speeds_and_zero_command_order",
+              "fan_effect_chains_are_ack_sequenced_driver_owned_and_stopped_on_release_or_shutdown"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/mqtt_process.rs",
+            "line_count": 1338,
+            "test_functions_present": [
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+            ]
+          }
+        ],
+        "remaining": "Typed fan state/capability projection, service planning, reported power state, inclusive speed boundaries, ordered multi-effect commands, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Exact cv.boolean alias coverage remains unverified, and the pinned optional set_direction.direction schema/method mismatch is preserved for host handling. Other provider setup/catalog coverage, localization/UI, broader automation/reproduce behavior, and exhaustive pinned acceptance remain open.",
+        "status": "partial",
+        "verification": "Focused SDK, MQTT wire, and compiled-process evidence is included in the final52 local candidate gate recorded at status_policy.current_local_candidate_receipt. Source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
+      },
+      {
+        "domain": "light",
+        "local_evidence": [
+          {
+            "path": "docs/LIGHT-PORT.md",
+            "line_count": 131
+          },
+          {
+            "path": "crates/hass-light/README.md",
+            "line_count": 13
+          },
+          {
+            "path": "crates/hass-light/src/lib.rs",
+            "line_count": 1049
+          },
+          {
+            "path": "crates/hass-light/src/color.rs",
+            "line_count": 378,
+            "test_functions_present": [
+              "source_math_golden_values_cover_rgb_hs_xy_and_white_channels",
+              "source_math_golden_values_cover_rgbww_temperature_endpoints",
+              "mccamy_temperature_singularity_is_explicit"
+            ]
+          },
+          {
+            "path": "crates/hass-light/src/service.rs",
+            "line_count": 882,
+            "test_functions_present": [
+              "parses_targets_and_normalizes_brightness_and_color_to_native_mode",
+              "brightness_steps_use_current_light_state_and_clamp_to_home_assistant_range",
+              "zero_brightness_turns_on_request_into_off_and_filters_on_only_fields",
+              "xy_to_temperature_uses_the_pinned_singularity_fallback",
+              "rejects_schema_conflicts_unknown_target_fields_and_invalid_color_arrays"
+            ]
+          },
+          {
+            "path": "crates/hass-light/src/tests.rs",
+            "line_count": 131,
+            "test_functions_present": [
+              "descriptor_projects_pinned_capabilities_and_rejects_invalid_mode_sets",
+              "snapshot_projects_native_color_attributes_and_null_inactive_modes",
+              "state_mode_validation_allows_effect_only_onoff_and_brightness_modes"
+            ]
+          },
+          {
+            "path": "crates/hass-light/tests/lifecycle.rs",
+            "line_count": 59,
+            "test_functions_present": [
+              "publication_updates_light_capabilities_while_unavailable"
+            ]
+          },
+          {
+            "path": "crates/hass-mqtt/src/lib.rs",
+            "line_count": 6521
+          },
+          {
+            "path": "crates/hass-mqtt/tests/wire.rs",
+            "line_count": 3206,
+            "test_functions_present": [
+              "shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases"
+            ]
+          },
+          {
+            "path": "crates/hass/tests/mqtt_process.rs",
+            "line_count": 1338,
+            "test_functions_present": [
+              "compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces"
+            ]
+          }
+        ],
+        "remaining": "Typed light descriptors/snapshots, live capabilities, service validation/normalization, color conversion, and a native MQTT adapter have focused SDK, wire, and compiled-process evidence. Core profile application/default transitions, the full CSS color_name mapping and warning behavior, light-specific gamut clipping, Python coercion edge cases, other provider setup/catalog coverage, localization/translations, frontend/UI, and exhaustive pinned acceptance remain open. The SDK also keeps explicit range/finite-value guards where the pinned accessors do not validate provider values.",
+        "status": "partial",
+        "verification": "Focused SDK, MQTT wire, and compiled-process evidence is included in the final52 local candidate gate recorded at status_policy.current_local_candidate_receipt. Source publication and exact-source Linux CI remain pending. The inventory writer did not run tests."
       }
     ],
-    "partial": 51,
+    "partial": 54,
     "rule": "A manifest/name/stub or in-progress crate is never counted as complete. Partial means observable Rust behavior overlaps the integration; its local files and unaccepted parity boundary are listed. Unported entries still require pinned source/test implementation. Inventory status is source-based and does not replace primary acceptance.",
     "test_execution_by_inventory_writer": false,
-    "unported": 1514
+    "unported": 1511,
+    "current_local_candidate_receipt": {
+      "candidate": "NEXT52",
+      "candidate_crates": 52,
+      "workspace_tests": 1321,
+      "workspace_targets": 154,
+      "failed_tests": 0,
+      "ignored_tests": 0,
+      "workspace_formatting": "passed",
+      "strict_locked_offline_all_target_clippy": "passed",
+      "optimized_workspace_build": "passed",
+      "optimized_native_cli_matrix": {
+        "cases": 20,
+        "suite": "crates/hass/tests/check_config.rs",
+        "result": "all passed against the optimized binary"
+      },
+      "optimized_macos_binary_sha256": "de5dced125913f18d09ca28132340b1fde98b20e793e688312f167cfe9c78255",
+      "source_commit": null,
+      "source_publication": "pending",
+      "exact_source_linux_ci_run": null,
+      "exact_source_linux_ci": "pending",
+      "independent_unit_checks": {
+        "converter_families": 31,
+        "converter_factor_bit_patterns_matched": 190,
+        "unit_system_mapping_rows": 118,
+        "unit_system_metric_rows": 56,
+        "unit_system_us_rows": 62,
+        "unit_system_public_api_probes": 6208,
+        "unit_system_selection_domains": 8,
+        "unit_system_mapping_content_matches_source": true,
+        "only_unit_system_difference": "BTreeMap key ordering differs from Python insertion order; serialized mapping content matches."
+      },
+      "note": "Local final52 candidate only. No current52 source commit or exact-source Linux CI is available; do not interpret this as published or CI-green. Units is a shared library, not an integration domain."
+    }
   },
   "title": "Pinned Home Assistant Core porting inventory"
 }

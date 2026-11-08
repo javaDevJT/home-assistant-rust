@@ -50,6 +50,12 @@ const USB_CONFIGURATION_WARNING: &str = "The usb integration does not support co
 const HARDWARE_CONFIGURATION_WARNING: &str = "The hardware integration does not support configuration parameters; remove the parameters from configuration.";
 const APPLICATION_CREDENTIALS_CONFIGURATION_WARNING: &str = "The application_credentials integration does not support configuration parameters; remove the parameters from configuration.";
 
+fn record_successful_component(runtime: &Runtime, name: &str) {
+    runtime
+        .loaded_components()
+        .record_successful_component(name);
+}
+
 #[derive(Parser)]
 #[command(
     name = "hass",
@@ -141,16 +147,7 @@ async fn main() -> Result<()> {
             .join(&config.recorder.db_path)
     });
     let helper_config = config.helpers.clone();
-    let mut api_config = config.api_config();
-    if let Some(components) = api_config
-        .get_mut("components")
-        .and_then(serde_json::Value::as_array_mut)
-        && !components
-            .iter()
-            .any(|component| component.as_str() == Some("media_player"))
-    {
-        components.push(serde_json::Value::String("media_player".into()));
-    }
+    let api_config = config.api_config();
     let seed_config = serde_json::json!({
         "name":config.homeassistant.name,
         "latitude":config.homeassistant.latitude,
@@ -180,7 +177,19 @@ async fn main() -> Result<()> {
             let store = SqliteStore::open(&db_path)?;
             let runtime = Runtime::new(Arc::new(store))?;
             helpers::setup(&runtime, &helper_config)?;
+            for (component, configured) in [
+                ("input_boolean", !helper_config.input_boolean.is_empty()),
+                ("input_number", !helper_config.input_number.is_empty()),
+                ("input_text", !helper_config.input_text.is_empty()),
+                ("input_select", !helper_config.input_select.is_empty()),
+                ("counter", !helper_config.counter.is_empty()),
+            ] {
+                if configured {
+                    record_successful_component(&runtime, component);
+                }
+            }
             let auth = hass_auth::AuthManager::new(runtime.clone())?;
+            record_successful_component(&runtime, "auth");
             let config_entries = hass_config::ConfigEntries::new(runtime.clone())?;
             let registry_entries = config_entries.clone();
             let registries = hass_registry::Registries::new_with_config_entry_domain_resolver(
@@ -192,6 +201,7 @@ async fn main() -> Result<()> {
                 }),
             )?;
             config_entries.initialize_core_config(&seed_config)?;
+            record_successful_component(&runtime, "config");
             Ok((runtime, auth, registries, config_entries))
         })
         .await
@@ -203,6 +213,7 @@ async fn main() -> Result<()> {
         repairs::RepairsHost::start(repairs_runtime, repairs_entries, repairs_registries)
     })
     .await??;
+    record_successful_component(&runtime, "repairs");
     let repairs_manager = repairs.manager();
     let registry_lifecycle = registry_lifecycle::RegistryLifecycleHost::start(
         config_entries.clone(),
@@ -210,6 +221,7 @@ async fn main() -> Result<()> {
     )?;
     let restart = restart::RestartHost::start(runtime.clone(), &auth)?;
     let system_health = system_health::start(runtime.clone())?;
+    record_successful_component(&runtime, "system_health");
     let system_health_manager = system_health.manager();
     let network_runtime = runtime.clone();
     let network_adapters = tokio::task::spawn_blocking(move || {
@@ -220,6 +232,7 @@ async fn main() -> Result<()> {
         )
     })
     .await??;
+    record_successful_component(&runtime, "network");
     let network_adapter_manager = network_adapters.manager();
     let logger_runtime = runtime.clone();
     let logger_auth = auth.clone();
@@ -228,12 +241,14 @@ async fn main() -> Result<()> {
         logging::start(logger_runtime, &logger_auth, logger_config)
     })
     .await??;
+    record_successful_component(&runtime, "logger");
     let logger_manager = logger.manager();
     let system_log = hass_system_log::SystemLogIntegration::start(
         runtime.clone(),
         config.system_log.clone().unwrap_or_default(),
         Arc::new(logging::catalog),
     )?;
+    record_successful_component(&runtime, "system_log");
     let system_log_manager = system_log.manager();
     tracing_subscriber::registry()
         .with(
@@ -266,12 +281,12 @@ async fn main() -> Result<()> {
         tracing::error!(target: "hass::application_credentials", "{APPLICATION_CREDENTIALS_CONFIGURATION_WARNING}");
     }
     let application_credentials = if config.application_credentials_enabled {
-        Some(
-            hass_application_credentials::ApplicationCredentialsIntegration::new(
-                runtime.clone(),
-                config_entries.clone(),
-            )?,
-        )
+        let integration = hass_application_credentials::ApplicationCredentialsIntegration::new(
+            runtime.clone(),
+            config_entries.clone(),
+        )?;
+        record_successful_component(&runtime, "application_credentials");
+        Some(integration)
     } else {
         None
     };
@@ -280,18 +295,22 @@ async fn main() -> Result<()> {
         .map(hass_application_credentials::ApplicationCredentialsIntegration::manager);
     let discovery_dispatcher = discovery::DiscoveryDispatcher::new(config_entries.clone());
     let mut dhcp = if config.dhcp_enabled {
-        Some(dhcp::DhcpHost::start(
+        let host = dhcp::DhcpHost::start(
             runtime.clone(),
             config_entries.clone(),
             registries.clone(),
             discovery_dispatcher.handle(),
-        )?)
+        )?;
+        record_successful_component(&runtime, "dhcp");
+        Some(host)
     } else {
         None
     };
     let dhcp_manager = dhcp.as_ref().map(dhcp::DhcpHost::manager);
     let usb = if config.usb_enabled {
-        Some(usb::UsbHost::start(discovery_dispatcher.handle()).await?)
+        let host = usb::UsbHost::start(discovery_dispatcher.handle()).await?;
+        record_successful_component(&runtime, "usb");
+        Some(host)
     } else {
         None
     };
@@ -301,9 +320,11 @@ async fn main() -> Result<()> {
             as Arc<dyn hass_api::UsbUsageProvider>
     });
     let mut hardware = if config.hardware_enabled {
-        Some(hass_hardware::HardwareIntegration::new(Arc::new(
+        let integration = hass_hardware::HardwareIntegration::new(Arc::new(
             hass_hardware_metrics::NativeMetricsProvider::new(),
-        ))?)
+        ))?;
+        record_successful_component(&runtime, "hardware");
+        Some(integration)
     } else {
         None
     };
@@ -311,31 +332,31 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(hass_hardware::HardwareIntegration::manager);
     let mut zeroconf = if config.zeroconf_enabled {
-        Some(
-            zeroconf::ZeroconfHost::start(
-                runtime.clone(),
-                config_entries.clone(),
-                network_adapter_manager.clone(),
-                repairs_manager.clone(),
-                discovery_dispatcher.handle(),
-                bound_address,
-            )
-            .await?,
+        let host = zeroconf::ZeroconfHost::start(
+            runtime.clone(),
+            config_entries.clone(),
+            network_adapter_manager.clone(),
+            repairs_manager.clone(),
+            discovery_dispatcher.handle(),
+            bound_address,
         )
+        .await?;
+        record_successful_component(&runtime, "zeroconf");
+        Some(host)
     } else {
         None
     };
     let zeroconf_manager = zeroconf.as_ref().map(zeroconf::ZeroconfHost::manager);
     let mut ssdp = if config.ssdp_enabled {
-        Some(
-            ssdp::SsdpHost::start(
-                runtime.clone(),
-                config_entries.clone(),
-                network_adapter_manager.clone(),
-                discovery_dispatcher.handle(),
-            )
-            .await?,
+        let host = ssdp::SsdpHost::start(
+            runtime.clone(),
+            config_entries.clone(),
+            network_adapter_manager.clone(),
+            discovery_dispatcher.handle(),
         )
+        .await?;
+        record_successful_component(&runtime, "ssdp");
+        Some(host)
     } else {
         None
     };
@@ -350,8 +371,10 @@ async fn main() -> Result<()> {
         hass_image_upload::ImageIntegration::start(image_runtime, image_directory)
     })
     .await??;
+    record_successful_component(&runtime, "image_upload");
     let image_manager = images.manager();
     let mut notifications = hass_notifications::NotificationIntegration::start(runtime.clone())?;
+    record_successful_component(&runtime, "persistent_notification");
     let notification_manager = notifications.manager();
     let zones = zones::Zones::start(
         runtime.clone(),
@@ -361,6 +384,7 @@ async fn main() -> Result<()> {
         config.zone.clone(),
     )
     .await?;
+    record_successful_component(&runtime, "zone");
     let zone_manager = zones.manager();
     let mut trackers = hass_device_tracker::DeviceTrackerIntegration::start(
         runtime.clone(),
@@ -368,6 +392,7 @@ async fn main() -> Result<()> {
         config.device_tracker.clone(),
     )
     .await?;
+    record_successful_component(&runtime, "device_tracker");
     let persons = persons::Persons::start(
         runtime.clone(),
         auth.clone(),
@@ -376,6 +401,7 @@ async fn main() -> Result<()> {
         config.person.clone(),
     )
     .await?;
+    record_successful_component(&runtime, "person");
     let person_manager = persons.manager();
     let groups = hass_group::GroupIntegration::start_with_order(
         runtime.clone(),
@@ -383,6 +409,7 @@ async fn main() -> Result<()> {
         config.group_order.clone(),
     )
     .await?;
+    record_successful_component(&runtime, "group");
     let group_lookup = groups.lookup();
     let target_groups = group_lookup.clone();
     let target_registries = registries.clone();
@@ -413,19 +440,40 @@ async fn main() -> Result<()> {
         }));
     let homeassistant =
         homeassistant::HomeAssistantServices::start_with_groups(runtime.clone(), group_lookup)?;
+    record_successful_component(&runtime, "homeassistant");
     let recorder = recorder::RecorderMaintenance::start(
         runtime.clone(),
         auth.clone(),
         config.recorder.clone(),
     )?;
+    record_successful_component(&runtime, "recorder");
     let mut native_config = config.native_config();
     native_config.time_zone = runtime.time_zone();
+    let native_receipts = [
+        ("timer", !native_config.timer.is_empty()),
+        ("schedule", !native_config.schedule.is_empty()),
+        ("input_button", !native_config.input_button.is_empty()),
+        ("input_datetime", !native_config.input_datetime.is_empty()),
+    ];
     let native = hass_native::NativeIntegrations::start(runtime.clone(), native_config).await?;
-    let scripts = hass_script::ScriptEngine::start(runtime.clone(), config.script, config.scene)?;
+    for (component, initialized) in native_receipts {
+        if initialized {
+            record_successful_component(&runtime, component);
+        }
+    }
+    let scripts = hass_script::ScriptEngine::start_with_registries(
+        runtime.clone(),
+        config.script,
+        config.scene,
+        &registries,
+    )?;
+    record_successful_component(&runtime, "script");
+    record_successful_component(&runtime, "scene");
     let entity_lifecycle = hass_entity::EntityLifecycle::new(runtime.clone(), registries.clone())?;
     let media_players = hass_media_player::MediaPlayerDispatcher::new(entity_lifecycle.clone());
     let media_player_host =
         media_player::MediaPlayerHost::start(runtime.clone(), media_players.clone())?;
+    record_successful_component(&runtime, "media_player");
     let sun = hass_sun::SunIntegration::start(
         runtime.clone(),
         registries.clone(),
@@ -434,11 +482,13 @@ async fn main() -> Result<()> {
         config.sun,
     )
     .await?;
+    record_successful_component(&runtime, "sun");
     let tags = hass_tag::TagIntegration::start(
         runtime.clone(),
         registries.clone(),
         entity_lifecycle.clone(),
     )?;
+    record_successful_component(&runtime, "tag");
     let tag_manager = tags.manager();
     let system_sensors = system_sensors::SystemSensors::start(
         runtime.clone(),
@@ -454,6 +504,7 @@ async fn main() -> Result<()> {
         entity_lifecycle.clone(),
     )
     .await?;
+    record_successful_component(&runtime, "template");
     let mqtt_topics = hass_automation::mqtt_topics(&config.automation);
     let webhooks = hass_webhook::WebhookManager::new();
     let automations = hass_automation::start_with_features(
@@ -465,8 +516,19 @@ async fn main() -> Result<()> {
             registries: Some(registries.clone()),
         },
     )?;
+    record_successful_component(&runtime, "automation");
+    record_successful_component(&runtime, "webhook");
+    let rest_receipts = [
+        ("rest", !config.rest.is_empty()),
+        ("rest_command", !config.rest_command.is_empty()),
+    ];
     let rest = hass_rest::RestIntegration::start(runtime.clone(), config.rest, config.rest_command)
         .await?;
+    for (component, initialized) in rest_receipts {
+        if initialized {
+            record_successful_component(&runtime, component);
+        }
+    }
     let drivers = integration_drivers::NativeDrivers::start_with_entity_lifecycle(
         runtime.clone(),
         config_entries.clone(),
@@ -520,17 +582,12 @@ async fn main() -> Result<()> {
             media_players.clone(),
         )
         .await?;
-        if let Some(components) = api_config
-            .get_mut("components")
-            .and_then(serde_json::Value::as_array_mut)
-        {
-            components.push(serde_json::Value::String("spotify".into()));
-        }
+        record_successful_component(&runtime, "spotify");
         Some(integration)
     } else {
         None
     };
-    let logger_catalog = logging::loaded_catalog(config_entries.clone(), api_config.clone());
+    let logger_catalog = logging::loaded_catalog(runtime.loaded_components());
     let starting_runtime = runtime.clone();
     tokio::task::spawn_blocking(move || {
         starting_runtime.fire_event("homeassistant_start", Map::new(), Context::default())
@@ -573,6 +630,7 @@ async fn main() -> Result<()> {
         },
         hass_api::ApiFeatures {
             network,
+            loaded_components: Some(runtime.loaded_components()),
             auth: Some(auth),
             registries: Some(registries),
             templates: Some(templates),
@@ -601,6 +659,9 @@ async fn main() -> Result<()> {
         },
         Some(shutdown_rx),
     );
+    record_successful_component(&runtime, "api");
+    record_successful_component(&runtime, "websocket_api");
+    record_successful_component(&runtime, "http");
     info!(%bound_address, version = hass_core::VERSION, "Rust runtime listening");
     warn!(
         "Rust rewrite in progress; consult docs/upstream-parity.json for verified integration coverage"

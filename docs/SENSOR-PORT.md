@@ -170,8 +170,11 @@ it with the existing `time_date`/`uptime` and `sun` outputs. This covers plain
 text, dates/timestamps, numeric measurement values with units, and binary state
 without making every provider duplicate state serialization.
 
-Remaining gaps before a broader platform claim include the full device-class
-and unit-converter tables, registry-selected unit changes, every enum/device
+The SDK now maps all 41 pinned sensor `UNIT_CONVERTERS` entries to the 31
+converter families in `hass-units`, including source-compatible invalid-unit
+errors, identity shortcuts, reciprocal zero results, and the f64 limitation for
+negative Beaufort values. Remaining gaps before a broader platform claim
+include registry persistence/readback of selected units, every enum/device
 class validation edge, display precision, restore of native value/unit,
 recorder/statistics behavior, sensor WebSocket operations, and binary-sensor
 device conditions/triggers. `RestoreSensor` specifically preserves the native

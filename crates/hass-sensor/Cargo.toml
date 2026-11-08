@@ -10,6 +10,7 @@ description = "Typed native sensor descriptors and state projection for Home Ass
 [dependencies]
 chrono.workspace = true
 hass-core.workspace = true
+hass-units.workspace = true
 hass-entity.workspace = true
 serde_json.workspace = true
 

@@ -14,7 +14,16 @@ use hass_button::{
     ButtonPressRequest, ButtonSnapshot, ButtonTimestamp, execute_button_press_at,
 };
 use hass_core::{Context, Error, Result, Runtime, ServiceCall, ServiceResult, State};
-use hass_entity::{EntityHandle, EntityLifecycle, EntityStatus};
+use hass_cover::{
+    CoverAction, CoverCommand, CoverDescriptor, CoverDeviceClass, CoverFeatures, CoverSnapshot,
+    CoverToggleState,
+};
+use hass_entity::{EntityHandle, EntityLifecycle, EntityPublication, EntitySnapshot, EntityStatus};
+use hass_fan::{FanCommand, FanDescriptor, FanEffect, FanFeatures, FanSnapshot, FanState};
+use hass_light::{
+    LightAction, LightColorMode, LightCommand, LightDescriptor, LightFeature, LightFeatures,
+    LightSnapshot, NormalizedLightCommand,
+};
 use hass_registry::{DeviceRegistration, Registries};
 use hass_switch::{SwitchCommand, SwitchDescriptor, SwitchDeviceClass, SwitchSnapshot};
 use hass_template::TemplateEngine;
@@ -173,6 +182,9 @@ pub struct MqttEntityMetadata {
     pub discovery_topic: String,
     pub name: String,
     pub device: Option<Value>,
+    /// Whether the shared application entity lifecycle owns this MQTT entity.
+    #[serde(default)]
+    pub entity_lifecycle_managed: bool,
 }
 
 /// Running MQTT connection and entity/service bridge.
@@ -263,8 +275,9 @@ impl MqttIntegration {
         Self::start_inner(runtime, config, None).await
     }
 
-    /// Start MQTT using the application's shared entity lifecycle for switch
-    /// and button discoveries. Other MQTT platforms keep the standalone path.
+    /// Start MQTT using the application's shared entity lifecycle for native
+    /// switch, button, light, cover, and fan discoveries. Other MQTT platforms
+    /// keep the standalone path.
     pub async fn start_with_entity_lifecycle(
         runtime: Runtime,
         config: MqttConfig,
@@ -274,7 +287,7 @@ impl MqttIntegration {
     ) -> Result<Self> {
         if entry_id.trim().is_empty() {
             return Err(Error::InvalidInput(
-                "MQTT switch lifecycle requires a config entry ID".into(),
+                "MQTT entity lifecycle requires a config entry ID".into(),
             ));
         }
         let entry_id = entry_id.to_owned();
@@ -383,8 +396,8 @@ impl MqttIntegration {
         }
 
         let (shutdown, task) = worker.into_parts();
-
-        Ok(Self {
+        let loaded_components = runtime.loaded_components();
+        let integration = Self {
             shutdown: Some(shutdown),
             task: Some(task),
             subscription_tx,
@@ -393,7 +406,9 @@ impl MqttIntegration {
             runtime,
             entities,
             metadata,
-        })
+        };
+        loaded_components.record_successful_component("mqtt");
+        Ok(integration)
     }
 
     /// Return currently discovered entity identities in stable order.
@@ -423,6 +438,9 @@ impl MqttIntegration {
                     }
                     item.entity_id = status.entity_id().to_owned();
                 }
+                item.entity_lifecycle_managed = entities
+                    .get(&item.discovery_topic)
+                    .is_some_and(|entity| entity_lifecycle_handle(entity).is_some());
                 Some(item)
             })
             .collect::<Vec<_>>();
@@ -588,10 +606,8 @@ enum AvailabilityMode {
 #[derive(Clone, Debug)]
 struct DiscoveredEntity {
     metadata: MqttEntityMetadata,
-    switch_handle: Option<EntityHandle>,
+    shared_entity: Option<SharedMqttEntity>,
     switch_device_class: Option<SwitchDeviceClass>,
-    button_handle: Option<EntityHandle>,
-    button_descriptor: Option<ButtonDescriptor>,
     button_device_class: Option<ButtonDeviceClass>,
     button_last_value: Arc<Mutex<Option<LastValue>>>,
     state_topic: Option<String>,
@@ -617,6 +633,40 @@ struct DiscoveredEntity {
     text_pattern: Option<Regex>,
 }
 
+#[derive(Clone, Debug)]
+enum SharedMqttEntity {
+    Switch(EntityHandle),
+    Button {
+        handle: EntityHandle,
+        descriptor: ButtonDescriptor,
+    },
+    Light {
+        handle: EntityHandle,
+        descriptor: LightDescriptor,
+    },
+    Cover {
+        handle: EntityHandle,
+        descriptor: CoverDescriptor,
+        toggle_state: Arc<Mutex<CoverToggleState>>,
+    },
+    Fan {
+        handle: EntityHandle,
+        descriptor: FanDescriptor,
+    },
+}
+
+impl SharedMqttEntity {
+    fn handle(&self) -> &EntityHandle {
+        match self {
+            Self::Switch(handle)
+            | Self::Button { handle, .. }
+            | Self::Light { handle, .. }
+            | Self::Cover { handle, .. }
+            | Self::Fan { handle, .. } => handle,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Command {
     topic: String,
@@ -629,13 +679,15 @@ struct Command {
 
 struct CommandRequest {
     command: Command,
+    remaining_commands: VecDeque<Command>,
+    changed_states: Vec<State>,
     reply: oneshot::Sender<Result<Vec<State>>>,
 }
 
 #[derive(Debug)]
 struct OptimisticState {
     discovery_topic: String,
-    state: String,
+    state: Option<String>,
     attributes: Map<String, Value>,
     optimistic_updates: Map<String, Value>,
     context: Context,
@@ -645,6 +697,8 @@ struct OptimisticState {
 struct PendingPublish {
     qos: QoS,
     reply: Option<oneshot::Sender<Result<Vec<State>>>>,
+    remaining_commands: VecDeque<Command>,
+    changed_states: Vec<State>,
     optimistic: Option<OptimisticState>,
     deadline: Option<tokio::time::Instant>,
 }
@@ -668,6 +722,7 @@ struct PublishCompletionContext<'a> {
     connected: bool,
     availability_status: &'a HashMap<(String, String), bool>,
     last_values: &'a mut HashMap<String, LastValue>,
+    ready_continuations: &'a mut VecDeque<CommandRequest>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -694,11 +749,13 @@ async fn run_event_loop(
     let mut last_values: HashMap<String, LastValue> = HashMap::new();
     let mut unassigned_publishes = VecDeque::new();
     let mut publishes_by_packet_id = HashMap::new();
+    let mut ready_continuations = VecDeque::new();
 
     loop {
         enum Next {
             Stop,
             Command(Option<CommandRequest>),
+            Continuation(Option<CommandRequest>),
             Subscription(Option<SubscriptionRequest>),
             CompletionDeadline,
             Poll(std::result::Result<Event, rumqttc::ConnectionError>),
@@ -706,11 +763,19 @@ async fn run_event_loop(
         let next_deadline =
             earliest_publish_deadline(&unassigned_publishes, &publishes_by_packet_id);
         let next = tokio::select! {
+            biased;
             _ = &mut stop_rx => Next::Stop,
-            command = command_rx.recv() => Next::Command(command),
-            subscription = subscription_rx.recv() => Next::Subscription(subscription),
-            _ = wait_for_publish_deadline(next_deadline) => Next::CompletionDeadline,
-            event = event_loop.poll() => Next::Poll(event),
+            next = async {
+                // Shutdown wins immediately; other ready sources share fair
+                // polling so a command backlog cannot starve broker ACKs.
+                tokio::select! {
+                    continuation = async { ready_continuations.pop_front() }, if !ready_continuations.is_empty() => Next::Continuation(continuation),
+                    command = command_rx.recv() => Next::Command(command),
+                    subscription = subscription_rx.recv() => Next::Subscription(subscription),
+                    _ = wait_for_publish_deadline(next_deadline) => Next::CompletionDeadline,
+                    event = event_loop.poll() => Next::Poll(event),
+                }
+            } => next,
         };
         refresh_shared_entity_ids(
             &entities,
@@ -733,6 +798,9 @@ async fn run_event_loop(
                 while let Ok(request) = command_rx.try_recv() {
                     let _ = request.reply.send(Err(shutdown_error()));
                 }
+                while let Some(request) = ready_continuations.pop_front() {
+                    let _ = request.reply.send(Err(shutdown_error()));
+                }
                 while let Ok(request) = subscription_rx.try_recv() {
                     let _ = request.reply.send(Err(shutdown_error()));
                 }
@@ -747,6 +815,10 @@ async fn run_event_loop(
             Next::Command(Some(request)) => {
                 queue_publish_command(&client, request, &mut unassigned_publishes);
             }
+            Next::Continuation(Some(request)) => {
+                queue_publish_command(&client, request, &mut unassigned_publishes);
+            }
+            Next::Continuation(None) => {}
             Next::Subscription(Some(request)) => {
                 {
                     let mut desired = additional_subscriptions
@@ -775,6 +847,7 @@ async fn run_event_loop(
                     connected,
                     availability_status: &availability_status,
                     last_values: &mut last_values,
+                    ready_continuations: &mut ready_continuations,
                 };
                 complete_expired_publishes(
                     &mut completion,
@@ -851,6 +924,7 @@ async fn run_event_loop(
                             connected,
                             availability_status: &availability_status,
                             last_values: &mut last_values,
+                            ready_continuations: &mut ready_continuations,
                         };
                         complete_publish(&mut completion, &mut pending);
                     }
@@ -878,6 +952,7 @@ async fn run_event_loop(
                         connected,
                         availability_status: &availability_status,
                         last_values: &mut last_values,
+                        ready_continuations: &mut ready_continuations,
                     };
                     complete_publish(&mut completion, &mut pending);
                 }
@@ -894,6 +969,7 @@ async fn run_event_loop(
                         connected,
                         availability_status: &availability_status,
                         last_values: &mut last_values,
+                        ready_continuations: &mut ready_continuations,
                     };
                     complete_publish(&mut completion, &mut pending);
                 }
@@ -943,7 +1019,12 @@ fn queue_publish_command(
     request: CommandRequest,
     pending: &mut VecDeque<PendingPublish>,
 ) {
-    let CommandRequest { command, reply } = request;
+    let CommandRequest {
+        command,
+        remaining_commands,
+        changed_states,
+        reply,
+    } = request;
     if command
         .entity_handle
         .as_ref()
@@ -959,6 +1040,8 @@ fn queue_publish_command(
         Ok(()) => pending.push_back(PendingPublish {
             qos,
             reply: Some(reply),
+            remaining_commands,
+            changed_states,
             optimistic: command.optimistic,
             deadline: Some(tokio::time::Instant::now() + PUBLISH_COMPLETION_TIMEOUT),
         }),
@@ -995,6 +1078,7 @@ fn complete_publish(completion: &mut PublishCompletionContext<'_>, pending: &mut
         connected,
         availability_status,
         last_values,
+        ready_continuations,
     } = completion;
     let mut changed_states = Vec::new();
     if let Some(update) = pending.optimistic.take() {
@@ -1005,34 +1089,58 @@ fn complete_publish(completion: &mut PublishCompletionContext<'_>, pending: &mut
             .find(|entity| entity.metadata.discovery_topic == update.discovery_topic)
             .filter(|entity| mqtt_entity_is_active(entity))
             .cloned();
-        let Some(entity) = entity else {
-            if let Some(reply) = pending.reply.take() {
-                let _ = reply.send(Ok(changed_states));
-            }
-            return;
-        };
-        let entity_id = mqtt_entity_id(&entity);
-        let available = entity_available(&entity, *connected, availability_status);
-        let mut attributes = last_values
-            .get(&entity_id)
-            .map(|last| last.attributes.clone())
-            .unwrap_or_else(|| update.attributes.clone());
-        attributes.extend(update.optimistic_updates.clone());
-        let (published, last_attributes) = if update.switch_state {
-            let snapshot = SwitchSnapshot::new(Some(update.state == "on"))
-                .with_available(available)
-                .with_assumed_state(true)
-                .with_extra_attributes(attributes)
-                .with_context(update.context.clone());
-            let last_attributes = snapshot.entity_snapshot().attributes;
-            if let Some(handle) = entity.switch_handle.as_ref() {
-                (
-                    handle.publish_publication(snapshot.publication()),
-                    last_attributes,
-                )
-            } else {
+        if let Some(entity) = entity {
+            let entity_id = mqtt_entity_id(&entity);
+            let available = entity_available(&entity, *connected, availability_status);
+            let cached_state = runtime.get_state(&entity_id);
+            let fallback_state = cached_state
+                .as_ref()
+                .map(|state| state.state.as_str())
+                .filter(|state| *state != "unavailable")
+                .or_else(|| last_values.get(&entity_id).map(|last| last.state.as_str()))
+                .or_else(|| cached_state.as_ref().map(|state| state.state.as_str()))
+                .unwrap_or("unknown");
+            let desired_state = update.state.as_deref().unwrap_or(fallback_state);
+            let mut attributes = last_values
+                .get(&entity_id)
+                .map(|last| last.attributes.clone())
+                .or_else(|| cached_state.as_ref().map(|state| state.attributes.clone()))
+                .unwrap_or_else(|| update.attributes.clone());
+            attributes.extend(update.optimistic_updates.clone());
+            let (published, last_attributes, last_state) = if entity_lifecycle_handle(&entity)
+                .is_some()
+            {
+                match shared_entity_projection(
+                    &entity,
+                    Some(desired_state),
+                    available,
+                    attributes.clone(),
+                    update.context.clone(),
+                ) {
+                    Ok(Some((publication, snapshot))) => {
+                        let state = snapshot.state.clone().unwrap_or_else(|| "unknown".into());
+                        (
+                            entity_lifecycle_handle(&entity)
+                                .expect("shared projection has a lifecycle handle")
+                                .publish_publication(publication),
+                            snapshot.attributes,
+                            state,
+                        )
+                    }
+                    Ok(None) => (Ok(None), attributes, desired_state.to_owned()),
+                    Err(error) => {
+                        warn!(entity_id = %entity_id, error = %error, "failed to project optimistic MQTT state");
+                        (Err(error), attributes, desired_state.to_owned())
+                    }
+                }
+            } else if update.switch_state {
+                let snapshot = SwitchSnapshot::new(Some(desired_state == "on"))
+                    .with_available(available)
+                    .with_assumed_state(true)
+                    .with_extra_attributes(attributes)
+                    .with_context(update.context.clone());
                 let projected = snapshot.entity_snapshot();
-                let state = if projected.available {
+                let state = if available {
                     projected.state.as_deref().unwrap_or("unknown")
                 } else {
                     "unavailable"
@@ -1048,16 +1156,15 @@ fn complete_publish(completion: &mut PublishCompletionContext<'_>, pending: &mut
                         )
                         .map(Some),
                     projected.attributes,
+                    desired_state.to_owned(),
                 )
-            }
-        } else {
-            let state = if available {
-                update.state.as_str()
             } else {
-                "unavailable"
-            };
-            (
-                runtime
+                let state = if available {
+                    desired_state
+                } else {
+                    "unavailable"
+                };
+                let published = runtime
                     .set_state(
                         &entity_id,
                         state,
@@ -1065,32 +1172,42 @@ fn complete_publish(completion: &mut PublishCompletionContext<'_>, pending: &mut
                         update.context.clone(),
                         false,
                     )
-                    .map(Some),
-                attributes,
-            )
-        };
-        match published {
-            Ok(Some(change)) => {
-                if change.changed {
-                    changed_states.push(change.state.clone());
+                    .map(Some);
+                (published, attributes, desired_state.to_owned())
+            };
+            match published {
+                Ok(Some(change)) => {
+                    if change.changed {
+                        changed_states.push(change.state.clone());
+                    }
+                    last_values.insert(
+                        change.state.entity_id.clone(),
+                        LastValue {
+                            state: last_state,
+                            attributes: last_attributes,
+                            context: update.context,
+                        },
+                    );
                 }
-                last_values.insert(
-                    change.state.entity_id.clone(),
-                    LastValue {
-                        state: update.state,
-                        attributes: last_attributes,
-                        context: update.context,
-                    },
-                );
-            }
-            Ok(None) => {}
-            Err(error) => {
-                warn!(entity_id = %entity_id, error = %error, "failed to apply explicitly optimistic MQTT state")
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(entity_id = %entity_id, error = %error, "failed to apply explicitly optimistic MQTT state")
+                }
             }
         }
     }
     if let Some(reply) = pending.reply.take() {
-        let _ = reply.send(Ok(changed_states));
+        pending.changed_states.extend(changed_states);
+        if let Some(command) = pending.remaining_commands.pop_front() {
+            ready_continuations.push_back(CommandRequest {
+                command,
+                remaining_commands: std::mem::take(&mut pending.remaining_commands),
+                changed_states: std::mem::take(&mut pending.changed_states),
+                reply,
+            });
+        } else {
+            let _ = reply.send(Ok(std::mem::take(&mut pending.changed_states)));
+        }
     }
 }
 
@@ -1464,7 +1581,10 @@ fn process_discovery(
         }
         let mut entity_id = entity.metadata.entity_id.clone();
         let shared_entity = entity_lifecycle.is_some()
-            && matches!(entity.metadata.platform.as_str(), "switch" | "button");
+            && matches!(
+                entity.metadata.platform.as_str(),
+                "switch" | "button" | "light" | "cover" | "fan"
+            );
         let occupied_by_runtime = !shared_entity && runtime.get_state(&entity_id).is_some();
         let occupied_by_map = !shared_entity
             && entity_map
@@ -1495,22 +1615,33 @@ fn process_discovery(
         entity.metadata.entity_id = entity_id;
     }
 
-    if let Some(entity_lifecycle) = entity_lifecycle.as_ref() {
-        match entity.metadata.platform.as_str() {
-            "switch" => {
-                let handle = register_switch_entity(&entity, entity_lifecycle)?;
-                entity.metadata.entity_id = handle.status().entity_id().to_owned();
-                entity.switch_handle = Some(handle);
-            }
-            "button" => {
-                let (handle, descriptor) = register_button_entity(&entity, entity_lifecycle)?;
-                entity.metadata.entity_id = handle.status().entity_id().to_owned();
-                entity.button_handle = Some(handle);
-                entity.button_descriptor = Some(descriptor);
-            }
-            _ => {}
+    if let Some(entity_lifecycle) = entity_lifecycle.as_ref()
+        && matches!(
+            entity.metadata.platform.as_str(),
+            "switch" | "button" | "light" | "cover" | "fan"
+        )
+    {
+        entity.shared_entity = Some(register_shared_entity(&entity, entity_lifecycle)?);
+        if let Some(SharedMqttEntity::Cover { toggle_state, .. }) = entity.shared_entity.as_mut()
+            && let Some(SharedMqttEntity::Cover {
+                toggle_state: prior_toggle_state,
+                ..
+            }) = prior
+                .as_ref()
+                .and_then(|entity| entity.shared_entity.as_ref())
+        {
+            *toggle_state = Arc::clone(prior_toggle_state);
         }
+        entity.metadata.entity_id = entity
+            .shared_entity
+            .as_ref()
+            .expect("registered shared MQTT entity")
+            .handle()
+            .status()
+            .entity_id()
+            .to_owned();
     }
+    entity.metadata.entity_lifecycle_managed = entity_lifecycle_handle(&entity).is_some();
 
     let is_new = prior.is_none();
     if let Some(prior) = prior {
@@ -1529,6 +1660,10 @@ fn process_discovery(
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(entity.metadata.entity_id.clone(), entity.metadata.clone());
+    let loaded_components = runtime.loaded_components();
+    let platform = entity.metadata.platform.clone();
+    loaded_components.record_successful_component(platform.clone());
+    loaded_components.record_successful_component(format!("mqtt.{platform}"));
 
     if is_new {
         let available = entity.availability.is_empty();
@@ -1667,6 +1802,307 @@ fn register_button_entity(
         .next()
         .ok_or_else(|| Error::Service("shared lifecycle returned no MQTT button handle".into()))?;
     Ok((handle, descriptor))
+}
+
+fn register_shared_entity(
+    entity: &DiscoveredEntity,
+    context: &SharedEntityLifecycleContext,
+) -> Result<SharedMqttEntity> {
+    match entity.metadata.platform.as_str() {
+        "switch" => Ok(SharedMqttEntity::Switch(register_switch_entity(
+            entity, context,
+        )?)),
+        "button" => {
+            let (handle, descriptor) = register_button_entity(entity, context)?;
+            Ok(SharedMqttEntity::Button { handle, descriptor })
+        }
+        "light" => {
+            let (handle, descriptor) = register_light_entity(entity, context)?;
+            Ok(SharedMqttEntity::Light { handle, descriptor })
+        }
+        "cover" => {
+            let (handle, descriptor) = register_cover_entity(entity, context)?;
+            Ok(SharedMqttEntity::Cover {
+                handle,
+                descriptor,
+                toggle_state: Arc::new(Mutex::new(CoverToggleState::new())),
+            })
+        }
+        "fan" => {
+            let (handle, descriptor) = register_fan_entity(entity, context)?;
+            Ok(SharedMqttEntity::Fan { handle, descriptor })
+        }
+        platform => Err(Error::Service(format!(
+            "MQTT {platform} does not use the shared entity lifecycle"
+        ))),
+    }
+}
+
+fn register_light_entity(
+    entity: &DiscoveredEntity,
+    context: &SharedEntityLifecycleContext,
+) -> Result<(EntityHandle, LightDescriptor)> {
+    let device_id = register_mqtt_device(
+        &context.registries,
+        &context.entry_id,
+        entity.metadata.device.as_ref(),
+    )?;
+    let modes = entity
+        .attributes
+        .get(hass_light::attr::SUPPORTED_COLOR_MODES)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| {
+                            Error::InvalidInput(
+                                "MQTT light supported_color_modes must contain strings".into(),
+                            )
+                        })?
+                        .parse::<LightColorMode>()
+                        .map_err(|error| Error::InvalidInput(error.to_string()))
+                })
+                .collect::<Result<Vec<_>>>()
+        })
+        .transpose()?
+        .unwrap_or_else(|| {
+            vec![
+                if config_bool(&entity.platform_config, "brightness", false) {
+                    LightColorMode::Brightness
+                } else {
+                    LightColorMode::OnOff
+                },
+            ]
+        });
+
+    let mut features = LightFeatures::NONE;
+    if config_bool(&entity.platform_config, "effect", false) {
+        features = features.with(LightFeature::Effect);
+    }
+    if config_bool(&entity.platform_config, "flash", false) {
+        features = features.with(LightFeature::Flash);
+    }
+    if config_bool(&entity.platform_config, "transition", false) {
+        features = features.with(LightFeature::Transition);
+    }
+    let mut descriptor = LightDescriptor::new(
+        "mqtt",
+        context.provider_id.clone(),
+        entity.metadata.unique_id.clone(),
+    )
+    .with_unique_id(entity.metadata.unique_id.clone())
+    .with_config_entry_id(context.entry_id.clone())
+    .with_name(entity.metadata.name.clone())
+    .with_suggested_object_id(mqtt_suggested_object_id(entity))
+    .with_supported_color_modes(modes)
+    .with_supported_features(features)
+    .with_min_color_temp_kelvin(config_u32(
+        &entity.platform_config,
+        "min_kelvin",
+        hass_light::LIGHT_DEFAULT_MIN_KELVIN,
+    ))
+    .with_max_color_temp_kelvin(config_u32(
+        &entity.platform_config,
+        "max_kelvin",
+        hass_light::LIGHT_DEFAULT_MAX_KELVIN,
+    ));
+    if let Some(device_id) = device_id {
+        descriptor = descriptor.with_device_id(device_id);
+    }
+    if let Some(icon) = entity.attributes.get("icon").and_then(Value::as_str) {
+        descriptor = descriptor.with_icon(icon.to_owned());
+    }
+    if let Some(category) = entity
+        .attributes
+        .get("entity_category")
+        .and_then(Value::as_str)
+    {
+        descriptor = descriptor.with_entity_category(category.to_owned());
+    }
+    if let Some(effects) = entity
+        .platform_config
+        .get("effect_list")
+        .and_then(Value::as_array)
+    {
+        descriptor = descriptor
+            .with_effect_list(effects.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
+    let spec = descriptor
+        .try_entity_spec()
+        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+    let handle = register_shared_spec(&context.lifecycle, spec, "light")?;
+    Ok((handle, descriptor))
+}
+
+fn register_cover_entity(
+    entity: &DiscoveredEntity,
+    context: &SharedEntityLifecycleContext,
+) -> Result<(EntityHandle, CoverDescriptor)> {
+    let device_id = register_mqtt_device(
+        &context.registries,
+        &context.entry_id,
+        entity.metadata.device.as_ref(),
+    )?;
+    let mut features = CoverFeatures::EMPTY;
+    if entity.command_topic.is_some() {
+        features |= CoverFeatures::OPEN | CoverFeatures::CLOSE | CoverFeatures::STOP;
+    }
+    if entity
+        .extra_command_topics
+        .contains_key("set_position_topic")
+    {
+        features |= CoverFeatures::SET_POSITION;
+    }
+    if entity
+        .extra_command_topics
+        .contains_key("tilt_command_topic")
+    {
+        features |= CoverFeatures::OPEN_TILT
+            | CoverFeatures::CLOSE_TILT
+            | CoverFeatures::STOP_TILT
+            | CoverFeatures::SET_TILT_POSITION;
+    }
+    let mut descriptor = CoverDescriptor::new(
+        "mqtt",
+        context.provider_id.clone(),
+        entity.metadata.unique_id.clone(),
+    )
+    .with_unique_id(entity.metadata.unique_id.clone())
+    .with_config_entry_id(context.entry_id.clone())
+    .with_name(entity.metadata.name.clone())
+    .with_suggested_object_id(mqtt_suggested_object_id(entity))
+    .with_supported_features(features);
+    if let Some(device_class) = entity
+        .attributes
+        .get("device_class")
+        .and_then(Value::as_str)
+    {
+        descriptor = descriptor.with_device_class(
+            device_class
+                .parse::<CoverDeviceClass>()
+                .map_err(|error| Error::InvalidInput(error.to_string()))?,
+        );
+    }
+    if let Some(device_id) = device_id {
+        descriptor = descriptor.with_device_id(device_id);
+    }
+    if let Some(icon) = entity.attributes.get("icon").and_then(Value::as_str) {
+        descriptor = descriptor.with_icon(icon.to_owned());
+    }
+    if let Some(category) = entity
+        .attributes
+        .get("entity_category")
+        .and_then(Value::as_str)
+    {
+        descriptor = descriptor.with_entity_category(category.to_owned());
+    }
+    let handle = register_shared_spec(&context.lifecycle, descriptor.entity_spec(), "cover")?;
+    Ok((handle, descriptor))
+}
+
+fn register_fan_entity(
+    entity: &DiscoveredEntity,
+    context: &SharedEntityLifecycleContext,
+) -> Result<(EntityHandle, FanDescriptor)> {
+    let device_id = register_mqtt_device(
+        &context.registries,
+        &context.entry_id,
+        entity.metadata.device.as_ref(),
+    )?;
+    let mut features = FanFeatures::default();
+    if entity.command_topic.is_some() {
+        features |= FanFeatures::TURN_ON | FanFeatures::TURN_OFF;
+    }
+    if entity
+        .extra_command_topics
+        .contains_key("percentage_command_topic")
+    {
+        features |= FanFeatures::SET_SPEED;
+    }
+    if entity
+        .extra_command_topics
+        .contains_key("preset_mode_command_topic")
+    {
+        features |= FanFeatures::PRESET_MODE;
+    }
+    if entity
+        .extra_command_topics
+        .contains_key("oscillation_command_topic")
+    {
+        features |= FanFeatures::OSCILLATE;
+    }
+    if entity
+        .extra_command_topics
+        .contains_key("direction_command_topic")
+    {
+        features |= FanFeatures::DIRECTION;
+    }
+    let preset_modes = entity
+        .extra_command_topics
+        .contains_key("preset_mode_command_topic")
+        .then(|| config_strings(&entity.platform_config, "preset_modes"));
+    let speed_count = if features.contains(FanFeatures::SET_SPEED) {
+        let min = config_number(&entity.platform_config, "speed_range_min", 1.0);
+        let max = config_number(&entity.platform_config, "speed_range_max", 100.0);
+        ((max - min + 1.0) as i64).min(100)
+    } else {
+        100
+    };
+    let mut descriptor = FanDescriptor::new(
+        "mqtt",
+        context.provider_id.clone(),
+        entity.metadata.unique_id.clone(),
+    )
+    .with_unique_id(entity.metadata.unique_id.clone())
+    .with_config_entry_id(context.entry_id.clone())
+    .with_name(entity.metadata.name.clone())
+    .with_suggested_object_id(mqtt_suggested_object_id(entity))
+    .with_features(features)
+    .with_speed_count(speed_count)
+    .with_preset_modes(preset_modes);
+    if let Some(device_id) = device_id {
+        descriptor = descriptor.with_device_id(device_id);
+    }
+    if let Some(icon) = entity.attributes.get("icon").and_then(Value::as_str) {
+        descriptor = descriptor.with_icon(icon.to_owned());
+    }
+    if let Some(category) = entity
+        .attributes
+        .get("entity_category")
+        .and_then(Value::as_str)
+    {
+        descriptor = descriptor.with_entity_category(category.to_owned());
+    }
+    let handle = register_shared_spec(&context.lifecycle, descriptor.entity_spec(), "fan")?;
+    Ok((handle, descriptor))
+}
+
+fn register_shared_spec(
+    lifecycle: &EntityLifecycle,
+    spec: hass_entity::EntitySpec,
+    platform: &str,
+) -> Result<EntityHandle> {
+    lifecycle
+        .register_batch(vec![spec])?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            Error::Service(format!(
+                "shared lifecycle returned no MQTT {platform} handle"
+            ))
+        })
+}
+
+fn mqtt_suggested_object_id(entity: &DiscoveredEntity) -> String {
+    entity
+        .metadata
+        .entity_id
+        .split_once('.')
+        .map(|(_, object_id)| object_id.to_owned())
+        .unwrap_or_default()
 }
 
 fn register_mqtt_device(
@@ -2380,11 +2816,10 @@ fn parse_discovered_entity(
             discovery_topic: discovery_topic.to_owned(),
             name,
             device,
+            entity_lifecycle_managed: false,
         },
-        switch_handle: None,
+        shared_entity: None,
         switch_device_class,
-        button_handle: None,
-        button_descriptor: None,
         button_device_class,
         button_last_value: Arc::new(Mutex::new(None)),
         state_topic,
@@ -2436,13 +2871,18 @@ fn register_services(
         ("cover", "open_cover"),
         ("cover", "close_cover"),
         ("cover", "stop_cover"),
+        ("cover", "toggle"),
         ("cover", "set_cover_position"),
         ("cover", "open_cover_tilt"),
         ("cover", "close_cover_tilt"),
         ("cover", "stop_cover_tilt"),
         ("cover", "set_cover_tilt_position"),
+        ("cover", "toggle_cover_tilt"),
         ("fan", "turn_on"),
         ("fan", "turn_off"),
+        ("fan", "toggle"),
+        ("fan", "increase_speed"),
+        ("fan", "decrease_speed"),
         ("fan", "set_percentage"),
         ("fan", "set_preset_mode"),
         ("fan", "oscillate"),
@@ -2574,10 +3014,9 @@ async fn enqueue_service_commands(
                 attributes: entity.attributes.clone(),
                 context: call.context.clone(),
             };
-            if let (Some(handle), Some(descriptor)) = (
-                entity.button_handle.as_ref(),
-                entity.button_descriptor.as_ref(),
-            ) {
+            if let Some(SharedMqttEntity::Button { handle, descriptor }) =
+                entity.shared_entity.as_ref()
+            {
                 let handler = MqttButtonPressPublisher {
                     tx,
                     admission: command_admission,
@@ -2629,11 +3068,12 @@ async fn enqueue_service_commands(
             }
         }
     } else {
-        let pending = targets
+        let chains = targets
             .into_iter()
-            .flat_map(|(_, commands)| commands)
+            .map(|(_, commands)| commands)
+            .filter(|commands| !commands.is_empty())
             .collect::<Vec<_>>();
-        let replies = queue_command_batch(tx, command_admission, pending).await?;
+        let replies = queue_command_chains(tx, command_admission, chains).await?;
         drop(guard);
         changed_states.extend(await_command_replies(replies).await?);
     }
@@ -2720,12 +3160,16 @@ fn take_button_state_change(
     None
 }
 
-async fn queue_command_batch(
+async fn queue_command_chains(
     tx: &mpsc::Sender<CommandRequest>,
     admission: &AsyncRwLock<bool>,
-    commands: Vec<Command>,
+    chains: Vec<Vec<Command>>,
 ) -> Result<Vec<oneshot::Receiver<Result<Vec<State>>>>> {
-    if commands.is_empty() {
+    let chains = chains
+        .into_iter()
+        .filter(|commands| !commands.is_empty())
+        .collect::<Vec<_>>();
+    if chains.is_empty() {
         return Ok(Vec::new());
     }
     let accepting = admission.read().await;
@@ -2733,7 +3177,7 @@ async fn queue_command_batch(
         return Err(Error::Service("MQTT connection is shutting down".into()));
     }
     let mut permits = tx
-        .try_reserve_many(commands.len())
+        .try_reserve_many(chains.len())
         .map_err(|error| match error {
             mpsc::error::TrySendError::Full(()) => {
                 Error::Service("MQTT command queue is full".into())
@@ -2742,20 +3186,40 @@ async fn queue_command_batch(
                 Error::Service("MQTT connection is shutting down".into())
             }
         })?;
-    let mut replies = Vec::with_capacity(commands.len());
-    for command in commands {
+    let mut replies = Vec::with_capacity(chains.len());
+    for commands in chains {
+        let mut commands = commands.into_iter();
+        let command = commands
+            .next()
+            .expect("empty MQTT command chains were filtered above");
+        let remaining_commands = commands.collect();
         let (reply_tx, reply_rx) = oneshot::channel();
         permits
             .next()
             .expect("reserved MQTT command permit count matches the batch")
             .send(CommandRequest {
                 command,
+                remaining_commands,
+                changed_states: Vec::new(),
                 reply: reply_tx,
             });
         replies.push(reply_rx);
     }
     drop(accepting);
     Ok(replies)
+}
+
+async fn queue_command_batch(
+    tx: &mpsc::Sender<CommandRequest>,
+    admission: &AsyncRwLock<bool>,
+    commands: Vec<Command>,
+) -> Result<Vec<oneshot::Receiver<Result<Vec<State>>>>> {
+    queue_command_chains(
+        tx,
+        admission,
+        commands.into_iter().map(|command| vec![command]).collect(),
+    )
+    .await
 }
 
 async fn send_command_and_wait(
@@ -2789,6 +3253,10 @@ async fn await_command_replies(
     first_error.map_or(Ok(changed_states), Err)
 }
 
+fn light_has_unmodeled_service_fields(call: &ServiceCall) -> bool {
+    call.data.keys().any(|key| key != "entity_id")
+}
+
 fn build_entity_commands(
     runtime: &Runtime,
     call: &ServiceCall,
@@ -2803,14 +3271,124 @@ fn build_entity_commands(
         .as_ref()
         .map(|state| state.state.as_str())
         .unwrap_or("unknown");
+    let current_available = current
+        .as_ref()
+        .is_none_or(|state| state.state != "unavailable");
+    let current_attributes = current
+        .as_ref()
+        .map(|state| state.attributes.clone())
+        .unwrap_or_else(|| entity.attributes.clone());
+    let normalized_light = match entity.shared_entity.as_ref() {
+        Some(SharedMqttEntity::Light { descriptor, .. })
+            if !(config_string(&entity.platform_config, "schema", "basic") == "basic"
+                && entity.command_template.is_some()
+                && light_has_unmodeled_service_fields(call)) =>
+        {
+            let snapshot = light_snapshot(
+                entity,
+                descriptor,
+                Some(current_state),
+                current_available,
+                current_attributes.clone(),
+                current
+                    .as_ref()
+                    .map(|state| state.context.clone())
+                    .unwrap_or_default(),
+            )?;
+            let request = LightCommand::parse_service_call(call)
+                .map_err(|error| Error::Service(error.to_string()))?;
+            Some(
+                request
+                    .normalize(descriptor, &snapshot)
+                    .map_err(|error| Error::Service(error.to_string()))?,
+            )
+        }
+        _ => None,
+    };
+    let cover_action = match entity.shared_entity.as_ref() {
+        Some(SharedMqttEntity::Cover {
+            descriptor,
+            toggle_state,
+            ..
+        }) => {
+            let snapshot = cover_snapshot(
+                entity,
+                Some(current_state),
+                current_available,
+                current_attributes.clone(),
+                current
+                    .as_ref()
+                    .map(|state| state.context.clone())
+                    .unwrap_or_default(),
+            )?;
+            let command = CoverCommand::parse_service_call(call)
+                .map_err(|error| Error::Service(error.to_string()))?;
+            Some(
+                command
+                    .resolve(
+                        descriptor,
+                        &snapshot,
+                        &mut toggle_state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner),
+                    )
+                    .map_err(|error| Error::Service(error.to_string()))?,
+            )
+        }
+        _ => None,
+    };
+    let fan_plan = match entity.shared_entity.as_ref() {
+        Some(SharedMqttEntity::Fan { descriptor, .. }) => {
+            let snapshot = fan_snapshot(
+                entity,
+                Some(current_state),
+                current_available,
+                current_attributes,
+                current
+                    .as_ref()
+                    .map(|state| state.context.clone())
+                    .unwrap_or_default(),
+            )?;
+            let request = FanCommand::parse_service_call(call)
+                .map_err(|error| Error::Service(error.to_string()))?;
+            Some(
+                request
+                    .command
+                    .resolve(descriptor, &snapshot)
+                    .map_err(|error| Error::Service(error.to_string()))?,
+            )
+        }
+        _ => None,
+    };
+    if let Some(plan) = fan_plan {
+        return fan_effect_commands(runtime, call, entity, templates, plan.effects);
+    }
+    let service = match cover_action.as_ref() {
+        Some(CoverAction::Open { .. }) => "open_cover",
+        Some(CoverAction::Close { .. }) => "close_cover",
+        Some(CoverAction::Stop) => "stop_cover",
+        Some(CoverAction::SetPosition { .. }) => "set_cover_position",
+        Some(CoverAction::OpenTilt) => "open_cover_tilt",
+        Some(CoverAction::CloseTilt) => "close_cover_tilt",
+        Some(CoverAction::StopTilt) => "stop_cover_tilt",
+        Some(CoverAction::SetTiltPosition { .. }) => "set_cover_tilt_position",
+        None => service,
+    };
     let mut output = Vec::new();
     match (platform, service) {
         ("switch" | "light", "turn_on" | "turn_off" | "toggle") => {
             if platform == "light"
                 && config_string(&entity.platform_config, "schema", "basic") == "json"
             {
-                let requested_state = requested_on_off(current_state, service);
-                let (payload, attrs) = json_light_command(entity, call, requested_state)?;
+                let (payload, attrs, requested_state) =
+                    if let Some(command) = normalized_light.as_ref() {
+                        let (payload, attrs) = normalized_json_light_command(entity, command)?;
+                        (payload, attrs, command.action == LightAction::On)
+                    } else {
+                        let requested_state = requested_on_off(current_state, service);
+                        let (payload, attrs) = json_light_command(entity, call, requested_state)?;
+                        (payload, attrs, requested_state)
+                    };
                 output.push(make_command(
                     runtime,
                     entity,
@@ -2833,6 +3411,8 @@ fn build_entity_commands(
                         _ => None,
                     };
                     command.resolve(is_on).is_on()
+                } else if let Some(command) = normalized_light.as_ref() {
+                    command.action == LightAction::On
                 } else {
                     requested_on_off(current_state, service)
                 };
@@ -2868,10 +3448,16 @@ fn build_entity_commands(
             }
         }
         ("cover", "open_cover" | "close_cover" | "stop_cover") => {
-            check_service_options(call, &[])?;
-            let (payload_key, fallback, state) = match service {
-                "open_cover" => ("payload_open", "OPEN", Some("open")),
-                "close_cover" => ("payload_close", "CLOSE", Some("closed")),
+            if cover_action.is_none() {
+                check_service_options(call, &[])?;
+            }
+            let (payload_key, fallback, state) = match cover_action.as_ref() {
+                Some(CoverAction::Open { .. }) | None if service == "open_cover" => {
+                    ("payload_open", "OPEN", Some("open"))
+                }
+                Some(CoverAction::Close { .. }) | None if service == "close_cover" => {
+                    ("payload_close", "CLOSE", Some("closed"))
+                }
                 _ => ("payload_stop", "STOP", Some("stopped")),
             };
             let payload = config_string(&entity.platform_config, payload_key, fallback).to_owned();
@@ -2890,8 +3476,13 @@ fn build_entity_commands(
             )?);
         }
         ("cover", "set_cover_position") => {
-            check_service_options(call, &["position"])?;
-            let percent = numeric_arg(call, "position", 0.0, 100.0)?;
+            if cover_action.is_none() {
+                check_service_options(call, &["position"])?;
+            }
+            let percent = match cover_action.as_ref() {
+                Some(CoverAction::SetPosition { position, .. }) => f64::from(position.get()),
+                _ => numeric_arg(call, "position", 0.0, 100.0)?,
+            };
             let closed = config_number(&entity.platform_config, "position_closed", 0.0);
             let open = config_number(&entity.platform_config, "position_open", 100.0);
             let ranged = (closed + (open - closed) * percent / 100.0).round();
@@ -2930,11 +3521,17 @@ fn build_entity_commands(
             "cover",
             "open_cover_tilt" | "close_cover_tilt" | "stop_cover_tilt" | "set_cover_tilt_position",
         ) => {
-            let setting_position = service == "set_cover_tilt_position";
-            if setting_position {
-                check_service_options(call, &["tilt_position"])?;
-            } else {
-                check_service_options(call, &[])?;
+            let setting_position = matches!(
+                cover_action.as_ref(),
+                Some(CoverAction::SetTiltPosition { .. })
+            ) || (cover_action.is_none()
+                && service == "set_cover_tilt_position");
+            if cover_action.is_none() {
+                if setting_position {
+                    check_service_options(call, &["tilt_position"])?;
+                } else {
+                    check_service_options(call, &[])?;
+                }
             }
             let min = config_number(&entity.platform_config, "tilt_min", 0.0);
             let max = config_number(&entity.platform_config, "tilt_max", 100.0);
@@ -2949,7 +3546,12 @@ fn build_entity_commands(
                 }
                 "stop_cover_tilt" => (0.0, 0.0),
                 _ => {
-                    let percent = numeric_arg(call, "tilt_position", 0.0, 100.0)?;
+                    let percent = match cover_action.as_ref() {
+                        Some(CoverAction::SetTiltPosition { position }) => {
+                            f64::from(position.get())
+                        }
+                        _ => numeric_arg(call, "tilt_position", 0.0, 100.0)?,
+                    };
                     (min + (max - min) * percent / 100.0, percent)
                 }
             };
@@ -3025,7 +3627,7 @@ fn build_entity_commands(
             if on {
                 if let Some(value) = call.data.get("percentage") {
                     output.push(fan_percentage_command(
-                        runtime, call, entity, templates, value,
+                        runtime, call, entity, templates, value, false,
                     )?);
                 }
                 if let Some(value) = call.data.get("preset_mode") {
@@ -3040,7 +3642,7 @@ fn build_entity_commands(
                 .get("percentage")
                 .ok_or_else(|| Error::Service("fan.set_percentage requires percentage".into()))?;
             output.push(fan_percentage_command(
-                runtime, call, entity, templates, value,
+                runtime, call, entity, templates, value, false,
             )?);
         }
         ("fan", "set_preset_mode") => {
@@ -3349,13 +3951,13 @@ fn make_command(
     }
     let optimistic = (allow_optimistic && entity.optimistic).then(|| {
         let entity_id = mqtt_entity_id(entity);
-        let (state, attributes) = runtime
+        let attributes = runtime
             .get_state(&entity_id)
-            .map(|state| (state.state, state.attributes))
-            .unwrap_or_else(|| ("unknown".into(), entity.attributes.clone()));
+            .map(|state| state.attributes)
+            .unwrap_or_else(|| entity.attributes.clone());
         OptimisticState {
             discovery_topic: entity.metadata.discovery_topic.clone(),
-            state: optimistic_state.unwrap_or(state),
+            state: optimistic_state,
             attributes,
             optimistic_updates,
             context: call.context.clone(),
@@ -3372,23 +3974,202 @@ fn make_command(
     })
 }
 
+fn fan_effect_commands(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    effects: Vec<FanEffect>,
+) -> Result<Vec<Command>> {
+    let mut commands = Vec::new();
+    for effect in effects {
+        match effect {
+            FanEffect::TurnOn {
+                percentage,
+                preset_mode,
+            } => {
+                commands.push(fan_power_command(runtime, call, entity, templates, true)?);
+                if let Some(percentage) = percentage.filter(|value| *value != 0) {
+                    commands.push(fan_percentage_command(
+                        runtime,
+                        call,
+                        entity,
+                        templates,
+                        &json!(percentage),
+                        true,
+                    )?);
+                }
+                if let Some(preset_mode) = preset_mode.filter(|value| !value.is_empty()) {
+                    commands.push(fan_preset_command(
+                        runtime,
+                        call,
+                        entity,
+                        templates,
+                        &Value::String(preset_mode),
+                    )?);
+                }
+            }
+            FanEffect::TurnOff => {
+                commands.push(fan_power_command(runtime, call, entity, templates, false)?);
+            }
+            FanEffect::SetPercentage { percentage } => {
+                commands.push(fan_percentage_command(
+                    runtime,
+                    call,
+                    entity,
+                    templates,
+                    &json!(percentage),
+                    true,
+                )?);
+            }
+            FanEffect::SetPresetMode { preset_mode } => {
+                commands.push(fan_preset_command(
+                    runtime,
+                    call,
+                    entity,
+                    templates,
+                    &Value::String(preset_mode),
+                )?);
+            }
+            FanEffect::Oscillate { oscillating } => commands.push(fan_oscillation_command(
+                runtime,
+                call,
+                entity,
+                templates,
+                oscillating,
+            )?),
+            FanEffect::SetDirection { direction } => {
+                let direction = direction.ok_or_else(|| {
+                    Error::Service("MQTT fan set_direction requires a direction argument".into())
+                })?;
+                commands.push(fan_direction_command(
+                    runtime, call, entity, templates, &direction,
+                )?);
+            }
+        }
+    }
+    Ok(commands)
+}
+
+fn fan_power_command(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    on: bool,
+) -> Result<Command> {
+    let payload = render_command(
+        call,
+        entity,
+        templates,
+        "command_template",
+        if on { "ON" } else { "OFF" },
+    )?;
+    make_command(
+        runtime,
+        entity,
+        call,
+        entity
+            .command_topic
+            .clone()
+            .ok_or_else(|| Error::Service("MQTT fan has no command_topic".into()))?,
+        payload,
+        Some(if on { "on" } else { "off" }.into()),
+        Map::new(),
+        true,
+    )
+}
+
+fn fan_oscillation_command(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    on: bool,
+) -> Result<Command> {
+    let payload_key = if on {
+        "payload_oscillation_on"
+    } else {
+        "payload_oscillation_off"
+    };
+    let fallback = if on { "oscillate_on" } else { "oscillate_off" };
+    let payload = render_command(
+        call,
+        entity,
+        templates,
+        "oscillation_command_template",
+        config_string(&entity.platform_config, payload_key, fallback),
+    )?;
+    let mut attributes = Map::new();
+    attributes.insert("oscillating".into(), Value::Bool(on));
+    make_command(
+        runtime,
+        entity,
+        call,
+        entity
+            .extra_command_topics
+            .get("oscillation_command_topic")
+            .cloned()
+            .ok_or_else(|| Error::Service("MQTT fan has no oscillation_command_topic".into()))?,
+        payload,
+        None,
+        attributes,
+        true,
+    )
+}
+
+fn fan_direction_command(
+    runtime: &Runtime,
+    call: &ServiceCall,
+    entity: &DiscoveredEntity,
+    templates: &TemplateEngine,
+    direction: &str,
+) -> Result<Command> {
+    let payload = render_command(
+        call,
+        entity,
+        templates,
+        "direction_command_template",
+        direction,
+    )?;
+    let mut attributes = Map::new();
+    attributes.insert("direction".into(), Value::String(direction.into()));
+    make_command(
+        runtime,
+        entity,
+        call,
+        entity
+            .extra_command_topics
+            .get("direction_command_topic")
+            .cloned()
+            .ok_or_else(|| Error::Service("MQTT fan has no direction_command_topic".into()))?,
+        payload,
+        None,
+        attributes,
+        true,
+    )
+}
+
 fn fan_percentage_command(
     runtime: &Runtime,
     call: &ServiceCall,
     entity: &DiscoveredEntity,
     templates: &TemplateEngine,
     value: &Value,
+    allow_zero: bool,
 ) -> Result<Command> {
     let percent =
         number_value(value, "fan percentage").map_err(|error| Error::Service(error.to_string()))?;
-    if !(1.0..=100.0).contains(&percent) {
+    if !(if allow_zero { 0.0..=100.0 } else { 1.0..=100.0 }).contains(&percent) {
         return Err(Error::Service(
             "fan percentage must be between 1 and 100".into(),
         ));
     }
     let min = config_number(&entity.platform_config, "speed_range_min", 1.0);
     let max = config_number(&entity.platform_config, "speed_range_max", 100.0);
-    let ranged = (min + (max - min) * percent / 100.0).ceil();
+    let ranged = hass_fan::percentage_to_ranged_value((min, max), percent)
+        .map_err(|error| Error::Service(error.to_string()))?
+        .ceil();
     let payload = render_typed_command(
         call,
         entity,
@@ -3783,6 +4564,118 @@ fn json_light_command(
     Ok((Value::Object(message).to_string(), attrs))
 }
 
+fn normalized_json_light_command(
+    entity: &DiscoveredEntity,
+    command: &NormalizedLightCommand,
+) -> Result<(String, Map<String, Value>)> {
+    let on = command.action == LightAction::On;
+    let params = &command.params;
+    let mut message = Map::new();
+    message.insert(
+        "state".into(),
+        Value::String(if on { "ON" } else { "OFF" }.into()),
+    );
+    let mut attributes = Map::new();
+
+    if let Some(brightness) = optional_u8_attribute(params, "brightness")? {
+        let scale = config_number(&entity.platform_config, "brightness_scale", 255.0);
+        message.insert(
+            "brightness".into(),
+            json!((f64::from(brightness) / 255.0 * scale).round().max(1.0) as u32),
+        );
+        attributes.insert("brightness".into(), json!(brightness));
+    }
+    if let Some(kelvin) = optional_u32_attribute(params, "color_temp_kelvin")? {
+        let min = config_u32(&entity.platform_config, "min_kelvin", 1500);
+        let max = config_u32(&entity.platform_config, "max_kelvin", 9000);
+        if kelvin < min || kelvin > max {
+            return Err(Error::Service(
+                "light color temperature is outside configured Kelvin bounds".into(),
+            ));
+        }
+        let raw = if config_bool(&entity.platform_config, "color_temp_kelvin", false) {
+            f64::from(kelvin)
+        } else {
+            1_000_000.0 / f64::from(kelvin)
+        };
+        message.insert("color_temp".into(), json!(raw.round() as u32));
+        attributes.insert("color_temp_kelvin".into(), json!(kelvin));
+        attributes.insert("color_mode".into(), json!("color_temp"));
+    }
+    if let Some(hs) = optional_float_array::<2>(params, "hs_color")? {
+        message.insert("color".into(), json!({"h": hs[0], "s": hs[1]}));
+        attributes.insert("hs_color".into(), json!(hs));
+        attributes.insert("color_mode".into(), json!("hs"));
+    }
+    if let Some(rgb) = optional_byte_array::<3>(params, "rgb_color")? {
+        message.insert(
+            "color".into(),
+            json!({"r": rgb[0], "g": rgb[1], "b": rgb[2]}),
+        );
+        attributes.insert("rgb_color".into(), json!(rgb));
+        attributes.insert("color_mode".into(), json!("rgb"));
+    }
+    if let Some(rgbw) = optional_byte_array::<4>(params, "rgbw_color")? {
+        message.insert(
+            "color".into(),
+            json!({"r": rgbw[0], "g": rgbw[1], "b": rgbw[2], "w": rgbw[3]}),
+        );
+        attributes.insert("rgbw_color".into(), json!(rgbw));
+        attributes.insert("color_mode".into(), json!("rgbw"));
+    }
+    if let Some(rgbww) = optional_byte_array::<5>(params, "rgbww_color")? {
+        message.insert(
+            "color".into(),
+            json!({"r": rgbww[0], "g": rgbww[1], "b": rgbww[2], "c": rgbww[3], "w": rgbww[4]}),
+        );
+        attributes.insert("rgbww_color".into(), json!(rgbww));
+        attributes.insert("color_mode".into(), json!("rgbww"));
+    }
+    if let Some(xy) = optional_float_array::<2>(params, "xy_color")? {
+        message.insert("color".into(), json!({"x": xy[0], "y": xy[1]}));
+        attributes.insert("xy_color".into(), json!(xy));
+        attributes.insert("color_mode".into(), json!("xy"));
+    }
+    if let Some(white) = optional_u8_attribute(params, "white")? {
+        let scale = config_number(&entity.platform_config, "white_scale", 255.0);
+        message.insert(
+            "white".into(),
+            json!((f64::from(white) / 255.0 * scale).round().clamp(0.0, scale) as u32),
+        );
+        attributes.insert("brightness".into(), json!(white));
+        attributes.insert("color_mode".into(), json!("white"));
+    }
+    if let Some(effect) = params.get("effect").and_then(Value::as_str) {
+        let effects = config_strings(&entity.platform_config, "effect_list");
+        if !effects.is_empty() && !effects.iter().any(|known| known == effect) {
+            return Err(Error::Service(
+                "light effect is not in the configured effect_list".into(),
+            ));
+        }
+        message.insert("effect".into(), Value::String(effect.to_owned()));
+        attributes.insert("effect".into(), Value::String(effect.to_owned()));
+    }
+    if let Some(flash) = params.get("flash").and_then(Value::as_str) {
+        let (key, fallback) = match flash {
+            "short" => ("flash_time_short", 2.0),
+            "long" => ("flash_time_long", 10.0),
+            _ => {
+                return Err(Error::Service("light flash must be short or long".into()));
+            }
+        };
+        message.insert(
+            "flash".into(),
+            json!(config_number(&entity.platform_config, key, fallback) as u32),
+        );
+    }
+    if let Some(transition) = params.get("transition") {
+        let seconds = number_value(transition, "transition")
+            .map_err(|error| Error::Service(error.to_string()))?;
+        message.insert("transition".into(), json!(seconds));
+    }
+    Ok((Value::Object(message).to_string(), attributes))
+}
+
 fn command_variables(call: &ServiceCall, value: &str, entity_id: &str) -> Map<String, Value> {
     let mut variables = Map::new();
     variables.insert("value".into(), Value::String(value.to_owned()));
@@ -3927,6 +4820,15 @@ fn config_number(config: &Map<String, Value>, key: &str, default: f64) -> f64 {
         .get(key)
         .and_then(Value::as_f64)
         .filter(|value| value.is_finite())
+        .unwrap_or(default)
+}
+
+fn config_u32(config: &Map<String, Value>, key: &str, default: u32) -> u32 {
+    config
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite() && *value >= 0.0 && value.fract() == 0.0)
+        .and_then(|value| u32::try_from(value as u64).ok())
         .unwrap_or(default)
 }
 
@@ -4369,19 +5271,16 @@ fn update_reported_state(
                     let speed = number_value(&value, "fan percentage")?;
                     let min = config_number(&entity.platform_config, "speed_range_min", 1.0);
                     let max = config_number(&entity.platform_config, "speed_range_max", 100.0);
-                    if !(min..=max).contains(&speed) {
+                    let percentage = hass_fan::ranged_value_to_percentage((min, max), speed)
+                        .map_err(|error| Error::InvalidInput(error.to_string()))?;
+                    if !(0..=100).contains(&percentage) {
                         return Err(Error::InvalidInput(
                             "MQTT fan percentage is outside its configured speed range".into(),
                         ));
                     }
-                    current.attributes.insert(
-                        "percentage".into(),
-                        json!(
-                            ((speed - min) / (max - min) * 100.0)
-                                .round()
-                                .clamp(0.0, 100.0) as u8
-                        ),
-                    );
+                    current
+                        .attributes
+                        .insert("percentage".into(), json!(percentage));
                 }
             }
             "preset_mode_state_topic" => {
@@ -4546,10 +5445,388 @@ fn set_runtime_state(
 }
 
 fn entity_lifecycle_handle(entity: &DiscoveredEntity) -> Option<&EntityHandle> {
-    entity
-        .switch_handle
-        .as_ref()
-        .or(entity.button_handle.as_ref())
+    entity.shared_entity.as_ref().map(SharedMqttEntity::handle)
+}
+
+fn shared_entity_projection(
+    entity: &DiscoveredEntity,
+    state: Option<&str>,
+    available: bool,
+    attributes: Map<String, Value>,
+    context: Context,
+) -> Result<Option<(EntityPublication, EntitySnapshot)>> {
+    let Some(shared) = entity.shared_entity.as_ref() else {
+        return Ok(None);
+    };
+    match shared {
+        SharedMqttEntity::Switch(_) => {
+            let is_on = match state {
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                _ => None,
+            };
+            let snapshot = SwitchSnapshot::new(is_on)
+                .with_available(available)
+                .with_assumed_state(entity.optimistic)
+                .with_extra_attributes(attributes)
+                .with_context(context);
+            let entity_snapshot = snapshot.entity_snapshot();
+            Ok(Some((snapshot.publication(), entity_snapshot)))
+        }
+        SharedMqttEntity::Light { descriptor, .. } => {
+            let snapshot =
+                light_snapshot(entity, descriptor, state, available, attributes, context)?;
+            let projection = snapshot
+                .project(descriptor)
+                .map_err(|error| Error::InvalidInput(error.to_string()))?;
+            Ok(Some((projection.publication, projection.snapshot)))
+        }
+        SharedMqttEntity::Cover {
+            descriptor,
+            toggle_state,
+            ..
+        } => {
+            let snapshot = cover_snapshot(entity, state, available, attributes, context)?;
+            if available {
+                toggle_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .observe(&snapshot);
+            }
+            let entity_snapshot = snapshot.entity_snapshot(descriptor);
+            let publication = snapshot.publication(descriptor);
+            Ok(Some((publication, entity_snapshot)))
+        }
+        SharedMqttEntity::Fan { descriptor, .. } => {
+            let snapshot = fan_snapshot(entity, state, available, attributes, context)?;
+            let publication = descriptor
+                .publication(&snapshot)
+                .map_err(|error| Error::InvalidInput(error.to_string()))?;
+            let entity_snapshot = publication.snapshot.clone();
+            Ok(Some((publication, entity_snapshot)))
+        }
+        SharedMqttEntity::Button { .. } => Ok(None),
+    }
+}
+
+fn light_snapshot(
+    _entity: &DiscoveredEntity,
+    descriptor: &LightDescriptor,
+    state: Option<&str>,
+    available: bool,
+    attributes: Map<String, Value>,
+    context: Context,
+) -> Result<LightSnapshot> {
+    let is_on = match state {
+        Some("on") => Some(true),
+        Some("off") => Some(false),
+        _ => None,
+    };
+    let reported_mode = match attributes.get(hass_light::attr::COLOR_MODE) {
+        Some(Value::String(value)) => Some(
+            value
+                .parse::<LightColorMode>()
+                .map_err(|error| Error::InvalidInput(error.to_string()))?,
+        ),
+        Some(Value::Null) | None => None,
+        Some(_) => {
+            return Err(Error::InvalidInput(
+                "MQTT light color_mode must be a string or null".into(),
+            ));
+        }
+    };
+    let color_mode = reported_mode.or_else(|| {
+        let modes = descriptor.supported_color_modes()?;
+        (is_on == Some(true) && modes.len() == 1).then_some(modes[0])
+    });
+    let mut extra = attributes.clone();
+    for key in [
+        "friendly_name",
+        "unique_id",
+        "platform",
+        "optimistic",
+        hass_light::attr::SUPPORTED_COLOR_MODES,
+        hass_light::attr::SUPPORTED_FEATURES,
+        hass_light::attr::MIN_COLOR_TEMP_KELVIN,
+        hass_light::attr::MAX_COLOR_TEMP_KELVIN,
+        hass_light::attr::EFFECT_LIST,
+        hass_light::attr::COLOR_MODE,
+        hass_light::attr::BRIGHTNESS,
+        hass_light::attr::COLOR_TEMP_KELVIN,
+        hass_light::attr::HS_COLOR,
+        hass_light::attr::RGB_COLOR,
+        hass_light::attr::RGBW_COLOR,
+        hass_light::attr::RGBWW_COLOR,
+        hass_light::attr::XY_COLOR,
+        hass_light::attr::EFFECT,
+    ] {
+        extra.remove(key);
+    }
+    let snapshot = LightSnapshot::new(is_on)
+        .with_available(available)
+        .with_brightness(optional_u8_attribute(
+            &attributes,
+            hass_light::attr::BRIGHTNESS,
+        )?)
+        .with_color_mode(color_mode)
+        .with_color_temp_kelvin(optional_u32_attribute(
+            &attributes,
+            hass_light::attr::COLOR_TEMP_KELVIN,
+        )?)
+        .with_hs_color(optional_float_array::<2>(
+            &attributes,
+            hass_light::attr::HS_COLOR,
+        )?)
+        .with_xy_color(optional_float_array::<2>(
+            &attributes,
+            hass_light::attr::XY_COLOR,
+        )?)
+        .with_rgb_color(optional_byte_array::<3>(
+            &attributes,
+            hass_light::attr::RGB_COLOR,
+        )?)
+        .with_rgbw_color(optional_byte_array::<4>(
+            &attributes,
+            hass_light::attr::RGBW_COLOR,
+        )?)
+        .with_rgbww_color(optional_byte_array::<5>(
+            &attributes,
+            hass_light::attr::RGBWW_COLOR,
+        )?)
+        .with_effect(
+            attributes
+                .get(hass_light::attr::EFFECT)
+                .and_then(Value::as_str),
+        )
+        .with_extra_attributes(std::mem::take(&mut extra))
+        .with_context(context);
+    Ok(snapshot)
+}
+
+fn cover_snapshot(
+    _entity: &DiscoveredEntity,
+    state: Option<&str>,
+    available: bool,
+    attributes: Map<String, Value>,
+    context: Context,
+) -> Result<CoverSnapshot> {
+    let (is_closed, is_opening, is_closing) = match state {
+        Some("closed") => (Some(true), None, None),
+        Some("open") => (Some(false), None, None),
+        Some("opening") => (None, Some(true), None),
+        Some("closing") => (None, None, Some(true)),
+        _ => (None, None, None),
+    };
+    let current_position = optional_i64_attribute(&attributes, hass_cover::ATTR_CURRENT_POSITION)?;
+    let current_tilt_position =
+        optional_i64_attribute(&attributes, hass_cover::ATTR_CURRENT_TILT_POSITION)?;
+    let supported_speeds = optional_string_array(&attributes, hass_cover::ATTR_SUPPORTED_SPEEDS)?;
+    let mut extra = attributes;
+    for key in [
+        hass_cover::ATTR_IS_CLOSED,
+        hass_cover::ATTR_CURRENT_POSITION,
+        hass_cover::ATTR_CURRENT_TILT_POSITION,
+        hass_cover::ATTR_SUPPORTED_SPEEDS,
+        hass_cover::ATTR_SUPPORTED_FEATURES,
+    ] {
+        extra.remove(key);
+    }
+    Ok(CoverSnapshot::new(is_closed)
+        .with_is_opening(is_opening)
+        .with_is_closing(is_closing)
+        .with_current_position(current_position)
+        .with_current_tilt_position(current_tilt_position)
+        .with_supported_speeds(supported_speeds)
+        .with_available(available)
+        .with_extra_attributes(extra)
+        .with_context(context))
+}
+
+fn fan_snapshot(
+    _entity: &DiscoveredEntity,
+    state: Option<&str>,
+    available: bool,
+    attributes: Map<String, Value>,
+    context: Context,
+) -> Result<FanSnapshot> {
+    let percentage = optional_i64_attribute(&attributes, hass_fan::FAN_ATTR_PERCENTAGE)?;
+    let preset_mode = optional_string_attribute(&attributes, hass_fan::FAN_ATTR_PRESET_MODE)?;
+    let current_direction = optional_string_attribute(&attributes, hass_fan::FAN_ATTR_DIRECTION)?;
+    let oscillating = optional_bool_attribute(&attributes, hass_fan::FAN_ATTR_OSCILLATING)?;
+    let mut extra = attributes;
+    for key in [
+        hass_fan::FAN_ATTR_PERCENTAGE,
+        hass_fan::FAN_ATTR_PERCENTAGE_STEP,
+        hass_fan::FAN_ATTR_PRESET_MODE,
+        hass_fan::FAN_ATTR_PRESET_MODES,
+        hass_fan::FAN_ATTR_DIRECTION,
+        hass_fan::FAN_ATTR_OSCILLATING,
+        "supported_features",
+    ] {
+        extra.remove(key);
+    }
+    let mut snapshot = FanSnapshot::new()
+        .with_percentage(percentage)
+        .with_preset_mode(preset_mode)
+        .with_current_direction(current_direction)
+        .with_oscillating(oscillating)
+        .with_available(available)
+        .with_context(context);
+    snapshot = snapshot.with_reported_state(match state {
+        Some("on") => FanState::On,
+        Some("off") => FanState::Off,
+        _ => FanState::Unknown,
+    });
+    for (key, value) in extra {
+        snapshot = snapshot.with_extra_attribute(key, Some(value));
+    }
+    Ok(snapshot)
+}
+
+fn optional_float_array<const N: usize>(
+    attributes: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<[f64; N]>> {
+    let Some(value) = attributes.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let values = value.as_array().ok_or_else(|| {
+        Error::InvalidInput(format!("MQTT light {key} must be a {N}-value array"))
+    })?;
+    if values.len() != N {
+        return Err(Error::InvalidInput(format!(
+            "MQTT light {key} must have {N} values"
+        )));
+    }
+    let mut output = [0.0; N];
+    for (index, value) in values.iter().enumerate() {
+        output[index] = value
+            .as_f64()
+            .filter(|component| component.is_finite())
+            .ok_or_else(|| Error::InvalidInput(format!("MQTT light {key} must be numeric")))?;
+    }
+    Ok(Some(output))
+}
+
+fn optional_byte_array<const N: usize>(
+    attributes: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<[u8; N]>> {
+    let Some(value) = attributes.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let values = value.as_array().ok_or_else(|| {
+        Error::InvalidInput(format!("MQTT light {key} must be a {N}-value array"))
+    })?;
+    if values.len() != N {
+        return Err(Error::InvalidInput(format!(
+            "MQTT light {key} must have {N} values"
+        )));
+    }
+    let mut output = [0; N];
+    for (index, value) in values.iter().enumerate() {
+        let number = value
+            .as_u64()
+            .and_then(|number| u8::try_from(number).ok())
+            .ok_or_else(|| Error::InvalidInput(format!("MQTT light {key} values must be bytes")))?;
+        output[index] = number;
+    }
+    Ok(Some(output))
+}
+
+fn optional_u8_attribute(attributes: &Map<String, Value>, key: &str) -> Result<Option<u8>> {
+    attributes
+        .get(key)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|number| u8::try_from(number).ok())
+                .ok_or_else(|| Error::InvalidInput(format!("MQTT attribute {key} must be a byte")))
+        })
+        .transpose()
+}
+
+fn optional_u32_attribute(attributes: &Map<String, Value>, key: &str) -> Result<Option<u32>> {
+    attributes
+        .get(key)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_u64()
+                .and_then(|number| u32::try_from(number).ok())
+                .ok_or_else(|| Error::InvalidInput(format!("MQTT attribute {key} must be a u32")))
+        })
+        .transpose()
+}
+
+fn optional_i64_attribute(attributes: &Map<String, Value>, key: &str) -> Result<Option<i64>> {
+    attributes
+        .get(key)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_u64().and_then(|number| i64::try_from(number).ok()))
+                .ok_or_else(|| {
+                    Error::InvalidInput(format!("MQTT attribute {key} must be an integer"))
+                })
+        })
+        .transpose()
+}
+
+fn optional_string_attribute(attributes: &Map<String, Value>, key: &str) -> Result<Option<String>> {
+    attributes
+        .get(key)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                Error::InvalidInput(format!("MQTT attribute {key} must be a string"))
+            })
+        })
+        .transpose()
+}
+
+fn optional_string_array(
+    attributes: &Map<String, Value>,
+    key: &str,
+) -> Result<Option<Vec<String>>> {
+    let Some(value) = attributes.get(key) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let values = value
+        .as_array()
+        .ok_or_else(|| Error::InvalidInput(format!("MQTT attribute {key} must be a list")))?;
+    values
+        .iter()
+        .map(|value| {
+            value.as_str().map(str::to_owned).ok_or_else(|| {
+                Error::InvalidInput(format!("MQTT attribute {key} must contain strings"))
+            })
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+fn optional_bool_attribute(attributes: &Map<String, Value>, key: &str) -> Result<Option<bool>> {
+    attributes
+        .get(key)
+        .filter(|value| !value.is_null())
+        .map(|value| {
+            value.as_bool().ok_or_else(|| {
+                Error::InvalidInput(format!("MQTT attribute {key} must be a boolean"))
+            })
+        })
+        .transpose()
 }
 
 fn mqtt_entity_id(entity: &DiscoveredEntity) -> String {
@@ -4622,22 +5899,53 @@ fn publish_discovered_state(
     attributes: Map<String, Value>,
     context: Context,
 ) {
-    if entity.metadata.platform == "switch" {
-        let is_on = match state {
-            Some("on") => Some(true),
-            Some("off") => Some(false),
-            _ => None,
-        };
-        let snapshot = SwitchSnapshot::new(is_on)
-            .with_available(available)
-            .with_assumed_state(entity.optimistic)
-            .with_extra_attributes(attributes)
-            .with_context(context);
-        if let Some(handle) = entity.switch_handle.as_ref() {
+    match entity.shared_entity.as_ref() {
+        Some(SharedMqttEntity::Switch(handle)) => {
+            let is_on = match state {
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                _ => None,
+            };
+            let snapshot = SwitchSnapshot::new(is_on)
+                .with_available(available)
+                .with_assumed_state(entity.optimistic)
+                .with_extra_attributes(attributes)
+                .with_context(context);
             if let Err(error) = handle.publish_publication(snapshot.publication()) {
                 warn!(entity_id = %mqtt_entity_id(entity), error = %error, "failed to publish MQTT switch snapshot through the shared lifecycle");
             }
-        } else {
+        }
+        Some(SharedMqttEntity::Button { handle, descriptor }) => {
+            publish_button_state(
+                runtime, entity, handle, descriptor, state, available, attributes, context,
+            );
+        }
+        Some(SharedMqttEntity::Light { handle, .. })
+        | Some(SharedMqttEntity::Cover { handle, .. })
+        | Some(SharedMqttEntity::Fan { handle, .. }) => {
+            match shared_entity_projection(entity, state, available, attributes, context) {
+                Ok(Some((publication, _))) => {
+                    if let Err(error) = handle.publish_publication(publication) {
+                        warn!(entity_id = %mqtt_entity_id(entity), error = %error, "failed to publish MQTT snapshot through the shared lifecycle");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    warn!(entity_id = %mqtt_entity_id(entity), error = %error, "failed to project MQTT entity snapshot")
+                }
+            }
+        }
+        None if entity.metadata.platform == "switch" => {
+            let is_on = match state {
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                _ => None,
+            };
+            let snapshot = SwitchSnapshot::new(is_on)
+                .with_available(available)
+                .with_assumed_state(entity.optimistic)
+                .with_extra_attributes(attributes)
+                .with_context(context);
             let projected = snapshot.entity_snapshot();
             let state = if projected.available {
                 projected.state.as_deref().unwrap_or("unknown")
@@ -4654,69 +5962,77 @@ fn publish_discovered_state(
                 warn!(entity_id = entity.metadata.entity_id, error = %error, "failed to update runtime from MQTT switch");
             }
         }
-    } else if entity.metadata.platform == "button"
-        && let Some(handle) = entity.button_handle.as_ref()
+        _ if available => {
+            set_runtime_state(
+                runtime,
+                &entity.metadata.entity_id,
+                state.unwrap_or("unknown"),
+                attributes,
+            );
+        }
+        _ => {
+            set_runtime_state(
+                runtime,
+                &entity.metadata.entity_id,
+                "unavailable",
+                attributes,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn publish_button_state(
+    runtime: &Runtime,
+    entity: &DiscoveredEntity,
+    handle: &EntityHandle,
+    descriptor: &ButtonDescriptor,
+    state: Option<&str>,
+    available: bool,
+    attributes: Map<String, Value>,
+    context: Context,
+) {
+    let current = if state.is_none() {
+        runtime.get_state(&mqtt_entity_id(entity))
+    } else {
+        None
+    };
+    let remembered = entity
+        .button_last_value
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let restored_state = state
+        .map(str::to_owned)
+        .or_else(|| remembered.map(|value| value.state))
+        .or_else(|| current.as_ref().map(|state| state.state.clone()));
+    let publication_context = current
+        .as_ref()
+        .map(|state| state.context.clone())
+        .unwrap_or(context);
+    if let Some(state) = restored_state
+        .as_ref()
+        .filter(|state| state.as_str() != "unavailable")
     {
-        let current = if state.is_none() {
-            runtime.get_state(&mqtt_entity_id(entity))
-        } else {
-            None
-        };
-        let remembered = entity
+        *entity
             .button_last_value
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let restored_state = state
-            .map(str::to_owned)
-            .or_else(|| remembered.map(|value| value.state))
-            .or_else(|| current.as_ref().map(|state| state.state.clone()));
-        let publication_context = current
-            .as_ref()
-            .map(|state| state.context.clone())
-            .unwrap_or(context);
-        if let Some(state) = restored_state
-            .as_ref()
-            .filter(|state| state.as_str() != "unavailable")
-        {
-            *entity
-                .button_last_value
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(LastValue {
-                state: state.clone(),
-                attributes: attributes.clone(),
-                context: publication_context.clone(),
-            });
-        }
-        let snapshot = if available {
-            ButtonSnapshot::from_restored_state(restored_state.as_deref())
-                .unwrap_or_else(ButtonSnapshot::unknown)
-        } else {
-            ButtonSnapshot::unavailable()
-        }
-        .with_context(publication_context);
-        let publication = entity
-            .button_descriptor
-            .as_ref()
-            .expect("shared MQTT button has a descriptor")
-            .publication(snapshot);
-        if let Err(error) = handle.publish_publication(publication) {
-            warn!(entity_id = %mqtt_entity_id(entity), error = %error, "failed to publish MQTT button snapshot through the shared lifecycle");
-        }
-    } else if available {
-        set_runtime_state(
-            runtime,
-            &entity.metadata.entity_id,
-            state.unwrap_or("unknown"),
-            attributes,
-        );
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(LastValue {
+            state: state.clone(),
+            attributes: attributes.clone(),
+            context: publication_context.clone(),
+        });
+    }
+    let snapshot = if available {
+        ButtonSnapshot::from_restored_state(restored_state.as_deref())
+            .unwrap_or_else(ButtonSnapshot::unknown)
     } else {
-        set_runtime_state(
-            runtime,
-            &entity.metadata.entity_id,
-            "unavailable",
-            attributes,
-        );
+        ButtonSnapshot::unavailable()
+    }
+    .with_context(publication_context);
+    let publication = descriptor.publication(snapshot);
+    if let Err(error) = handle.publish_publication(publication) {
+        warn!(entity_id = %mqtt_entity_id(entity), error = %error, "failed to publish MQTT button snapshot through the shared lifecycle");
     }
 }
 
@@ -4871,9 +6187,9 @@ mod async_publish_tests {
     use tokio::sync::oneshot;
 
     use super::{
-        AvailabilityMode, Command, CommandRequest, DiscoveredEntity, MqttEntityMetadata,
-        OptimisticState, PendingPublish, PublishCompletionContext, complete_expired_publishes,
-        queue_publish_command,
+        AvailabilityMode, Command, CommandRequest, DiscoveredEntity, MqttConfig,
+        MqttEntityMetadata, OptimisticState, PendingPublish, PublishCompletionContext,
+        complete_expired_publishes, complete_publish, process_discovery, queue_publish_command,
     };
     use crate::Context;
 
@@ -4886,11 +6202,10 @@ mod async_publish_tests {
                 discovery_topic: discovery_topic.into(),
                 name: "Test switch".into(),
                 device: None,
+                entity_lifecycle_managed: false,
             },
-            switch_handle: None,
+            shared_entity: None,
             switch_device_class: None,
-            button_handle: None,
-            button_descriptor: None,
             button_device_class: None,
             button_last_value: Arc::new(Mutex::new(None)),
             state_topic: None,
@@ -4934,8 +6249,10 @@ mod async_publish_tests {
         let mut pending = VecDeque::from([PendingPublish {
             qos: QoS::AtLeastOnce,
             reply: Some(reply),
+            remaining_commands: VecDeque::new(),
+            changed_states: Vec::new(),
             optimistic: Some(OptimisticState {
-                state: "on".into(),
+                state: Some("on".into()),
                 discovery_topic: "homeassistant/switch/timeout/config".into(),
                 attributes: Map::new(),
                 optimistic_updates: Map::new(),
@@ -4952,12 +6269,14 @@ mod async_publish_tests {
         )]));
 
         let availability_status = HashMap::new();
+        let mut ready_continuations = VecDeque::new();
         let mut completion = PublishCompletionContext {
             runtime: &runtime,
             entities: &entities,
             connected: true,
             availability_status: &availability_status,
             last_values: &mut last_values,
+            ready_continuations: &mut ready_continuations,
         };
         complete_expired_publishes(&mut completion, &mut pending, &mut awaiting_ack, now);
 
@@ -4969,6 +6288,170 @@ mod async_publish_tests {
         assert!(pending[0].reply.is_none());
         assert!(pending[0].optimistic.is_none());
         assert!(pending[0].deadline.is_none());
+    }
+
+    #[tokio::test]
+    async fn callback_timeout_advances_one_continuation_and_late_ack_does_not_repeat_it() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        let (reply, _result) = oneshot::channel();
+        let now = tokio::time::Instant::now();
+        let command = |topic: &str| Command {
+            topic: topic.into(),
+            payload: b"value".to_vec(),
+            qos: QoS::AtLeastOnce,
+            retain: false,
+            optimistic: None,
+            entity_handle: None,
+        };
+        let mut pending = VecDeque::from([PendingPublish {
+            qos: QoS::AtLeastOnce,
+            reply: Some(reply),
+            remaining_commands: VecDeque::from([command("lab/second"), command("lab/third")]),
+            changed_states: Vec::new(),
+            optimistic: None,
+            deadline: Some(now - Duration::from_secs(1)),
+        }]);
+        let mut awaiting_ack = HashMap::new();
+        let mut last_values = HashMap::new();
+        let entities = std::sync::RwLock::new(BTreeMap::new());
+        let availability_status = HashMap::new();
+        let mut ready_continuations = VecDeque::new();
+        {
+            let mut completion = PublishCompletionContext {
+                runtime: &runtime,
+                entities: &entities,
+                connected: true,
+                availability_status: &availability_status,
+                last_values: &mut last_values,
+                ready_continuations: &mut ready_continuations,
+            };
+            complete_expired_publishes(&mut completion, &mut pending, &mut awaiting_ack, now);
+        }
+        assert_eq!(ready_continuations.len(), 1);
+        assert_eq!(ready_continuations[0].command.topic, "lab/second");
+        assert_eq!(ready_continuations[0].remaining_commands.len(), 1);
+        assert!(pending[0].reply.is_none());
+
+        // A late PUBACK completes only the tombstone; it cannot schedule the
+        // continuation a second time after timeout already advanced the chain.
+        {
+            let mut completion = PublishCompletionContext {
+                runtime: &runtime,
+                entities: &entities,
+                connected: true,
+                availability_status: &availability_status,
+                last_values: &mut last_values,
+                ready_continuations: &mut ready_continuations,
+            };
+            complete_publish(&mut completion, &mut pending[0]);
+        }
+        assert_eq!(ready_continuations.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attribute_only_optimism_uses_the_state_cached_at_completion() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        runtime
+            .set_state(
+                "fan.timeout",
+                "off",
+                Map::from_iter([("percentage".into(), serde_json::json!(50))]),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let mut entity = discovered_switch("fan.timeout", "homeassistant/fan/timeout/config");
+        entity.metadata.platform = "fan".into();
+        let entities = std::sync::RwLock::new(BTreeMap::from([(
+            entity.metadata.discovery_topic.clone(),
+            entity,
+        )]));
+        let update = OptimisticState {
+            state: None,
+            discovery_topic: "homeassistant/fan/timeout/config".into(),
+            attributes: Map::new(),
+            optimistic_updates: Map::from_iter([("percentage".into(), serde_json::json!(0))]),
+            context: Context::default(),
+            switch_state: false,
+        };
+        // This represents another admitted effect changing the entity after
+        // the command batch was preflighted but before its attribute update
+        // completes.
+        runtime
+            .set_state(
+                "fan.timeout",
+                "on",
+                Map::from_iter([("percentage".into(), serde_json::json!(50))]),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        let (reply, result) = oneshot::channel();
+        let mut pending = PendingPublish {
+            qos: QoS::AtLeastOnce,
+            reply: Some(reply),
+            remaining_commands: VecDeque::new(),
+            changed_states: Vec::new(),
+            optimistic: Some(update),
+            deadline: None,
+        };
+        let availability_status = HashMap::new();
+        let mut last_values = HashMap::new();
+        let mut ready_continuations = VecDeque::new();
+        let mut completion = PublishCompletionContext {
+            runtime: &runtime,
+            entities: &entities,
+            connected: true,
+            availability_status: &availability_status,
+            last_values: &mut last_values,
+            ready_continuations: &mut ready_continuations,
+        };
+
+        complete_publish(&mut completion, &mut pending);
+
+        let state = runtime.get_state("fan.timeout").unwrap();
+        assert_eq!(state.state, "on");
+        assert_eq!(state.attributes["percentage"], 0);
+        assert_eq!(result.await.unwrap().unwrap().len(), 1);
+        assert!(ready_continuations.is_empty());
+    }
+
+    #[test]
+    fn failed_or_unsupported_discovery_does_not_record_component_receipts() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        let config: MqttConfig = serde_yaml::from_str("host: 127.0.0.1\n").unwrap();
+        let entities = Arc::new(std::sync::RwLock::new(BTreeMap::new()));
+        let metadata = Arc::new(std::sync::RwLock::new(BTreeMap::new()));
+        let mut availability_status = HashMap::new();
+
+        let unsupported = process_discovery(
+            &runtime,
+            &config,
+            "homeassistant/scene/lab/unsupported/config",
+            b"{}",
+            &entities,
+            &metadata,
+            &None,
+            &mut availability_status,
+        )
+        .unwrap();
+        assert!(!unsupported);
+        assert!(runtime.loaded_components().components().is_empty());
+
+        assert!(
+            process_discovery(
+                &runtime,
+                &config,
+                "homeassistant/fan/lab/malformed/config",
+                b"{",
+                &entities,
+                &metadata,
+                &None,
+                &mut availability_status,
+            )
+            .is_err()
+        );
+        assert!(runtime.loaded_components().components().is_empty());
     }
 
     #[tokio::test]
@@ -4995,6 +6478,7 @@ mod async_publish_tests {
             .unwrap();
 
         let (reply, result) = oneshot::channel();
+        let mut pending = VecDeque::new();
         queue_publish_command(
             &client,
             CommandRequest {
@@ -5005,7 +6489,7 @@ mod async_publish_tests {
                     retain: false,
                     optimistic: Some(OptimisticState {
                         discovery_topic: "homeassistant/switch/queue_error/config".into(),
-                        state: "on".into(),
+                        state: Some("on".into()),
                         attributes: Map::new(),
                         optimistic_updates: Map::new(),
                         context: Context::default(),
@@ -5013,12 +6497,22 @@ mod async_publish_tests {
                     }),
                     entity_handle: None,
                 },
+                remaining_commands: VecDeque::from([Command {
+                    topic: "lab/command/continuation".into(),
+                    payload: b"OFF".to_vec(),
+                    qos: QoS::AtLeastOnce,
+                    retain: false,
+                    optimistic: None,
+                    entity_handle: None,
+                }]),
+                changed_states: Vec::new(),
                 reply,
             },
-            &mut VecDeque::new(),
+            &mut pending,
         );
 
         assert!(result.await.unwrap().is_err());
+        assert!(pending.is_empty());
         assert_eq!(
             runtime.get_state("switch.queue_error").unwrap().state,
             "off"

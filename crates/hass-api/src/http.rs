@@ -231,6 +231,10 @@ pub(crate) async fn get_config(
     Ok(Json(crate::extensions::configuration(&state).await?))
 }
 
+pub(crate) async fn get_components(State(state): State<Arc<AppState>>) -> Json<Vec<String>> {
+    Json(crate::extensions::component_names(&state))
+}
+
 pub(crate) async fn get_states(
     State(state): State<Arc<AppState>>,
     Extension(identity): Extension<Identity>,

@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 hass-core.workspace = true
+hass-registry.workspace = true
 hass-sun.workspace = true
 hass-template.workspace = true
 serde.workspace = true

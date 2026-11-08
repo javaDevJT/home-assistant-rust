@@ -1058,6 +1058,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-cover"
+version = "0.1.0"
+dependencies = [
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "hass-storage",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hass-device-tracker"
 version = "0.1.0"
 dependencies = [
@@ -1119,6 +1131,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-fan"
+version = "0.1.0"
+dependencies = [
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "hass-storage",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hass-group"
 version = "0.1.0"
 dependencies = [
@@ -1171,6 +1195,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-light"
+version = "0.1.0"
+dependencies = [
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hass-logger"
 version = "0.1.0"
 dependencies = [
@@ -1209,7 +1244,10 @@ dependencies = [
  "chrono",
  "hass-button",
  "hass-core",
+ "hass-cover",
  "hass-entity",
+ "hass-fan",
+ "hass-light",
  "hass-registry",
  "hass-storage",
  "hass-switch",
@@ -1381,6 +1419,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "hass-core",
+ "hass-registry",
  "hass-storage",
  "hass-sun",
  "hass-template",
@@ -1401,6 +1440,7 @@ dependencies = [
  "hass-core",
  "hass-entity",
  "hass-registry",
+ "hass-units",
  "serde_json",
  "tokio",
 ]
@@ -1578,6 +1618,10 @@ dependencies = [
  "tracing",
  "uuid",
 ]
+
+[[package]]
+name = "hass-units"
+version = "0.1.0"
 
 [[package]]
 name = "hass-usb"

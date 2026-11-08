@@ -185,20 +185,120 @@ passes formatting, strict Clippy, full workspace tests and CLI validation.
 Root independently verified its exact head, completed status and successful
 conclusion. No deployment or PR was created.
 
-### Light, cover and fan lifecycle adoption (51 crates, pending)
+### Platform lifecycle, component reporting and units (52 crates, pending)
 
 Root enrolled the released light, cover and fan SDKs as members 49-51, removed
 their generated standalone locks, added MQTT dependencies and refreshed the
 offline workspace lock. Their isolated evidence is 12 light / seven cover /
-seven fan cases with strict package checks. v175 now owns only MQTT
-source/tests/README for actual SDK-backed discovery/state/lifecycle adoption,
-preserving the accepted command completion and button/switch paths. It exposes
+seven fan cases with strict package checks. v175 is released after implementing
+MQTT SDK-backed discovery/state/lifecycle adoption, preserving the accepted
+command completion and button/switch paths. All two MQTT unit and 15 wire cases
+pass with strict all-target Clippy and formatting. Its new scenario covers all
+three platforms, live offline capabilities, current registry IDs, disable,
+removal, rediscovery and re-entry. It exposes
 `MqttEntityMetadata.entity_lifecycle_managed` from actual lease ownership;
 root owns the app reconciler's switch-only guard replacement and all manifests,
 SDK corrections and docs. No platform status changes are claimed yet.
-v174 independently owns isolated `hass-units` and UNITS-PORT.md. The source
-contains 31 converter classes; its planned fallible API preserves optional
+v174 released `hass-units` and UNITS-PORT.md. The source
+contains 31 converter classes; its fallible API preserves optional
 unit identifiers, source identity shortcuts and invalid-unit diagnostics.
+The unit SDK is now released and enrolled as member 52. Root normalized its
+manifest to edition 2024/MSRV 1.99, removed its generated standalone lock and
+added the sensor dependency. All 31 source converter families and 190 supported
+unit entries match the AST-derived source sets. Independent v178 review also
+called the actual Rust factor function and matched all 190 f64 bit patterns.
+Root fixed the review's nonzero reciprocal-underflow and Beaufort exceptional
+rounding cases, added regression tests, and reran units/sensor tests and strict
+all-target Clippy. Ten converter cases now pass. Finite negative Beaufort input
+maps the source's complex result to an explicit native non-real error.
+
+v177 is released after replacing the sensor's limited conversion dispatch with
+all 41 pinned device-class converter mappings. Its two table and 14 projection
+cases and strict package checks pass.
+Raw native aliases, complete validation tables, missing-value ordering and
+exact no-conversion integer/boolean representations are preserved. v176 is
+released after implementing real switch/button device actions; all 23 script
+cases and strict package checks pass. Root
+added the registry dependency and wired main to the borrowed-manager
+`ScriptEngine::start_with_registries` constructor; schema validation remains
+database-free, and UUID binding happens at actor attachment. The engine has no
+runtime reload API; a new attach must use that constructor to rebind references.
+Root's compiled-process fixture passes with actual switch/button script device
+actions and light/cover/fan discovery, SDK attributes and broker commands. It
+also proves all managed platforms disappear on config-entry disable, reload,
+and preserve registry identity across SQLite-backed restart. Independent v181
+identified command-adapter defects. Root fixed independent fan power state,
+source-inclusive speed conversion and speed count, ON-only zero-percentage
+behavior, retained cover direction, and missing standard service registration.
+New fan/cover wire regressions pass; all prior MQTT protocol cases remain green.
+The resulting intermediate 1,303-test / 151-target gate, formatting and strict
+Clippy passed, but is superseded by the continuation work below. Root owns all
+final parent checks and publication; no 52-crate artifact is published yet.
+Root added the native Rust `crates/hass/tests/check_config.rs` acceptance matrix
+to the workspace and CI test run. Its 20 isolated cases preserve the previous
+13 schema checks and
+exercise switch/button script device actions, missing fields and database-free
+UUID schema validation. Each checks for extra files and ignored-secret output.
+
+Independent v179 established the exact loaded-component contract: successful
+module receipts persist for the process, include dotted platform names, and
+are separate from currently loaded config entries and service namespaces.
+Released v180 implemented the additive Core `LoadedComponents` handle and
+runtime accessor, with 51 focused package cases and strict checks. Released
+v182 added the optional dynamic API provider, authenticated component endpoint
+and live HTTP/WebSocket config snapshots. Both protocol cases pass; root
+preserved exact static config JSON when the optional provider is absent.
+v185 exclusively owns app `main.rs`, `logging.rs`, and receipt-only changes in
+`spotify/player.rs` and `system_sensors.rs` for actual successful setup receipts
+and logger consumption. Root owns the compiled process fixture, which now
+checks bare MQTT before discovery, base/dotted names afterward, HTTP config
+agreement and process-lifetime receipt retention after entry unload.
+
+v184 exclusively owns MQTT source/tests/README. Each admitted target's command
+chain must be owned by the event loop, advance only after the preceding QoS
+completion or normal soft timeout, stop on a real failure, and retain ownership
+after caller cancellation. Shutdown must reject ready continuations, and late
+acknowledgments must not repeat them. Attribute-only effects must use current
+desired power state rather than revive the chain's preflight state. MQTT also
+records actual successful module/platform receipts without inferring from
+registered services. These changes require fresh complete gates.
+
+v186 exclusively owns new `hass-units/src/unit_system.rs`, its focused test,
+the minimal public re-export and a UnitSystem section in UNITS-PORT.md. The
+selection/conversion foundation must reuse the reviewed converters and preserve
+both canonical systems, custom selections and source errors. Global application
+preferences and sensor-registry unit persistence remain separate integration
+work. All earlier conversion behavior and tests are preserved.
+
+v184-v186 are released; root owns their code and parent corrections. Root kept
+shutdown priority while restoring fair polling between MQTT commands,
+continuations, subscriptions, deadlines and broker events. All five MQTT unit
+and 18 wire cases pass. Root also corrected forwarded sensor base/entry-owner
+receipts against `config_entries.py:3025-3053`, and state-only automation tests
+now assert actual setup receipts rather than the old static component list.
+All 22 end-to-end cases and both compiled CLI/MQTT process targets pass.
+
+The final local 52-member candidate passes **1,321 tests / 154 targets**, zero
+failed or ignored cases, formatting and strict locked offline all-target
+Clippy. The optimized workspace build and all 20 native CLI matrix scenarios
+pass. Optimized macOS SHA-256:
+`de5dced125913f18d09ca28132340b1fde98b20e793e688312f167cfe9c78255`.
+Independent v187 checked all 118 UnitSystem map rows and 6,208 public API
+probes with no mapping errors; only sorted-map versus Python insertion order
+differs. Global unit preferences remain separate work.
+
+v165 now owns only PARITY.md and upstream-parity.json for the local 52-member
+receipt and three platform promotions. Source publication and exact Linux CI
+remain pending; the accepted 48-member receipt stays immutable. Root owns
+staging, publication and the exact-source CI readback. GitHub metadata confirms
+`javaDevJT/home-assistant-rust` is a fork of `home-assistant/core`, with
+`rust-rewrite` as its default branch.
+
+Next independent work is outside the frozen candidate: v163 is read-only on
+light color-name/profile source contracts, and v188 exclusively owns an
+isolated `crates/hass-climate/**` SDK and CLIMATE-PORT.md. Climate is not enrolled
+and its existence does not promote that domain. Do not stage its files in the
+52-member source commit.
 All new owners use native Luna/max, with provider/tier controls unexposed.
 
 ### Accepted native media and asynchronous services (44 crates)

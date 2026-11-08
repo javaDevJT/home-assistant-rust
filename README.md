@@ -37,7 +37,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 
 | Area | Current native implementation |
 | --- | --- |
-| Runtime | Typed states, attributes, contexts, ordered events, service registry |
+| Runtime | Typed states, attributes, contexts, ordered events, service registry and process-lifetime component receipts |
 | Entities | Shared provider leases, stable identity, registry overrides, rename/disable/remove, restore and owned cleanup |
 | Storage | SQLite states/history/events/private metadata, migration, restart, single writer |
 | Authentication | Password users, roles, JWT access, rotating refresh sessions, TOTP MFA, signed paths |
@@ -53,6 +53,7 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | Tags | Registry-backed collection, native reader callback, scan-triggered actions, private WebSocket feeds and history attribute projection |
 | Automation | State/event/numeric/template/time/MQTT/notification/webhook/tag/lifecycle triggers, conditions, execution modes |
 | Clock sensors | Time/date formats, timezone and DST scheduling, fixed setup-time uptime, YAML and config-entry flows |
+| Sensor SDKs and units | Typed sensor/binary-sensor projection, 31 converter families, metric/US/custom unit-system selection |
 | Sun | Native astronomical calculations, singleton/config-entry entities, location updates, solar conditions and scheduled actions |
 | Logging | Actual dynamic tracing levels/message filters, admin controls, persistent and once-only settings, public change notifications |
 | System Log | Deduplicated retained errors, actual write/clear services, admin raw streams and integration filters |
@@ -64,9 +65,9 @@ The event runs the example automation and toggles `input_boolean.demo`. A POST t
 | USB | Native Linux/Darwin serial enumeration, owned hotplug/polling, scanner SDK, discovery/removal and admin port usage APIs |
 | Hardware | Loaded-provider records, shared native CPU/memory sampler and authenticated private status subscriptions |
 | Application Credentials | Private client registrations, loaded-provider factories, admin CRUD and bounded private collection streams |
-| Actions | Shared script executor, cancellation/queues, scenes, bounded native templates |
-| Integrations | MQTT discovery, state/availability and commands; REST polling and commands |
-| REST API | Authenticated states, config, services, events, templates, history |
+| Actions | Shared script executor, awaited switch/button device actions, cancellation/queues, scenes and bounded native templates |
+| Integrations | MQTT discovery, shared switch/button/light/cover/fan lifecycle and ACK-sequenced commands; REST polling and commands |
+| REST API | Authenticated states, live component/config snapshots, services, events, templates and history |
 | WebSocket | Native auth, live entity/config/template/event subscriptions, services, registries |
 | Process | YAML validation, trusted proxy origin checks, local-user policy, joined shutdown and native application restart |
 
@@ -107,6 +108,11 @@ cargo test --workspace --locked
 - [Switch state, service and live metadata source contracts](docs/SWITCH-PORT.md)
 - [Native switch descriptors, commands and lifecycle checks](crates/hass-switch/README.md)
 - [Button press ordering, timestamps and provider source contracts](docs/BUTTON-PORT.md)
+- [Light state, color conversion and service source contracts](docs/LIGHT-PORT.md)
+- [Cover projection, movement and command source contracts](docs/COVER-PORT.md)
+- [Fan state, capabilities and ordered command source contracts](docs/FAN-PORT.md)
+- [Native unit conversion families and pinned arithmetic contracts](docs/UNITS-PORT.md)
+- [Loaded component receipts and dynamic reporting contract](docs/COMPONENTS-PORT.md)
 - [Native Application Credentials SDK and private collection lifecycle](crates/hass-application-credentials/README.md)
 - [Native USB SDK and synthetic lifecycle checks](crates/hass-usb/README.md)
 - [Native serial backend provenance](crates/hass-usb-backend/THIRD-PARTY-NOTICES.md)
@@ -143,6 +149,7 @@ cargo test --workspace --locked
 - [Supported configuration example](examples/configuration.yaml)
 - [YAML includes, secrets, packages, and loading limits](docs/CONFIGURATION.md)
 - [Validation evidence](docs/VALIDATION.md)
+- [Compiled configuration-check acceptance matrix](crates/hass/tests/check_config.rs)
 - [Apache 2.0 license](LICENSE.md)
 
 Baseline source: `home-assistant/core` at `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf` (1,565 integration manifests; 20,410 Python files). Those counts describe upstream scope, not completed ports. Home Assistant names identify compatibility targets; this fork is not an official Home Assistant release.

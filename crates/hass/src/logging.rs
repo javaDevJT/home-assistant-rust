@@ -1,12 +1,11 @@
 //! Native tracing target catalog and authenticated logger ownership.
 use hass_auth::AuthManager;
-use hass_config::{ConfigEntries, ConfigEntryState};
+use hass_core::LoadedComponents;
 use hass_core::{Error, Result, Runtime};
 use hass_logger::{
     IntegrationCatalog, IntegrationCatalogProvider, LoggerConfig, LoggerFilter, LoggerIntegration,
     LoggerManager,
 };
-use serde_json::Value;
 use std::{collections::BTreeSet, sync::Arc};
 
 pub fn catalog() -> IntegrationCatalog {
@@ -14,10 +13,13 @@ pub fn catalog() -> IntegrationCatalog {
         ("api", &["hass_api"]),
         ("auth", &["hass_auth"]),
         ("binary_sensor", &["hass_binary_sensor"]),
+        ("button", &["hass_button"]),
         ("automation", &["hass_automation"]),
         ("config", &["hass_config"]),
+        ("cover", &["hass_cover"]),
         ("counter", &["hass::helpers::counter"]),
         ("device_tracker", &["hass_device_tracker"]),
+        ("fan", &["hass_fan"]),
         ("group", &["hass_group"]),
         ("homeassistant", &["hass::homeassistant"]),
         ("http", &["hass_api::http"]),
@@ -29,6 +31,7 @@ pub fn catalog() -> IntegrationCatalog {
         ("input_select", &["hass::helpers::input_select"]),
         ("input_text", &["hass::helpers::input_text"]),
         ("logger", &["hass_logger"]),
+        ("light", &["hass_light"]),
         ("media_player", &["hass_media_player", "hass::media_player"]),
         ("mqtt", &["hass_mqtt"]),
         ("network", &["hass_network", "hass_api::network_adapters"]),
@@ -66,6 +69,7 @@ pub fn catalog() -> IntegrationCatalog {
             ],
         ),
         ("system_log", &["hass_system_log", "hass_api::system_log"]),
+        ("switch", &["hass_switch"]),
         ("template", &["hass_template_entities", "hass_template"]),
         (
             "time_date",
@@ -97,23 +101,9 @@ pub fn catalog() -> IntegrationCatalog {
         .collect()
 }
 
-pub fn loaded_catalog(entries: ConfigEntries, config: Value) -> IntegrationCatalogProvider {
-    let baseline: BTreeSet<String> = config["components"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect();
+pub fn loaded_catalog(loaded_components: LoadedComponents) -> IntegrationCatalogProvider {
     Arc::new(move || {
-        let mut domains = baseline.clone();
-        domains.extend(
-            entries
-                .list_entries(None)
-                .into_iter()
-                .filter(|entry| entry.state == ConfigEntryState::Loaded)
-                .map(|entry| entry.domain),
-        );
+        let domains: BTreeSet<String> = loaded_components.all_components().into_iter().collect();
         catalog()
             .into_iter()
             .filter(|(domain, _)| domains.contains(domain))
@@ -169,8 +159,103 @@ pub fn start(runtime: Runtime, auth: &AuthManager, config: LoggerConfig) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hass_config::{
+        ConfigEntries, ConfigEntry, ConfigEntryDriver, ConfigFlowRequest, ConfigFlowResult,
+        NewConfigEntry, SetupOutcome,
+    };
     use hass_core::{Context, MemoryStore, ServiceCall};
     use serde_json::{Map, json};
+
+    struct ReceiptTestDriver;
+
+    impl ConfigEntryDriver for ReceiptTestDriver {
+        fn domain(&self) -> &str {
+            "spotify"
+        }
+
+        fn setup(
+            &self,
+            runtime: &Runtime,
+            _entry: &ConfigEntry,
+        ) -> hass_core::Result<SetupOutcome> {
+            runtime
+                .loaded_components()
+                .record_successful_component("spotify.media_player");
+            Ok(SetupOutcome::Ready)
+        }
+
+        fn unload(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> hass_core::Result<()> {
+            Ok(())
+        }
+
+        fn config_flow(&self, _request: &ConfigFlowRequest) -> hass_core::Result<ConfigFlowResult> {
+            Err(Error::Service("test config flow is unused".into()))
+        }
+    }
+
+    #[test]
+    fn loaded_catalog_uses_success_receipts_not_registered_services() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        runtime
+            .register_service(
+                "media_player",
+                "test",
+                json!({}),
+                Arc::new(|_, _| {
+                    Ok(hass_core::ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: Context::default(),
+                    })
+                }),
+            )
+            .unwrap();
+        let loaded = runtime.loaded_components();
+        let provider = loaded_catalog(loaded.clone());
+
+        assert!(!(provider)().contains_key("media_player"));
+
+        loaded.record_successful_component("spotify.media_player");
+        assert!((provider)().contains_key("spotify"));
+        assert!(!(provider)().contains_key("media_player"));
+
+        loaded.record_successful_component("media_player");
+        assert!((provider)().contains_key("media_player"));
+
+        for domain in ["button", "cover", "fan", "light", "switch"] {
+            loaded.record_successful_component(domain);
+        }
+        let loaded_catalog = (provider)();
+        let full_catalog = catalog();
+        for domain in ["button", "cover", "fan", "light", "switch"] {
+            assert!(loaded_catalog.contains_key(domain));
+            assert_eq!(
+                full_catalog.get(domain).unwrap().as_slice(),
+                [format!("hass_{domain}")].as_slice()
+            );
+        }
+    }
+
+    #[test]
+    fn loaded_catalog_receipts_survive_entry_unload_and_are_runtime_scoped() {
+        let runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        let loaded = runtime.loaded_components();
+        let provider = loaded_catalog(loaded);
+        let entries = ConfigEntries::new(runtime.clone()).unwrap();
+        let driver: Arc<dyn ConfigEntryDriver> = Arc::new(ReceiptTestDriver);
+        entries.register_driver(driver).unwrap();
+        let entry = entries
+            .create_entry(NewConfigEntry::new("spotify", "Fixture", Map::new()))
+            .unwrap();
+
+        entries.setup_entry(&entry.entry_id).unwrap();
+        assert!((provider)().contains_key("spotify"));
+        entries.unload_entry(&entry.entry_id).unwrap();
+        assert!((provider)().contains_key("spotify"));
+
+        let fresh_runtime = Runtime::new(Arc::new(MemoryStore::default())).unwrap();
+        assert!(loaded_catalog(fresh_runtime.loaded_components())().is_empty());
+    }
 
     #[test]
     fn native_target_aliases_keep_integration_levels_independent() {

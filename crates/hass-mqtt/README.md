@@ -91,21 +91,23 @@ then publish `online` to `lab/available` and
 `{"temperature":21.5}` to `lab/temperature`; the runtime reports
 `sensor.room_temperature = 21.5` with the configured unit.
 
-## Switch and button lifecycle
+## Shared entity lifecycle
 
 The application config-entry driver starts MQTT with its shared entity
-lifecycle and registries. Discovered switches and buttons use their native
-descriptors and snapshot projections there, while MQTT keeps its discovery,
-state-topic, command queue, reconnect, and removal flow. Registry names,
-device-class and icon overrides remain effective; raw MQTT device metadata is
-preserved while its supported identity and details are registered against the
-config entry. Renamed entity IDs are resolved from the live lifecycle handle,
-and disabled or removed entities are not service targets.
+lifecycle and registries. Discovered switches, buttons, lights, covers, and
+fans use their native descriptors and snapshot projections there, while MQTT
+keeps its discovery, state-topic, command queue, reconnect, and removal flow.
+Registry names, device-class and icon overrides remain effective; raw MQTT
+device metadata is preserved while its supported identity and details are
+registered against the config entry. Renamed entity IDs are resolved from the
+live lifecycle handle, and disabled or removed entities are not service
+targets. Platform capabilities remain visible while unavailable; ordinary
+MQTT state attributes are hidden until the entity is available again.
 
 Standalone callers can continue using `MqttIntegration::start`; that entry
 point keeps the direct runtime path for compatibility. The shared lifecycle
-path covers switches and buttons; other MQTT platforms retain their current
-handling.
+config-entry driver uses `start_with_entity_lifecycle` for the native
+switch/button/light/cover/fan SDK path.
 
 ## Commands and optimistic state
 
@@ -129,9 +131,9 @@ state untouched until `lab/heater/state` reports `1`. State is updated after a
 service call only when the root `optimistic` option or that discovery entity's
 `optimistic: true` explicitly enables it. Optimistic switches publish
 `assumed_state: true`; the attribute stays visible while unavailable, and a
-toggle from `unknown` requests `on`. Light-specific brightness/color
-topics and options are not implemented; light calls with extra options require
-a `command_template` and use its service variables.
+toggle from `unknown` requests `on`. Basic-schema lights do not model
+brightness/color options; callers that need custom basic-light payloads can
+use `command_template` and its service variables.
 
 JSON lights opt into the pinned `schema: "json"` contract. Their discovery can
 declare brightness scaling, color temperature units and bounds, supported

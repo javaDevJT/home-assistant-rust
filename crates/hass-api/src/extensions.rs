@@ -386,7 +386,10 @@ pub(crate) async fn handle_ws(
     if kind == "history/history_during_period" {
         return Some(crate::history::history_during_period(state, identity, command).await);
     }
-    if kind == "get_config" && state.features.config_entries.is_some() {
+    if kind == "get_config" {
+        if command.as_object().is_some_and(|fields| fields.len() != 2) {
+            return Some(Err(Error::InvalidInput("Unexpected fields".into())));
+        }
         return Some(configuration(state).await);
     }
     if let Some(result) = crate::config_subentries::handle_ws(state, command).await {
@@ -464,7 +467,37 @@ pub(crate) async fn configuration(state: &AppState) -> Result<Value> {
             config.extend(core.clone());
         }
     }
+    if let Some(loaded) = &state.features.loaded_components
+        && let Some(config) = config.as_object_mut()
+    {
+        config.insert(
+            "components".to_owned(),
+            serde_json::to_value(loaded.components())
+                .map_err(|_| Error::Service("Cannot serialize component names".into()))?,
+        );
+    }
     Ok(config)
+}
+
+/// Return the explicit process-lifetime receipt snapshot when configured, or
+/// the caller's existing static component list for embedded API compatibility.
+pub(crate) fn component_names(state: &AppState) -> Vec<String> {
+    if let Some(loaded) = &state.features.loaded_components {
+        return loaded.components();
+    }
+    state
+        .api
+        .config
+        .get("components")
+        .and_then(Value::as_array)
+        .map(|components| {
+            components
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 pub(crate) async fn render_template(

@@ -1,0 +1,20 @@
+[package]
+name = "hass-light"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Typed native light entity descriptions, state projection, and service normalization"
+
+[dependencies]
+hass-core.workspace = true
+hass-entity.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hass-registry.workspace = true
+tokio.workspace = true
+
+[lib]
+path = "src/lib.rs"

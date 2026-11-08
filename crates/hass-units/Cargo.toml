@@ -1,0 +1,12 @@
+[package]
+name = "hass-units"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Native unit conversion tables and behavior from Home Assistant"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "hass_units"
+path = "src/lib.rs"

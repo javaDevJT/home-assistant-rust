@@ -12,6 +12,7 @@ use std::fmt;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use hass_core::Context;
 use hass_entity::{EntitySnapshot, EntitySpec};
+use hass_units::{ConversionError, UnitFamily};
 use serde_json::{Map, Value, json};
 
 /// Home Assistant sensor device classes at the pinned Core revision.
@@ -734,7 +735,7 @@ impl SensorDescriptor {
 
         let state = if let Some(value) = reading.value.as_ref() {
             match self.project_value(value, display_unit.as_ref(), &mut warnings) {
-                Ok(state) => Some(state),
+                Ok(state) => state,
                 Err(error) => return Err(SensorProjectionError::new(error, warnings)),
             }
         } else {
@@ -807,7 +808,7 @@ impl SensorDescriptor {
             return Ok(None);
         };
         if self.native_unit.as_ref() != Some(display_unit)
-            && !can_convert(self.device_class, self.native_unit.as_ref(), display_unit)
+            && unit_family_for(self.device_class).is_none()
         {
             return Err(SensorErrorKind::UnsupportedUnitConversion {
                 device_class: self.device_class,
@@ -823,12 +824,12 @@ impl SensorDescriptor {
         value: &SensorValue,
         display_unit: Option<&SensorUnit>,
         warnings: &mut Vec<SensorWarning>,
-    ) -> Result<String, SensorErrorKind> {
+    ) -> Result<Option<String>, SensorErrorKind> {
         match self.device_class {
             Some(SensorDeviceClass::Timestamp | SensorDeviceClass::Uptime) => {
-                return timestamp_value(value, self.device_class.expect("matched above"));
+                return timestamp_value(value, self.device_class.expect("matched above")).map(Some);
             }
-            Some(SensorDeviceClass::Date) => return date_value(value),
+            Some(SensorDeviceClass::Date) => return date_value(value).map(Some),
             _ => {}
         }
 
@@ -848,41 +849,36 @@ impl SensorDescriptor {
                     value: format_plain_value(value),
                 });
             }
-            return Ok(format_plain_value(value));
+            return Ok(Some(format_plain_value(value)));
         }
 
         if !numeric_state_expected(self) {
-            return Ok(format_plain_value(value));
+            return Ok(Some(format_plain_value(value)));
         }
 
-        let numeric = parse_numeric_value(value)?;
-        if !numeric.value.is_finite() {
+        let from_unit = self.native_unit.as_ref().map(SensorUnit::as_str);
+        let to_unit = display_unit.map(SensorUnit::as_str);
+        let conversion_needed = from_unit != to_unit;
+        let numeric = parse_numeric_value(value, conversion_needed)?;
+        if numeric.value.is_some_and(|number| !number.is_finite()) {
             return Err(SensorErrorKind::NonFiniteValue {
                 value: numeric.original,
             });
         }
 
-        let converted = match (display_unit, self.native_unit.as_ref()) {
-            (Some(target), Some(native)) if target != native => {
-                let Some(converted) = convert_value(
-                    self.device_class,
-                    numeric.value,
-                    native.as_str(),
-                    target.as_str(),
-                ) else {
-                    return Err(SensorErrorKind::UnsupportedUnitConversion {
-                        device_class: self.device_class,
-                        from: Some(native.clone()),
-                        to: target.clone(),
-                    });
-                };
-                converted
-            }
-            _ => numeric.value,
+        let converted = if conversion_needed {
+            let family = unit_family_for(self.device_class)
+                .expect("display-unit changes were checked by resolve_display_unit");
+            hass_units::convert_optional(family, numeric.value, from_unit, to_unit)
+                .map_err(|error| SensorErrorKind::UnitConversion { error })?
+        } else {
+            numeric.value
         };
-        if !converted.is_finite() {
+        if let Some(number) = converted
+            && !number.is_finite()
+        {
             return Err(SensorErrorKind::NonFiniteValue {
-                value: converted.to_string(),
+                value: number.to_string(),
             });
         }
 
@@ -910,10 +906,13 @@ impl SensorDescriptor {
             });
         }
 
-        Ok(match numeric.unchanged_state {
-            Some(state) if display_unit == self.native_unit.as_ref() => state,
-            _ => format_number(converted),
-        })
+        Ok(
+            match (conversion_needed, numeric.unchanged_state, converted) {
+                (false, Some(state), _) => Some(state),
+                (_, _, Some(number)) => Some(format_number(number)),
+                (_, _, None) => None,
+            },
+        )
     }
 }
 
@@ -983,6 +982,9 @@ pub enum SensorErrorKind {
         device_class: Option<SensorDeviceClass>,
         from: Option<SensorUnit>,
         to: SensorUnit,
+    },
+    UnitConversion {
+        error: ConversionError,
     },
     InvalidStateClassUnit {
         state_class: SensorStateClass,
@@ -1054,6 +1056,7 @@ impl fmt::Display for SensorProjectionError {
                 formatter,
                 "cannot convert sensor unit from {from:?} to {to} for {device_class:?}"
             ),
+            SensorErrorKind::UnitConversion { error } => write!(formatter, "{error}"),
             SensorErrorKind::InvalidStateClassUnit {
                 state_class,
                 unit,
@@ -1072,32 +1075,11 @@ impl fmt::Display for SensorProjectionError {
 
 impl Error for SensorProjectionError {}
 
-#[derive(Clone, Copy)]
-enum Converter {
-    Temperature,
-    TemperatureDelta,
-    Pressure,
-    Distance,
-    Energy,
-    Power,
-}
-
 struct NumericValue {
-    value: f64,
+    value: Option<f64>,
     original: String,
     unchanged_state: Option<String>,
 }
-
-const TEMPERATURE_UNITS: &[&str] = &["°C", "°F", "K"];
-const PRESSURE_UNITS: &[&str] = &[
-    "mPa", "Pa", "hPa", "kPa", "bar", "cbar", "mbar", "inHg", "inH₂O", "psi", "mmHg", "atm",
-];
-const DISTANCE_UNITS: &[&str] = &["km", "mi", "nmi", "ft", "m", "cm", "mm", "in", "yd"];
-const ENERGY_UNITS: &[&str] = &[
-    "J", "kJ", "MJ", "GJ", "mWh", "Wh", "kWh", "MWh", "GWh", "TWh", "cal", "kcal", "Mcal", "Gcal",
-    "therm",
-];
-const POWER_UNITS: &[&str] = &["mW", "W", "kW", "MW", "GW", "TW", "BTU/h"];
 
 fn numeric_state_expected(descriptor: &SensorDescriptor) -> bool {
     descriptor
@@ -1199,221 +1181,96 @@ fn compatible_native_unit(unit: &str) -> &str {
     }
 }
 
-fn converter_for(device_class: Option<SensorDeviceClass>) -> Option<Converter> {
+fn unit_family_for(device_class: Option<SensorDeviceClass>) -> Option<UnitFamily> {
     use SensorDeviceClass as D;
+    use UnitFamily as F;
     match device_class? {
-        D::Temperature => Some(Converter::Temperature),
-        D::TemperatureDelta => Some(Converter::TemperatureDelta),
-        D::Pressure | D::AtmosphericPressure => Some(Converter::Pressure),
-        D::Distance | D::Precipitation => Some(Converter::Distance),
-        D::Energy | D::EnergyStorage => Some(Converter::Energy),
-        D::Power => Some(Converter::Power),
+        D::ApparentPower => Some(F::ApparentPower),
+        D::AbsoluteHumidity | D::VolatileOrganicCompounds => Some(F::MassVolumeConcentration),
+        D::Area => Some(F::Area),
+        D::AtmosphericPressure | D::Pressure => Some(F::Pressure),
+        D::BloodGlucoseConcentration => Some(F::BloodGlucoseConcentration),
+        D::CarbonMonoxide => Some(F::CarbonMonoxideConcentration),
+        D::Conductivity => Some(F::Conductivity),
+        D::Current => Some(F::ElectricCurrent),
+        D::DataRate => Some(F::DataRate),
+        D::DataSize => Some(F::Information),
+        D::Distance | D::Precipitation => Some(F::Distance),
+        D::Duration => Some(F::Duration),
+        D::Energy | D::EnergyStorage => Some(F::Energy),
+        D::EnergyDistance => Some(F::EnergyDistance),
+        D::Frequency => Some(F::Frequency),
+        D::Gas | D::Volume | D::VolumeStorage | D::Water => Some(F::Volume),
+        D::NitrogenDioxide => Some(F::NitrogenDioxideConcentration),
+        D::NitrogenMonoxide => Some(F::NitrogenMonoxideConcentration),
+        D::Ozone => Some(F::OzoneConcentration),
+        D::Power => Some(F::Power),
+        D::PowerFactor | D::VolatileOrganicCompoundsParts => Some(F::UnitlessRatio),
+        D::PrecipitationIntensity | D::Speed | D::WindSpeed => Some(F::Speed),
+        D::Radon => Some(F::RadiationConcentration),
+        D::ReactiveEnergy => Some(F::ReactiveEnergy),
+        D::ReactivePower => Some(F::ReactivePower),
+        D::SulphurDioxide => Some(F::SulphurDioxideConcentration),
+        D::Temperature => Some(F::Temperature),
+        D::TemperatureDelta => Some(F::TemperatureDelta),
+        D::Voltage => Some(F::ElectricPotential),
+        D::VolumeFlowRate => Some(F::VolumeFlowRate),
+        D::Weight => Some(F::Mass),
         _ => None,
     }
 }
 
 fn is_temperature_unit(unit: &str) -> bool {
-    TEMPERATURE_UNITS.contains(&unit)
+    hass_units::is_valid_unit(UnitFamily::Temperature, Some(unit))
 }
 
-fn can_convert(
-    device_class: Option<SensorDeviceClass>,
-    from: Option<&SensorUnit>,
-    to: &SensorUnit,
-) -> bool {
-    let (Some(converter), Some(from)) = (converter_for(device_class), from) else {
-        return false;
-    };
-    converter_accepts(converter, from.as_str()) && converter_accepts(converter, to.as_str())
-}
-
-fn converter_accepts(converter: Converter, unit: &str) -> bool {
-    let units = match converter {
-        Converter::Temperature | Converter::TemperatureDelta => TEMPERATURE_UNITS,
-        Converter::Pressure => PRESSURE_UNITS,
-        Converter::Distance => DISTANCE_UNITS,
-        Converter::Energy => ENERGY_UNITS,
-        Converter::Power => POWER_UNITS,
-    };
-    units.contains(&unit)
-}
-
-fn convert_value(
-    device_class: Option<SensorDeviceClass>,
-    value: f64,
-    from: &str,
-    to: &str,
-) -> Option<f64> {
-    if from == to {
-        return Some(value);
-    }
-    let converter = converter_for(device_class)?;
-    if !converter_accepts(converter, from) || !converter_accepts(converter, to) {
-        return None;
-    }
-    match converter {
-        Converter::Temperature => convert_temperature(value, from, to),
-        Converter::TemperatureDelta => {
-            let from_factor = temperature_delta_factor(from)?;
-            let to_factor = temperature_delta_factor(to)?;
-            Some(value / from_factor * to_factor)
-        }
-        Converter::Pressure => {
-            let from_factor = pressure_factor(from)?;
-            let to_factor = pressure_factor(to)?;
-            Some(value / from_factor * to_factor)
-        }
-        Converter::Distance => {
-            let from_factor = distance_factor(from)?;
-            let to_factor = distance_factor(to)?;
-            Some(value / from_factor * to_factor)
-        }
-        Converter::Energy => {
-            let from_factor = energy_factor(from)?;
-            let to_factor = energy_factor(to)?;
-            Some(value / from_factor * to_factor)
-        }
-        Converter::Power => {
-            let from_factor = power_factor(from)?;
-            let to_factor = power_factor(to)?;
-            Some(value / from_factor * to_factor)
-        }
-    }
-}
-
-fn convert_temperature(value: f64, from: &str, to: &str) -> Option<f64> {
-    let celsius = match from {
-        "°C" => value,
-        "°F" => (value - 32.0) / 1.8,
-        "K" => value - 273.15,
-        _ => return None,
-    };
-    match to {
-        "°C" => Some(celsius),
-        "°F" => Some(celsius * 1.8 + 32.0),
-        "K" => Some(celsius + 273.15),
-        _ => None,
-    }
-}
-
-fn temperature_delta_factor(unit: &str) -> Option<f64> {
-    match unit {
-        "°C" | "K" => Some(1.0),
-        "°F" => Some(1.8),
-        _ => None,
-    }
-}
-
-fn distance_factor(unit: &str) -> Option<f64> {
-    // Number of these units in one metre, matching DistanceConverter.
-    match unit {
-        "m" => Some(1.0),
-        "mm" => Some(1000.0),
-        "cm" => Some(100.0),
-        "km" => Some(0.001),
-        "in" => Some(1.0 / 0.0254),
-        "ft" => Some(1.0 / (0.0254 * 12.0)),
-        "yd" => Some(1.0 / (0.0254 * 36.0)),
-        "mi" => Some(1.0 / (0.0254 * 36.0 * 1760.0)),
-        "nmi" => Some(1.0 / 1852.0),
-        _ => None,
-    }
-}
-
-fn pressure_factor(unit: &str) -> Option<f64> {
-    // Number of these units in one pascal, matching PressureConverter.
-    const STANDARD_GRAVITY: f64 = 9.80665;
-    const MERCURY_DENSITY: f64 = 13.5951;
-    const INCH_TO_M: f64 = 0.0254;
-    const MM_TO_M: f64 = 0.001;
-    const INH2O_TO_PA: f64 = 249.088_908_333_334_8;
-    match unit {
-        "mPa" => Some(1000.0),
-        "Pa" => Some(1.0),
-        "hPa" => Some(0.01),
-        "kPa" => Some(0.001),
-        "bar" => Some(0.00001),
-        "cbar" => Some(0.001),
-        "mbar" => Some(0.01),
-        "inHg" => Some(1.0 / (INCH_TO_M * 1000.0 * STANDARD_GRAVITY * MERCURY_DENSITY)),
-        "inH₂O" => Some(1.0 / INH2O_TO_PA),
-        "psi" => Some(1.0 / 6894.757),
-        "mmHg" => Some(1.0 / (MM_TO_M * 1000.0 * STANDARD_GRAVITY * MERCURY_DENSITY)),
-        "atm" => Some(1.0 / 101325.0),
-        _ => None,
-    }
-}
-
-fn energy_factor(unit: &str) -> Option<f64> {
-    // Number of these units in one kWh, matching EnergyConverter's factors.
-    const WH_TO_CAL: f64 = 3600.0 / 4.184;
-    const WH_TO_THERM_US: f64 = 3600.0 / 1.054_804e8;
-    match unit {
-        "J" => Some(3_600_000.0),
-        "kJ" => Some(3600.0),
-        "MJ" => Some(3.6),
-        "GJ" => Some(0.0036),
-        "mWh" => Some(1_000_000.0),
-        "Wh" => Some(1000.0),
-        "kWh" => Some(1.0),
-        "MWh" => Some(0.001),
-        "GWh" => Some(0.000001),
-        "TWh" => Some(0.000000001),
-        "cal" => Some(WH_TO_CAL * 1000.0),
-        "kcal" => Some(WH_TO_CAL),
-        "Mcal" => Some(WH_TO_CAL / 1000.0),
-        "Gcal" => Some(WH_TO_CAL / 1_000_000.0),
-        "therm" => Some(WH_TO_THERM_US * 1000.0),
-        _ => None,
-    }
-}
-
-fn power_factor(unit: &str) -> Option<f64> {
-    // Number of these units in one watt, matching PowerConverter's factors.
-    match unit {
-        "mW" => Some(1000.0),
-        "W" => Some(1.0),
-        "kW" => Some(0.001),
-        "MW" => Some(0.000001),
-        "GW" => Some(0.000000001),
-        "TW" => Some(0.000000000001),
-        "BTU/h" => Some(1.0 / 0.293_071_07),
-        _ => None,
-    }
-}
-
-fn parse_numeric_value(value: &SensorValue) -> Result<NumericValue, SensorErrorKind> {
+fn parse_numeric_value(
+    value: &SensorValue,
+    conversion_needed: bool,
+) -> Result<NumericValue, SensorErrorKind> {
     let invalid = || SensorErrorKind::NumericValueRequired {
         value: format_plain_value(value),
     };
     match value {
         SensorValue::Integer(integer) => Ok(NumericValue {
-            value: *integer as f64,
+            value: if conversion_needed {
+                Some(*integer as f64)
+            } else {
+                None
+            },
             original: integer.to_string(),
             unchanged_state: Some(integer.to_string()),
         }),
         SensorValue::Unsigned(integer) => Ok(NumericValue {
-            value: *integer as f64,
+            value: if conversion_needed {
+                Some(*integer as f64)
+            } else {
+                None
+            },
             original: integer.to_string(),
             unchanged_state: Some(integer.to_string()),
         }),
         SensorValue::Boolean(boolean) => {
             let state = if *boolean { "True" } else { "False" }.to_owned();
             Ok(NumericValue {
-                value: f64::from(u8::from(*boolean)),
+                value: if conversion_needed {
+                    Some(f64::from(u8::from(*boolean)))
+                } else {
+                    None
+                },
                 original: state.clone(),
                 unchanged_state: Some(state),
             })
         }
         SensorValue::Number(number) => Ok(NumericValue {
-            value: *number,
+            value: Some(*number),
             original: number.to_string(),
             unchanged_state: None,
         }),
         SensorValue::Decimal(decimal) => {
             let number = decimal.parse::<f64>().map_err(|_| invalid())?;
             Ok(NumericValue {
-                value: number,
+                value: Some(number),
                 original: decimal.clone(),
                 unchanged_state: Some(decimal.clone()),
             })
@@ -1426,14 +1283,18 @@ fn parse_numeric_value(value: &SensorValue) -> Result<NumericValue, SensorErrorK
                 && let Some(integer) = canonical_integer_text(trimmed)
             {
                 return Ok(NumericValue {
-                    value: integer.parse::<f64>().map_err(|_| invalid())?,
+                    value: if conversion_needed {
+                        Some(integer.parse::<f64>().map_err(|_| invalid())?)
+                    } else {
+                        None
+                    },
                     original: text.clone(),
                     unchanged_state: Some(integer),
                 });
             }
             let number = trimmed.parse::<f64>().map_err(|_| invalid())?;
             Ok(NumericValue {
-                value: number,
+                value: Some(number),
                 original: text.clone(),
                 unchanged_state: None,
             })

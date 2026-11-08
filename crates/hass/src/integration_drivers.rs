@@ -307,8 +307,8 @@ impl DriverState {
         let active = self.lock_active();
         for (entry_id, integration) in active.iter() {
             for mut metadata in integration.entity_metadata() {
-                if self.entity_lifecycle.is_some() && metadata.platform == "switch" {
-                    // The SDK lease owns switch identity and device metadata;
+                if metadata.entity_lifecycle_managed {
+                    // The SDK lease owns platform identity and device metadata;
                     // legacy reconciliation remains for the other platforms.
                     continue;
                 }

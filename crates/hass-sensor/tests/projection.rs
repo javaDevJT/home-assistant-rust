@@ -9,6 +9,7 @@ use hass_sensor::{
     SensorDescriptor, SensorDeviceClass, SensorErrorKind, SensorProjectionOptions, SensorReading,
     SensorStateClass, SensorUnit, SensorValue, SensorWarning,
 };
+use hass_units::{ConversionError, UnitFamily, UnitSide};
 use serde_json::json;
 
 fn spec(provider_id: &str, provider_key: &str) -> EntitySpec {
@@ -477,10 +478,14 @@ fn unit_selection_obeys_priority_and_converts_only_matching_classes() {
     .project_with_options(SensorReading::new(20.0_f64), options("°F"));
     assert!(matches!(
         wrong_class.unwrap_err().kind,
-        SensorErrorKind::UnsupportedUnitConversion {
-            device_class: Some(SensorDeviceClass::Pressure),
-            ..
-        }
+        SensorErrorKind::UnitConversion {
+            error: ConversionError::UnrecognizedUnit {
+                family: UnitFamily::Pressure,
+                side: UnitSide::From,
+                unit: Some(ref unit),
+                ..
+            }
+        } if unit == "°C"
     ));
 }
 
@@ -532,6 +537,356 @@ fn common_pressure_length_energy_and_power_conversions_are_class_gated() {
         let actual: f64 = projected.snapshot.state.unwrap().parse().unwrap();
         assert!((actual - expected).abs() < 0.000_02, "{name}: {actual}");
     }
+}
+
+#[test]
+fn pinned_sensor_device_classes_use_their_complete_converter_families() {
+    let cases = [
+        (
+            SensorDeviceClass::ApparentPower,
+            Some("mVA"),
+            "VA",
+            1000.0,
+            1.0,
+        ),
+        (
+            SensorDeviceClass::AbsoluteHumidity,
+            Some("mg/m³"),
+            "g/m³",
+            1000.0,
+            1.0,
+        ),
+        (SensorDeviceClass::Area, Some("m²"), "cm²", 1.0, 10_000.0),
+        (
+            SensorDeviceClass::AtmosphericPressure,
+            Some("hPa"),
+            "Pa",
+            1.0,
+            100.0,
+        ),
+        (
+            SensorDeviceClass::BloodGlucoseConcentration,
+            Some("mg/dL"),
+            "mmol/L",
+            18.016,
+            1.0,
+        ),
+        (
+            SensorDeviceClass::CarbonMonoxide,
+            Some("ppb"),
+            "ppm",
+            1000.0,
+            1.0,
+        ),
+        (
+            SensorDeviceClass::Conductivity,
+            Some("mS/cm"),
+            "μS/cm",
+            1.0,
+            1000.0,
+        ),
+        (SensorDeviceClass::Current, Some("mA"), "A", 1000.0, 1.0),
+        (
+            SensorDeviceClass::DataRate,
+            Some("Mbit/s"),
+            "kbit/s",
+            1.0,
+            1000.0,
+        ),
+        (SensorDeviceClass::DataSize, Some("kB"), "B", 1.0, 1000.0),
+        (SensorDeviceClass::Distance, Some("m"), "cm", 1.0, 100.0),
+        (SensorDeviceClass::Duration, Some("h"), "min", 1.0, 60.0),
+        (SensorDeviceClass::Energy, Some("kWh"), "Wh", 1.0, 1000.0),
+        (
+            SensorDeviceClass::EnergyDistance,
+            Some("kWh/100km"),
+            "km/kWh",
+            5.0,
+            20.0,
+        ),
+        (
+            SensorDeviceClass::EnergyStorage,
+            Some("kWh"),
+            "Wh",
+            1.0,
+            1000.0,
+        ),
+        (SensorDeviceClass::Frequency, Some("kHz"), "Hz", 1.0, 1000.0),
+        (SensorDeviceClass::Gas, Some("m³"), "L", 1.0, 1000.0),
+        (
+            SensorDeviceClass::NitrogenDioxide,
+            Some("ppb"),
+            "ppm",
+            1000.0,
+            1.0,
+        ),
+        (
+            SensorDeviceClass::NitrogenMonoxide,
+            Some("ppb"),
+            "μg/m³",
+            1.0,
+            1.247_389_491_656_190_4,
+        ),
+        (SensorDeviceClass::Ozone, Some("ppb"), "ppm", 1000.0, 1.0),
+        (SensorDeviceClass::Power, Some("kW"), "W", 1.0, 1000.0),
+        (SensorDeviceClass::PowerFactor, None, "%", 0.5, 50.0),
+        (
+            SensorDeviceClass::Precipitation,
+            Some("m"),
+            "cm",
+            1.0,
+            100.0,
+        ),
+        (
+            SensorDeviceClass::PrecipitationIntensity,
+            Some("mm/h"),
+            "mm/d",
+            1.0,
+            24.0,
+        ),
+        (SensorDeviceClass::Pressure, Some("hPa"), "Pa", 1.0, 100.0),
+        (SensorDeviceClass::Radon, Some("pCi/L"), "Bq/m³", 1.0, 37.0),
+        (
+            SensorDeviceClass::ReactiveEnergy,
+            Some("kvarh"),
+            "varh",
+            1.0,
+            1000.0,
+        ),
+        (
+            SensorDeviceClass::ReactivePower,
+            Some("kvar"),
+            "var",
+            1.0,
+            1000.0,
+        ),
+        (
+            SensorDeviceClass::SulphurDioxide,
+            Some("ppb"),
+            "μg/m³",
+            1.0,
+            2.663_300_301_353_574,
+        ),
+        (SensorDeviceClass::Speed, Some("km/h"), "m/s", 3.6, 1.0),
+        (SensorDeviceClass::Temperature, Some("°C"), "°F", 0.0, 32.0),
+        (
+            SensorDeviceClass::TemperatureDelta,
+            Some("°C"),
+            "°F",
+            1.0,
+            1.8,
+        ),
+        (
+            SensorDeviceClass::VolatileOrganicCompounds,
+            Some("mg/m³"),
+            "μg/m³",
+            1.0,
+            1000.0,
+        ),
+        (
+            SensorDeviceClass::VolatileOrganicCompoundsParts,
+            Some("ppb"),
+            "ppm",
+            1000.0,
+            1.0,
+        ),
+        (SensorDeviceClass::Voltage, Some("kV"), "V", 1.0, 1000.0),
+        (SensorDeviceClass::Volume, Some("m³"), "L", 1.0, 1000.0),
+        (
+            SensorDeviceClass::VolumeStorage,
+            Some("m³"),
+            "L",
+            1.0,
+            1000.0,
+        ),
+        (
+            SensorDeviceClass::VolumeFlowRate,
+            Some("m³/h"),
+            "L/min",
+            1.0,
+            16.666_666_666_666_668,
+        ),
+        (SensorDeviceClass::Water, Some("m³"), "L", 1.0, 1000.0),
+        (SensorDeviceClass::Weight, Some("kg"), "g", 1.0, 1000.0),
+        (SensorDeviceClass::WindSpeed, Some("km/h"), "m/s", 3.6, 1.0),
+    ];
+
+    assert_eq!(
+        cases.len(),
+        41,
+        "one golden for every pinned converter mapping"
+    );
+    for (class, from, to, input, expected) in cases {
+        let projected = descriptor("units", class.as_str(), Some(class), None, from)
+            .project_with_options(SensorReading::new(input), options(to))
+            .unwrap_or_else(|error| panic!("{class:?} {from:?} -> {to}: {error}"));
+        let actual: f64 = projected
+            .snapshot
+            .state
+            .as_deref()
+            .unwrap_or_else(|| panic!("{class:?} unexpectedly projected unknown"))
+            .parse()
+            .unwrap();
+        assert!(
+            (actual - expected).abs() <= expected.abs() * 1e-8 + 1e-8,
+            "{class:?} {from:?} -> {to}: expected {expected}, got {actual}"
+        );
+        assert_eq!(
+            projected.snapshot.attributes.get("unit_of_measurement"),
+            Some(&json!(to)),
+            "{class:?} must publish the selected unit"
+        );
+    }
+}
+
+#[test]
+fn projection_preserves_converter_identity_errors_and_optional_results() {
+    let unknown_identity = descriptor(
+        "units",
+        "unknown-identity",
+        Some(SensorDeviceClass::Temperature),
+        None,
+        Some("unknown-temperature-unit"),
+    )
+    .project(SensorReading::new(9_007_199_254_740_993_u64))
+    .unwrap();
+    assert_eq!(
+        unknown_identity.snapshot.state.as_deref(),
+        Some("9007199254740993")
+    );
+    assert!(matches!(
+        unknown_identity.warnings.as_slice(),
+        [SensorWarning::InvalidDeviceClassUnit {
+            device_class: SensorDeviceClass::Temperature,
+            ..
+        }]
+    ));
+
+    let invalid_source = descriptor(
+        "units",
+        "invalid-source",
+        Some(SensorDeviceClass::Temperature),
+        None,
+        Some("Celsius"),
+    )
+    .project_with_options(SensorReading::new(20.0_f64), options("°F"))
+    .unwrap_err();
+    assert!(matches!(
+        invalid_source.kind,
+        SensorErrorKind::UnitConversion {
+            error: ConversionError::UnrecognizedUnit {
+                family: UnitFamily::Temperature,
+                side: UnitSide::From,
+                unit: Some(ref unit),
+                ref reported_unit,
+            }
+        } if unit == "Celsius" && reported_unit == "Celsius"
+    ));
+
+    let invalid_target = descriptor(
+        "units",
+        "invalid-target",
+        Some(SensorDeviceClass::Power),
+        None,
+        Some("W"),
+    )
+    .project_with_options(SensorReading::new(1.0_f64), options("widgets"))
+    .unwrap_err();
+    assert!(matches!(
+        invalid_target.kind,
+        SensorErrorKind::UnitConversion {
+            error: ConversionError::UnrecognizedUnit {
+                family: UnitFamily::Power,
+                side: UnitSide::To,
+                unit: Some(ref unit),
+                ref reported_unit,
+            }
+        } if unit == "widgets" && reported_unit == "widgets"
+    ));
+
+    let missing_value = descriptor(
+        "units",
+        "missing-invalid-source",
+        Some(SensorDeviceClass::Temperature),
+        None,
+        Some("Celsius"),
+    )
+    .project_with_options(SensorReading::without_value(), options("°F"))
+    .unwrap();
+    assert_eq!(missing_value.snapshot.state, None);
+    assert!(missing_value.warnings.is_empty());
+
+    let reciprocal_zero = descriptor(
+        "units",
+        "reciprocal-zero",
+        Some(SensorDeviceClass::EnergyDistance),
+        None,
+        Some("kWh/100km"),
+    )
+    .project_with_options(SensorReading::new(0.0_f64), options("km/kWh"))
+    .unwrap();
+    assert_eq!(reciprocal_zero.snapshot.state, None);
+    assert_eq!(
+        reciprocal_zero
+            .snapshot
+            .attributes
+            .get("unit_of_measurement"),
+        Some(&json!("km/kWh"))
+    );
+
+    let negative_beaufort = descriptor(
+        "units",
+        "negative-beaufort",
+        Some(SensorDeviceClass::WindSpeed),
+        None,
+        Some("Beaufort"),
+    )
+    .project_with_options(SensorReading::new(-1.0_f64), options("m/s"))
+    .unwrap_err();
+    assert!(matches!(
+        negative_beaufort.kind,
+        SensorErrorKind::UnitConversion {
+            error: ConversionError::NonRealResult {
+                family: UnitFamily::Speed
+            }
+        }
+    ));
+}
+
+#[test]
+fn suggested_and_unitless_conversions_use_effective_display_units() {
+    let apparent_power = descriptor(
+        "units",
+        "suggested-apparent-power",
+        Some(SensorDeviceClass::ApparentPower),
+        None,
+        Some("VA"),
+    )
+    .with_suggested_unit("kVA");
+    let suggested = apparent_power
+        .project(SensorReading::new(1000.0_f64))
+        .unwrap();
+    assert_eq!(suggested.snapshot.state.as_deref(), Some("1.0"));
+    assert_eq!(
+        suggested.snapshot.attributes.get("unit_of_measurement"),
+        Some(&json!("kVA"))
+    );
+    let user_selected = apparent_power
+        .project_with_options(SensorReading::new(1000.0_f64), options("mVA"))
+        .unwrap();
+    assert_eq!(user_selected.snapshot.state.as_deref(), Some("1000000.0"));
+
+    let unitless = descriptor(
+        "units",
+        "unitless-power-factor",
+        Some(SensorDeviceClass::PowerFactor),
+        None,
+        None,
+    )
+    .project_with_options(SensorReading::new(0.5_f64), options("%"))
+    .unwrap();
+    assert_eq!(unitless.snapshot.state.as_deref(), Some("50.0"));
+    assert!(unitless.warnings.is_empty());
 }
 
 #[test]

@@ -1,4 +1,4 @@
-//! Compiled-process acceptance coverage for MQTT switch discovery and lifecycle.
+//! Compiled-process acceptance coverage for MQTT SDK discovery and lifecycle.
 
 use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, StatusCode};
@@ -26,6 +26,14 @@ const AVAILABILITY_TOPIC: &str = "process/heater/availability";
 const COMMAND_TOPIC: &str = "process/heater/set";
 const UNIQUE_ID: &str = "compiled-process-switch-unique-id";
 const RENAMED_ENTITY_ID: &str = "switch.compiled_process_heater";
+const BUTTON_DISCOVERY_TOPIC: &str = "homeassistant/button/process/device/config";
+const BUTTON_COMMAND_TOPIC: &str = "process/device/press";
+const BUTTON_ENTITY_ID: &str = "button.compiled_device_button";
+const MANAGED_PLATFORMS: [(&str, &str, &str); 3] = [
+    ("light.compiled_light", "compiled-process-light", "on"),
+    ("cover.compiled_cover", "compiled-process-cover", "closed"),
+    ("fan.compiled_fan", "compiled-process-fan", "off"),
+];
 
 type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>;
 
@@ -661,7 +669,7 @@ fn write_config(directory: &Path, broker_address: &str) -> PathBuf {
     std::fs::write(
         &config,
         format!(
-            "recorder:\n  db_path: state.sqlite\nmqtt:\n  host: 127.0.0.1\n  port: {port}\n  client_id: compiled-process-mqtt-switch\n  qos: 1\n  discovery_prefix: homeassistant\n  max_payload_bytes: 4096\n"
+            "recorder:\n  db_path: state.sqlite\nmqtt:\n  host: 127.0.0.1\n  port: {port}\n  client_id: compiled-process-mqtt-switch\n  qos: 1\n  discovery_prefix: homeassistant\n  max_payload_bytes: 4096\nscript:\n  device_switch:\n    sequence:\n      - device_id: deliberately-unrelated-device\n        domain: switch\n        entity_id: {RENAMED_ENTITY_ID}\n        type: turn_off\n  device_button:\n    sequence:\n      - device_id: deliberately-unrelated-device\n        domain: button\n        entity_id: {BUTTON_ENTITY_ID}\n        type: press\n"
         ),
     )
     .unwrap();
@@ -686,6 +694,39 @@ fn mqtt_config_entry(entries: &Value) -> Value {
         .find(|entry| entry["domain"] == "mqtt")
         .expect("YAML import created the MQTT config entry")
         .clone()
+}
+
+async fn assert_fixture_command(broker: &mut LocalBroker, topic: &str, expected: Value) {
+    let payload = fixture_command_payload(broker, topic).await;
+    assert_eq!(serde_json::from_slice::<Value>(&payload).unwrap(), expected);
+}
+
+async fn fixture_command_payload(broker: &mut LocalBroker, topic: &str) -> Vec<u8> {
+    let event = broker
+        .wait_for(|event| {
+            matches!(event,
+        BrokerEvent::Published { topic: actual, .. } if actual == topic)
+        })
+        .await;
+    match event {
+        BrokerEvent::Published {
+            payload,
+            qos,
+            retain,
+            ..
+        } => {
+            assert_eq!(qos, 1);
+            assert!(!retain);
+            payload
+        }
+        _ => unreachable!(),
+    }
+}
+
+async fn loaded_components(server: &Server) -> Vec<String> {
+    let response = server.get("/api/components").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    response.json().await.unwrap()
 }
 
 #[tokio::test]
@@ -713,6 +754,14 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
         "the main process imports and sets up its configured MQTT entry: {imported_entry}"
     );
     broker.wait_for_subscription("homeassistant/#").await;
+    let initial_components = loaded_components(&server).await;
+    assert!(initial_components.iter().any(|name| name == "mqtt"));
+    assert!(
+        !initial_components
+            .iter()
+            .any(|name| name.starts_with("mqtt.")),
+        "forwarded modules require successful discovery, not service registration"
+    );
 
     broker.publish(
         DISCOVERY_TOPIC,
@@ -894,6 +943,198 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
     let http_state = server.wait_state(RENAMED_ENTITY_ID, "on").await;
     assert_eq!(http_state["context"], changed[0]["context"]);
 
+    let script_off = server
+        .client
+        .post(format!("{}/api/services/script/device_switch", server.url))
+        .bearer_auth(TOKEN)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let status = script_off.status();
+    let result: Value = script_off.json().await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device switch action result: {result}"
+    );
+    assert_fixture_command(
+        &mut broker,
+        COMMAND_TOPIC,
+        json!({"entity_id":RENAMED_ENTITY_ID,"value":"DISABLED"}),
+    )
+    .await;
+    server.wait_state(RENAMED_ENTITY_ID, "off").await;
+
+    broker.publish(
+        BUTTON_DISCOVERY_TOPIC,
+        json!({
+            "name":"Compiled Device Button",
+            "unique_id":"compiled-process-button-unique-id",
+            "device_class":"restart",
+            "command_topic":BUTTON_COMMAND_TOPIC,
+            "payload_press":"PUSH",
+            "command_template":"{\"entity_id\":\"{{ entity_id }}\",\"value\":\"{{ value }}\"}"
+        })
+        .to_string()
+        .into_bytes(),
+        true,
+    );
+    let button = server.wait_state(BUTTON_ENTITY_ID, "unknown").await;
+    assert_eq!(button["attributes"]["device_class"], "restart");
+    let script_press = server
+        .client
+        .post(format!("{}/api/services/script/device_button", server.url))
+        .bearer_auth(TOKEN)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let status = script_press.status();
+    let result: Value = script_press.json().await.unwrap();
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "device button action result: {result}"
+    );
+    assert_fixture_command(
+        &mut broker,
+        BUTTON_COMMAND_TOPIC,
+        json!({"entity_id":BUTTON_ENTITY_ID,"value":"PUSH"}),
+    )
+    .await;
+    let button: Value = server
+        .get(&format!("/api/states/{BUTTON_ENTITY_ID}"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    chrono::DateTime::parse_from_rfc3339(button["state"].as_str().unwrap())
+        .expect("real button device action records the press timestamp");
+    for (topic, discovery) in [
+        (
+            "homeassistant/light/process/lamp/config",
+            json!({"name":"Compiled Light","unique_id":"compiled-process-light",
+                "schema":"json","supported_color_modes":["brightness"],"brightness":true,
+                "state_topic":"process/light/state","command_topic":"process/light/set"}),
+        ),
+        (
+            "homeassistant/cover/process/door/config",
+            json!({"name":"Compiled Cover","unique_id":"compiled-process-cover",
+                "device_class":"garage","state_topic":"process/cover/state",
+                "position_topic":"process/cover/position",
+                "command_topic":"process/cover/set","set_position_topic":"process/cover/set-position"}),
+        ),
+        (
+            "homeassistant/fan/process/fan/config",
+            json!({"name":"Compiled Fan","unique_id":"compiled-process-fan",
+                "state_topic":"process/fan/state","command_topic":"process/fan/set",
+                "percentage_state_topic":"process/fan/percentage",
+                "percentage_command_topic":"process/fan/set-percentage"}),
+        ),
+    ] {
+        broker.publish(topic, serde_json::to_vec(&discovery).unwrap(), true);
+    }
+    for (topic, payload) in [
+        (
+            "process/light/state",
+            br#"{"state":"ON","brightness":127}"#.as_slice(),
+        ),
+        ("process/cover/state", b"closed".as_slice()),
+        ("process/cover/position", b"0".as_slice()),
+        ("process/fan/state", b"OFF".as_slice()),
+        ("process/fan/percentage", b"0".as_slice()),
+    ] {
+        broker.publish(topic, payload.to_vec(), true);
+    }
+    for (entity_id, _, state) in MANAGED_PLATFORMS {
+        let value = server.wait_state(entity_id, state).await;
+        assert!(value["attributes"]["supported_features"].is_number());
+    }
+    let light = server
+        .get("/api/states/light.compiled_light")
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(light["attributes"]["brightness"], 127);
+    assert_eq!(
+        light["attributes"]["supported_color_modes"],
+        json!(["brightness"])
+    );
+    let cover = server
+        .get("/api/states/cover.compiled_cover")
+        .await
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(cover["attributes"]["device_class"], "garage");
+    assert_eq!(cover["attributes"]["current_position"], 0);
+    for (domain, service, entity_id, topic, expected) in [
+        (
+            "light",
+            "turn_off",
+            "light.compiled_light",
+            "process/light/set",
+            br#"{"state":"OFF"}"#.as_slice(),
+        ),
+        (
+            "cover",
+            "open_cover",
+            "cover.compiled_cover",
+            "process/cover/set",
+            b"OPEN".as_slice(),
+        ),
+        (
+            "fan",
+            "turn_on",
+            "fan.compiled_fan",
+            "process/fan/set",
+            b"ON".as_slice(),
+        ),
+    ] {
+        let response = server
+            .client
+            .post(format!("{}/api/services/{domain}/{service}", server.url))
+            .bearer_auth(TOKEN)
+            .json(&json!({"entity_id":entity_id}))
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let result: Value = response.json().await.unwrap();
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{domain} actual provider result: {result}"
+        );
+        let payload = fixture_command_payload(&mut broker, topic).await;
+        if domain == "light" {
+            assert_eq!(
+                serde_json::from_slice::<Value>(&payload).unwrap(),
+                serde_json::from_slice::<Value>(expected).unwrap()
+            );
+        } else {
+            assert_eq!(payload, expected);
+        }
+    }
+
+    let discovered_components = loaded_components(&server).await;
+    for platform in ["switch", "button", "light", "cover", "fan"] {
+        assert!(discovered_components.iter().any(|name| name == platform));
+        assert!(
+            discovered_components
+                .iter()
+                .any(|name| name == &format!("mqtt.{platform}"))
+        );
+    }
+    assert!(
+        discovered_components
+            .windows(2)
+            .all(|names| names[0] < names[1])
+    );
+    let configuration: Value = server.get("/api/config").await.json().await.unwrap();
+    assert_eq!(configuration["components"], json!(discovered_components));
     let disabled = Server::ws_command(
         &mut socket,
         json!({
@@ -991,6 +1232,25 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
     server
         .wait_absent(RENAMED_ENTITY_ID, "config-entry disabled switch")
         .await;
+    for (entity_id, unique_id, _) in MANAGED_PLATFORMS {
+        assert_eq!(
+            entity_registry_entry(&unloaded_entities, unique_id)["disabled_by"],
+            "config_entry"
+        );
+        server
+            .wait_absent(entity_id, "config-entry disabled SDK platform")
+            .await;
+    }
+    server
+        .wait_absent(BUTTON_ENTITY_ID, "config-entry disabled button")
+        .await;
+    let after_unload_components = loaded_components(&server).await;
+    for name in &discovered_components {
+        assert!(
+            after_unload_components.contains(name),
+            "successfully loaded module {name} remains reported after entry unload"
+        );
+    }
     let after_unload = Server::ws_command(
         &mut socket,
         json!({
@@ -1026,6 +1286,9 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
     );
     broker.wait_for_subscription("homeassistant/#").await;
     server.wait_state(RENAMED_ENTITY_ID, "off").await;
+    for (entity_id, _, state) in MANAGED_PLATFORMS {
+        server.wait_state(entity_id, state).await;
+    }
     socket.close(None).await.unwrap();
 
     server.shutdown_gracefully().await;
@@ -1037,6 +1300,9 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
     let mut restarted = Server::start(&config).await;
     broker.wait_for_subscription("homeassistant/#").await;
     let restored = restarted.wait_state(RENAMED_ENTITY_ID, "off").await;
+    for (entity_id, _, state) in MANAGED_PLATFORMS {
+        restarted.wait_state(entity_id, state).await;
+    }
     assert_eq!(restored["attributes"]["friendly_name"], "Workshop Heater");
     assert_eq!(restored["attributes"]["device_class"], "outlet");
     assert_eq!(restored["attributes"]["assumed_state"], true);
@@ -1059,6 +1325,13 @@ async fn compiled_process_mqtt_switch_uses_shared_lifecycle_and_quiesces() {
     assert_eq!(restored_entry["entity_id"], RENAMED_ENTITY_ID);
     assert_eq!(restored_entry["name"], "Workshop Heater");
     assert!(restored_entry["disabled_by"].is_null());
+    for (entity_id, unique_id, _) in MANAGED_PLATFORMS {
+        let before = entity_registry_entry(&unloaded_entities, unique_id);
+        let after = entity_registry_entry(&restored_entries, unique_id);
+        assert_eq!(after["id"], before["id"]);
+        assert_eq!(after["entity_id"], entity_id);
+        assert!(after["disabled_by"].is_null());
+    }
     restarted_socket.close(None).await.unwrap();
     restarted.shutdown_gracefully().await;
     broker.wait_for_disconnect().await;

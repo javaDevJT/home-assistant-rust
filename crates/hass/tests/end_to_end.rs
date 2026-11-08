@@ -2166,12 +2166,22 @@ automation:
     .unwrap();
     let mut server = Server::start(&config).await;
     let public: Value = server.get("/api/config").await.json().await.unwrap();
-    for component in ["sensor", "binary_sensor"] {
+    for component in ["automation", "input_text"] {
         assert!(
             public["components"]
                 .as_array()
                 .unwrap()
-                .contains(&json!(component))
+                .contains(&json!(component)),
+            "successful configured owner {component} is reported: {public}"
+        );
+    }
+    for component in ["sensor", domain] {
+        assert!(
+            !public["components"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(component)),
+            "a device automation reference does not set up {component}: {public}"
         );
     }
     server

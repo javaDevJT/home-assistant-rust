@@ -393,6 +393,57 @@ async fn wait_removed(runtime: &Runtime, entity_id: &str) {
     .unwrap_or_else(|_| panic!("{entity_id} was not removed"));
 }
 
+async fn wait_metadata_entity_id(
+    integration: &MqttIntegration,
+    unique_id: &str,
+    expected_entity_id: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if integration.entity_metadata().iter().any(|entity| {
+                entity.unique_id == unique_id && entity.entity_id == expected_entity_id
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "MQTT metadata for {unique_id} did not reach {expected_entity_id}: {:?}",
+            integration.entity_metadata()
+        )
+    });
+}
+
+async fn wait_state_attribute(
+    runtime: &Runtime,
+    entity_id: &str,
+    expected_state: &str,
+    attribute: &str,
+    expected_value: &Value,
+) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if runtime.get_state(entity_id).is_some_and(|state| {
+                state.state == expected_state
+                    && state.attributes.get(attribute) == Some(expected_value)
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "{entity_id} did not reach {expected_state:?} with {attribute}={expected_value}: {:?}",
+            runtime.get_state(entity_id)
+        )
+    });
+}
+
 async fn wait_for_signal(
     signals: &mut tokio::sync::broadcast::Receiver<Event>,
     topic: &str,
@@ -1131,7 +1182,7 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
     tokio::time::timeout(Duration::from_secs(3), async {
         loop {
             if runtime.get_state("fan.ceiling").is_some_and(|state| {
-                state.attributes.get("percentage") == Some(&json!(50))
+                state.attributes.get("percentage") == Some(&json!(60))
                     && state.attributes.get("preset_mode") == Some(&json!("auto"))
                     && state.attributes.get("oscillating") == Some(&json!(true))
                     && state.attributes.get("direction") == Some(&json!("forward"))
@@ -1224,10 +1275,1031 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
     );
     assert_eq!(
         runtime.get_state("fan.ceiling").unwrap().attributes["percentage"],
-        50,
+        60,
         "commands do not replace reported fan state when optimism is disabled"
     );
     integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_light_cover_fan_lifecycle_projects_registry_state_and_releases_leases() {
+    const LIGHT_DISCOVERY: &[u8] = br#"{"name":"Desk Light","unique_id":"shared-light","schema":"json","state_topic":"lab/light/state","command_topic":"lab/light/set","json_attributes_topic":"lab/light/attributes","availability_topic":"lab/light/available","supported_color_modes":["color_temp","hs"],"brightness":true,"color_temp_kelvin":true,"min_kelvin":2500,"max_kelvin":6500,"effect":true,"effect_list":["pulse"],"flash":true,"transition":true}"#;
+    const COVER_DISCOVERY: &[u8] = br#"{"name":"Awning","unique_id":"shared-cover","state_topic":"lab/cover/state","command_topic":"lab/cover/set","position_topic":"lab/cover/position","set_position_topic":"lab/cover/set-position","tilt_status_topic":"lab/cover/tilt","tilt_command_topic":"lab/cover/set-tilt","json_attributes_topic":"lab/cover/attributes","availability_topic":"lab/cover/available"}"#;
+    const FAN_DISCOVERY: &[u8] = br#"{"name":"Ceiling Fan","unique_id":"shared-fan","state_topic":"lab/fan/state","command_topic":"lab/fan/set","percentage_state_topic":"lab/fan/percentage","percentage_command_topic":"lab/fan/set-percentage","preset_mode_state_topic":"lab/fan/preset","preset_mode_command_topic":"lab/fan/set-preset","preset_modes":["quiet","boost"],"oscillation_state_topic":"lab/fan/oscillation","oscillation_command_topic":"lab/fan/set-oscillation","direction_state_topic":"lab/fan/direction","direction_command_topic":"lab/fan/set-direction","speed_range_min":1,"speed_range_max":5,"json_attributes_topic":"lab/fan/attributes","availability_topic":"lab/fan/available"}"#;
+    const DISCOVERIES: [(&str, &[u8]); 3] = [
+        ("homeassistant/light/lab/desk/config", LIGHT_DISCOVERY),
+        ("homeassistant/cover/lab/awning/config", COVER_DISCOVERY),
+        ("homeassistant/fan/lab/ceiling/config", FAN_DISCOVERY),
+    ];
+
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let entry_id = "mqtt-entry-platform-lifecycle";
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-platform-lifecycle\nqos: 1\ndiscovery_prefix: homeassistant\nmax_payload_bytes: 4096\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        config.clone(),
+        lifecycle.clone(),
+        registries.clone(),
+        entry_id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(runtime.loaded_components().components(), ["mqtt"]);
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+
+    for (topic, payload) in DISCOVERIES {
+        broker.publish(topic, payload.to_vec(), true).await;
+    }
+    broker
+        .wait_for_subscriptions(&[
+            ("lab/light/state", 1),
+            ("lab/light/attributes", 1),
+            ("lab/light/available", 1),
+            ("lab/cover/state", 1),
+            ("lab/cover/position", 1),
+            ("lab/cover/tilt", 1),
+            ("lab/cover/attributes", 1),
+            ("lab/cover/available", 1),
+            ("lab/fan/state", 1),
+            ("lab/fan/percentage", 1),
+            ("lab/fan/preset", 1),
+            ("lab/fan/oscillation", 1),
+            ("lab/fan/direction", 1),
+            ("lab/fan/attributes", 1),
+            ("lab/fan/available", 1),
+        ])
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let metadata = integration.entity_metadata();
+            if metadata.len() == 3
+                && metadata
+                    .iter()
+                    .all(|entity| entity.entity_lifecycle_managed)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("all three discoveries must be registered by the shared lifecycle");
+    let component_receipts = runtime.loaded_components().components();
+    for name in [
+        "cover",
+        "fan",
+        "light",
+        "mqtt.cover",
+        "mqtt.fan",
+        "mqtt.light",
+    ] {
+        assert!(component_receipts.iter().any(|receipt| receipt == name));
+    }
+    for entity_id in ["light.desk_light", "cover.awning", "fan.ceiling_fan"] {
+        wait_state(&runtime, entity_id, "unavailable").await;
+    }
+
+    for topic in [
+        "lab/light/available",
+        "lab/cover/available",
+        "lab/fan/available",
+    ] {
+        broker.publish(topic, b"online".to_vec(), true).await;
+    }
+    for entity_id in ["light.desk_light", "cover.awning", "fan.ceiling_fan"] {
+        wait_state(&runtime, entity_id, "unknown").await;
+    }
+    let light_unknown = runtime.get_state("light.desk_light").unwrap();
+    assert_eq!(
+        light_unknown.attributes["supported_color_modes"],
+        json!(["color_temp", "hs"])
+    );
+    assert_eq!(light_unknown.attributes["supported_features"], 44);
+    assert_eq!(light_unknown.attributes["min_color_temp_kelvin"], 2500);
+    assert_eq!(light_unknown.attributes["max_color_temp_kelvin"], 6500);
+    assert_eq!(light_unknown.attributes["effect_list"], json!(["pulse"]));
+    assert_eq!(light_unknown.attributes["color_mode"], Value::Null);
+    let cover_unknown = runtime.get_state("cover.awning").unwrap();
+    assert_eq!(cover_unknown.attributes["is_closed"], Value::Null);
+    assert_eq!(cover_unknown.attributes["supported_features"], 255);
+    let fan_unknown = runtime.get_state("fan.ceiling_fan").unwrap();
+    assert_eq!(fan_unknown.attributes["percentage"], Value::Null);
+    assert_eq!(fan_unknown.attributes["preset_mode"], Value::Null);
+    assert_eq!(fan_unknown.attributes["oscillating"], Value::Null);
+    assert_eq!(fan_unknown.attributes["direction"], Value::Null);
+    assert_eq!(fan_unknown.attributes["supported_features"], 63);
+    assert_eq!(
+        fan_unknown.attributes["preset_modes"],
+        json!(["quiet", "boost"])
+    );
+
+    for (topic, label) in [
+        ("lab/light/attributes", "light ordinary value"),
+        ("lab/cover/attributes", "cover ordinary value"),
+        ("lab/fan/attributes", "fan ordinary value"),
+    ] {
+        broker
+            .publish(
+                topic,
+                json!({"mqtt_payload_label":label}).to_string().into_bytes(),
+                true,
+            )
+            .await;
+    }
+    broker
+        .publish(
+            "lab/light/state",
+            br#"{"state":"ON","brightness":127,"color_mode":"color_temp","color_temp":4000}"#
+                .to_vec(),
+            true,
+        )
+        .await;
+    broker
+        .publish("lab/cover/state", b"open".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/cover/position", b"50".to_vec(), true)
+        .await;
+    broker.publish("lab/cover/tilt", b"25".to_vec(), true).await;
+    broker.publish("lab/fan/state", b"ON".to_vec(), true).await;
+    broker
+        .publish("lab/fan/percentage", b"3".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/fan/preset", b"quiet".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/fan/oscillation", b"oscillate_on".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/fan/direction", b"forward".to_vec(), true)
+        .await;
+    wait_state_attribute(
+        &runtime,
+        "light.desk_light",
+        "on",
+        "mqtt_payload_label",
+        &json!("light ordinary value"),
+    )
+    .await;
+    wait_state_attribute(
+        &runtime,
+        "cover.awning",
+        "open",
+        "mqtt_payload_label",
+        &json!("cover ordinary value"),
+    )
+    .await;
+    wait_state_attribute(
+        &runtime,
+        "fan.ceiling_fan",
+        "on",
+        "mqtt_payload_label",
+        &json!("fan ordinary value"),
+    )
+    .await;
+    assert_eq!(
+        runtime.get_state("cover.awning").unwrap().attributes["current_position"],
+        50
+    );
+    assert_eq!(
+        runtime.get_state("cover.awning").unwrap().attributes["current_tilt_position"],
+        25
+    );
+    assert_eq!(
+        runtime.get_state("fan.ceiling_fan").unwrap().attributes["percentage"],
+        60
+    );
+
+    // JSON nulls clear light values and project to unknown. Cover/fan expose
+    // nullable SDK fields while their independently reported state is unknown.
+    broker
+        .publish(
+            "lab/light/state",
+            br#"{"state":null,"color_mode":null}"#.to_vec(),
+            true,
+        )
+        .await;
+    wait_state(&runtime, "light.desk_light", "unknown").await;
+    assert_eq!(
+        runtime.get_state("light.desk_light").unwrap().attributes["color_mode"],
+        Value::Null
+    );
+    broker
+        .publish("lab/cover/state", b"stopped".to_vec(), true)
+        .await;
+    wait_state(&runtime, "cover.awning", "unknown").await;
+    assert_eq!(
+        runtime.get_state("cover.awning").unwrap().attributes["is_closed"],
+        Value::Null
+    );
+    broker
+        .publish("lab/fan/percentage", b"None".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/fan/preset", b"None".to_vec(), true)
+        .await;
+    broker.publish("lab/fan/state", Vec::new(), true).await;
+    wait_state(&runtime, "fan.ceiling_fan", "unknown").await;
+    assert_eq!(
+        runtime.get_state("fan.ceiling_fan").unwrap().attributes["percentage"],
+        Value::Null
+    );
+    assert_eq!(
+        runtime.get_state("fan.ceiling_fan").unwrap().attributes["preset_mode"],
+        Value::Null
+    );
+
+    for topic in [
+        "lab/light/available",
+        "lab/cover/available",
+        "lab/fan/available",
+    ] {
+        broker.publish(topic, b"offline".to_vec(), true).await;
+    }
+    for (entity_id, feature_bits, modes) in [
+        ("light.desk_light", 44, Some(json!(["color_temp", "hs"]))),
+        ("cover.awning", 255, None),
+        ("fan.ceiling_fan", 63, None),
+    ] {
+        wait_state(&runtime, entity_id, "unavailable").await;
+        let state = runtime.get_state(entity_id).unwrap();
+        assert_eq!(state.attributes["supported_features"], feature_bits);
+        assert!(!state.attributes.contains_key("mqtt_payload_label"));
+        if let Some(modes) = modes {
+            assert_eq!(state.attributes["supported_color_modes"], modes);
+        }
+    }
+    assert_eq!(
+        runtime.get_state("fan.ceiling_fan").unwrap().attributes["preset_modes"],
+        json!(["quiet", "boost"])
+    );
+
+    let renames = [
+        ("shared-light", "light.desk_light", "light.registry_desk"),
+        ("shared-cover", "cover.awning", "cover.registry_awning"),
+        ("shared-fan", "fan.ceiling_fan", "fan.registry_fan"),
+    ];
+    let mut registry_ids = HashMap::new();
+    for (unique_id, old_id, new_id) in renames {
+        let entry = registries
+            .entities()
+            .into_iter()
+            .find(|entity| entity.unique_id == unique_id)
+            .unwrap();
+        registry_ids.insert(unique_id, entry.id.clone());
+        registries
+            .update_entity(
+                old_id,
+                EntityUpdate {
+                    new_entity_id: Some(new_id.into()),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        wait_state(&runtime, new_id, "unavailable").await;
+        wait_metadata_entity_id(&integration, unique_id, new_id).await;
+    }
+
+    for topic in [
+        "lab/light/available",
+        "lab/cover/available",
+        "lab/fan/available",
+    ] {
+        broker.publish(topic, b"online".to_vec(), true).await;
+    }
+    broker
+        .publish(
+            "lab/light/state",
+            br#"{"state":"ON","brightness":127,"color_mode":"color_temp","color_temp":4000}"#
+                .to_vec(),
+            true,
+        )
+        .await;
+    broker
+        .publish("lab/cover/state", b"open".to_vec(), true)
+        .await;
+    broker.publish("lab/fan/state", b"ON".to_vec(), true).await;
+    broker
+        .publish("lab/fan/percentage", b"3".to_vec(), true)
+        .await;
+    wait_state(&runtime, "light.registry_desk", "on").await;
+    wait_state(&runtime, "cover.registry_awning", "open").await;
+    wait_state(&runtime, "fan.registry_fan", "on").await;
+
+    runtime
+        .call_service_async(service_call("light", "turn_off", "light.registry_desk"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/light/set").await.0,
+        json!({"state":"OFF"})
+    );
+    runtime
+        .call_service_async(service_call("cover", "open_cover", "cover.registry_awning"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/cover/set").await.0,
+        Value::String("OPEN".into())
+    );
+    runtime
+        .call_service_async(service_call_with_data(
+            "fan",
+            "set_percentage",
+            "fan.registry_fan",
+            json!({"percentage":75}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "lab/fan/set-percentage")
+            .await
+            .0,
+        json!(4)
+    );
+    assert_eq!(
+        integration
+            .entity_metadata()
+            .into_iter()
+            .filter(|entity| entity.entity_lifecycle_managed)
+            .map(|entity| entity.entity_id)
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            "light.registry_desk".to_owned(),
+            "cover.registry_awning".to_owned(),
+            "fan.registry_fan".to_owned(),
+        ])
+    );
+
+    for (_, _, entity_id) in renames {
+        registries
+            .update_entity(
+                entity_id,
+                EntityUpdate {
+                    disabled_by: Some(Some("user".into())),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        wait_removed(&runtime, entity_id).await;
+    }
+    for (domain, service, entity_id) in [
+        ("light", "turn_on", "light.registry_desk"),
+        ("cover", "close_cover", "cover.registry_awning"),
+        ("fan", "turn_off", "fan.registry_fan"),
+    ] {
+        assert!(
+            runtime
+                .call_service_async(service_call(domain, service, entity_id))
+                .await
+                .is_err(),
+            "disabled {entity_id} must not accept a service target"
+        );
+    }
+    for (_, _, entity_id) in renames {
+        registries
+            .update_entity(
+                entity_id,
+                EntityUpdate {
+                    disabled_by: Some(None),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+    }
+
+    for (topic, _) in DISCOVERIES {
+        broker.publish(topic, Vec::new(), true).await;
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if integration.entity_metadata().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retained discovery removal must release every shared lifecycle lease");
+    assert_eq!(runtime.loaded_components().components(), component_receipts);
+    for (_, _, entity_id) in renames {
+        wait_state(&runtime, entity_id, "unavailable").await;
+    }
+
+    for (topic, payload) in DISCOVERIES {
+        broker.publish(topic, payload.to_vec(), true).await;
+    }
+    for (unique_id, _, entity_id) in renames {
+        wait_metadata_entity_id(&integration, unique_id, entity_id).await;
+        let entry = registries
+            .entities()
+            .into_iter()
+            .find(|entity| entity.unique_id == unique_id)
+            .unwrap();
+        assert_eq!(entry.id, registry_ids[unique_id]);
+    }
+    for topic in [
+        "lab/light/available",
+        "lab/cover/available",
+        "lab/fan/available",
+    ] {
+        broker.publish(topic, b"online".to_vec(), true).await;
+    }
+    broker
+        .publish(
+            "lab/light/state",
+            br#"{"state":"ON","brightness":127,"color_mode":"color_temp","color_temp":4000}"#
+                .to_vec(),
+            true,
+        )
+        .await;
+    broker
+        .publish("lab/cover/state", b"open".to_vec(), true)
+        .await;
+    broker.publish("lab/fan/state", b"ON".to_vec(), true).await;
+    broker
+        .publish("lab/fan/percentage", b"3".to_vec(), true)
+        .await;
+    wait_state(&runtime, "light.registry_desk", "on").await;
+    wait_state(&runtime, "cover.registry_awning", "open").await;
+    wait_state(&runtime, "fan.registry_fan", "on").await;
+
+    integration.shutdown().await.unwrap();
+    for (_, _, entity_id) in renames {
+        wait_state(&runtime, entity_id, "unavailable").await;
+        assert_eq!(
+            runtime.get_state(entity_id).unwrap().attributes["restored"],
+            true
+        );
+    }
+
+    // Starting a fresh MQTT owner for the same config entry and entity IDs is
+    // also the regression check for shutdown releasing all provider leases.
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        config,
+        lifecycle.clone(),
+        registries.clone(),
+        entry_id,
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    for (topic, payload) in DISCOVERIES {
+        broker.publish(topic, payload.to_vec(), true).await;
+    }
+    for (unique_id, _, entity_id) in renames {
+        wait_metadata_entity_id(&integration, unique_id, entity_id).await;
+        let entry = registries
+            .entities()
+            .into_iter()
+            .find(|entity| entity.unique_id == unique_id)
+            .unwrap();
+        assert_eq!(entry.id, registry_ids[unique_id]);
+    }
+    for topic in [
+        "lab/light/available",
+        "lab/cover/available",
+        "lab/fan/available",
+    ] {
+        broker.publish(topic, b"online".to_vec(), true).await;
+    }
+    broker
+        .publish(
+            "lab/light/state",
+            br#"{"state":"ON","brightness":127,"color_mode":"color_temp","color_temp":4000}"#
+                .to_vec(),
+            true,
+        )
+        .await;
+    broker
+        .publish("lab/cover/state", b"open".to_vec(), true)
+        .await;
+    broker.publish("lab/fan/state", b"ON".to_vec(), true).await;
+    broker
+        .publish("lab/fan/percentage", b"3".to_vec(), true)
+        .await;
+    wait_state(&runtime, "light.registry_desk", "on").await;
+    wait_state(&runtime, "cover.registry_awning", "open").await;
+    wait_state(&runtime, "fan.registry_fan", "on").await;
+    integration.shutdown().await.unwrap();
+    assert_eq!(runtime.loaded_components().components(), component_receipts);
+    lifecycle.shutdown().await.unwrap();
+    assert_eq!(runtime.loaded_components().components(), component_receipts);
+}
+
+#[tokio::test]
+async fn shared_fan_uses_reported_power_inclusive_speeds_and_zero_command_order() {
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-fan-command-boundaries\nqos: 1\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        config,
+        lifecycle.clone(),
+        registries,
+        "fan-command-entry",
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    for (topic, discovery) in [
+        (
+            "homeassistant/fan/lab/basic/config",
+            json!({
+                "name":"Basic Fan","unique_id":"reported-basic-fan",
+                "state_topic":"regression/basic/state","command_topic":"regression/basic/set"
+            }),
+        ),
+        (
+            "homeassistant/fan/lab/speed/config",
+            json!({
+                "name":"Speed Fan","unique_id":"reported-speed-fan",
+                "state_topic":"regression/speed/state","command_topic":"regression/speed/set",
+                "percentage_state_topic":"regression/speed/percentage",
+                "percentage_command_topic":"regression/speed/set-percentage",
+                "speed_range_min":1,"speed_range_max":5
+            }),
+        ),
+    ] {
+        broker
+            .publish(topic, serde_json::to_vec(&discovery).unwrap(), true)
+            .await;
+    }
+    broker
+        .wait_for_subscriptions(&[
+            ("regression/basic/state", 1),
+            ("regression/speed/state", 1),
+            ("regression/speed/percentage", 1),
+        ])
+        .await;
+    broker
+        .publish("regression/basic/state", b"ON".to_vec(), true)
+        .await;
+    wait_state(&runtime, "fan.basic_fan", "on").await;
+    runtime
+        .call_service_async(service_call("fan", "toggle", "fan.basic_fan"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "regression/basic/set").await.0,
+        json!("OFF")
+    );
+    broker
+        .publish("regression/basic/state", b"OFF".to_vec(), true)
+        .await;
+    wait_state(&runtime, "fan.basic_fan", "off").await;
+    runtime
+        .call_service_async(service_call("fan", "toggle", "fan.basic_fan"))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "regression/basic/set").await.0,
+        json!("ON")
+    );
+
+    // Pinned MQTT power is independent of nonzero reported speed.
+    broker
+        .publish("regression/speed/state", b"OFF".to_vec(), true)
+        .await;
+    broker
+        .publish("regression/speed/percentage", b"3".to_vec(), true)
+        .await;
+    wait_state_attribute(&runtime, "fan.speed_fan", "off", "percentage", &json!(60)).await;
+    assert_eq!(
+        runtime.get_state("fan.speed_fan").unwrap().attributes["percentage_step"],
+        20.0
+    );
+    for (service, expected) in [("increase_speed", 4), ("decrease_speed", 2)] {
+        runtime
+            .call_service_async(service_call("fan", service, "fan.speed_fan"))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_published(&mut broker, "regression/speed/set-percentage")
+                .await
+                .0,
+            json!(expected)
+        );
+    }
+    runtime
+        .call_service_async(service_call_with_data(
+            "fan",
+            "set_percentage",
+            "fan.speed_fan",
+            json!({"percentage":0}),
+        ))
+        .await
+        .unwrap();
+    // Source FanEntity calls turn_off before MQTT's percentage setter.
+    for (expected_topic, expected_payload) in [
+        ("regression/speed/set", b"OFF".as_slice()),
+        ("regression/speed/set-percentage", b"0".as_slice()),
+    ] {
+        match broker
+            .wait_for(|event| matches!(event, BrokerEvent::Published { .. }))
+            .await
+        {
+            BrokerEvent::Published { topic, payload, .. } => {
+                assert_eq!(topic, expected_topic);
+                assert_eq!(payload, expected_payload);
+            }
+            _ => unreachable!(),
+        }
+    }
+    runtime
+        .call_service_async(service_call_with_data(
+            "fan",
+            "turn_on",
+            "fan.speed_fan",
+            json!({"percentage":0}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_published(&mut broker, "regression/speed/set").await.0,
+        json!("ON")
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), async {
+            while let Some(event) = broker.events.recv().await {
+                assert!(
+                    !matches!(event, BrokerEvent::Published { .. }),
+                    "turn_on(percentage=0) must not publish a speed command: {event:?}"
+                );
+            }
+            panic!("broker ended before the absence check completed");
+        })
+        .await
+        .is_err()
+    );
+    broker
+        .publish("regression/speed/percentage", b"0".to_vec(), true)
+        .await;
+    wait_state_attribute(&runtime, "fan.speed_fan", "off", "percentage", &json!(0)).await;
+    integration.shutdown().await.unwrap();
+    lifecycle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn fan_effect_chains_are_ack_sequenced_driver_owned_and_stopped_on_release_or_shutdown() {
+    let mut broker = LocalBroker::start().await;
+    broker.hold_acknowledgments(true);
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-fan-sequence\nqos: 1\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        config,
+        lifecycle.clone(),
+        registries,
+        "fan-sequence-entry",
+    )
+    .await
+    .unwrap();
+    assert_eq!(runtime.loaded_components().components(), ["mqtt"]);
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+
+    for (object, name) in [("sequence", "Sequence Fan"), ("released", "Released Fan")] {
+        broker
+            .publish(
+                &format!("homeassistant/fan/lab/{object}/config"),
+                json!({
+                    "name":name,
+                    "unique_id":format!("fan-{object}"),
+                    "state_topic":format!("regression/{object}/state"),
+                    "command_topic":format!("regression/{object}/set"),
+                    "percentage_state_topic":format!("regression/{object}/percentage"),
+                    "percentage_command_topic":format!("regression/{object}/set-percentage"),
+                    "speed_range_min":1,
+                    "speed_range_max":5,
+                    "optimistic":true
+                })
+                .to_string()
+                .into_bytes(),
+                true,
+            )
+            .await;
+    }
+    broker
+        .wait_for_subscriptions(&[
+            ("regression/sequence/state", 1),
+            ("regression/sequence/percentage", 1),
+            ("regression/released/state", 1),
+            ("regression/released/percentage", 1),
+        ])
+        .await;
+    assert!(
+        runtime
+            .loaded_components()
+            .components()
+            .iter()
+            .any(|component| component == "mqtt.fan")
+    );
+    for object in ["sequence", "released"] {
+        broker
+            .publish(&format!("regression/{object}/state"), b"ON".to_vec(), true)
+            .await;
+        broker
+            .publish(
+                &format!("regression/{object}/percentage"),
+                b"3".to_vec(),
+                true,
+            )
+            .await;
+    }
+    wait_state_attribute(&runtime, "fan.sequence_fan", "on", "percentage", &json!(60)).await;
+    wait_state_attribute(&runtime, "fan.released_fan", "on", "percentage", &json!(60)).await;
+
+    let multi_target_call = ServiceCall {
+        domain: "fan".into(),
+        service: "set_percentage".into(),
+        data: Map::from_iter([("percentage".into(), json!(0))]),
+        target: Map::from_iter([(
+            "entity_id".into(),
+            json!(["fan.sequence_fan", "fan.released_fan"]),
+        )]),
+        context: Context::default(),
+    };
+    let mut batch_service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.call_service_async(multi_target_call).await }
+    });
+    let sequence_off_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "regression/sequence/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    let released_off_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "regression/released/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    assert!(tokio::time::timeout(
+        Duration::from_millis(150),
+        broker.wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "regression/sequence/set-percentage" || topic == "regression/released/set-percentage"))
+    )
+    .await
+    .is_err());
+
+    // One target advances independently when its first effect is acknowledged.
+    broker.acknowledge(sequence_off_id);
+    let sequence_speed_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "regression/sequence/set-percentage"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    wait_state_attribute(
+        &runtime,
+        "fan.sequence_fan",
+        "off",
+        "percentage",
+        &json!(60),
+    )
+    .await;
+    wait_state_attribute(&runtime, "fan.released_fan", "on", "percentage", &json!(60)).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut batch_service)
+            .await
+            .is_err()
+    );
+    broker.acknowledge(sequence_speed_id);
+    wait_state_attribute(&runtime, "fan.sequence_fan", "off", "percentage", &json!(0)).await;
+
+    // A released handle rejects the later effect for that target while the
+    // already admitted sibling chain completes normally.
+    broker
+        .publish("homeassistant/fan/lab/released/config", Vec::new(), true)
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if integration
+                .entity_metadata()
+                .iter()
+                .all(|entity| entity.unique_id != "fan-released")
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("retained discovery removal must release the target lease");
+    broker.acknowledge(released_off_id);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), &mut batch_service)
+            .await
+            .expect("the inactive continuation must resolve the target chain")
+            .unwrap()
+            .is_err()
+    );
+    assert!(tokio::time::timeout(
+        Duration::from_millis(150),
+        broker.wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "regression/released/set-percentage"))
+    )
+    .await
+    .is_err());
+
+    // Aborting the service waiter does not cancel a chain already admitted to
+    // the driver.
+    let cancelled_service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call_with_data(
+                    "fan",
+                    "set_percentage",
+                    "fan.sequence_fan",
+                    json!({"percentage":0}),
+                ))
+                .await
+        }
+    });
+    let cancelled_off_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "regression/sequence/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    cancelled_service.abort();
+    assert!(cancelled_service.await.is_err());
+    broker.acknowledge(cancelled_off_id);
+    let cancelled_speed_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "regression/sequence/set-percentage"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    broker.acknowledge(cancelled_speed_id);
+    wait_state_attribute(&runtime, "fan.sequence_fan", "off", "percentage", &json!(0)).await;
+
+    // Shutdown rejects an unstarted continuation and resolves the waiter.
+    let shutdown_service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call_with_data(
+                    "fan",
+                    "set_percentage",
+                    "fan.sequence_fan",
+                    json!({"percentage":0}),
+                ))
+                .await
+        }
+    });
+    let _ = broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "regression/sequence/set"))
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), integration.shutdown())
+        .await
+        .expect("shutdown must join with an effect awaiting PUBACK")
+        .unwrap();
+    assert!(shutdown_service.await.unwrap().is_err());
+    assert!(tokio::time::timeout(
+        Duration::from_millis(150),
+        broker.wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "regression/sequence/set-percentage"))
+    )
+    .await
+    .is_err());
+    let receipts = runtime.loaded_components().components();
+    assert!(receipts.iter().any(|component| component == "fan"));
+    assert!(receipts.iter().any(|component| component == "mqtt.fan"));
+    lifecycle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_cover_toggle_remembers_observed_direction_and_exposes_tilt_toggle() {
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-cover-direction\nqos: 1\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        config,
+        lifecycle.clone(),
+        registries,
+        "cover-direction-entry",
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    broker
+        .publish(
+            "homeassistant/cover/lab/direction/config",
+            serde_json::to_vec(&json!({
+                "name":"Direction Cover","unique_id":"direction-cover",
+                "state_topic":"regression/cover/state","command_topic":"regression/cover/set",
+                "tilt_status_topic":"regression/cover/tilt",
+                "tilt_command_topic":"regression/cover/set-tilt"
+            }))
+            .unwrap(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[("regression/cover/state", 1), ("regression/cover/tilt", 1)])
+        .await;
+    for (motion, after_stop_command) in [("closing", "OPEN"), ("opening", "CLOSE")] {
+        broker
+            .publish("regression/cover/state", motion.as_bytes().to_vec(), true)
+            .await;
+        wait_state(&runtime, "cover.direction_cover", motion).await;
+        runtime
+            .call_service_async(service_call("cover", "toggle", "cover.direction_cover"))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_published(&mut broker, "regression/cover/set").await.0,
+            json!("STOP")
+        );
+        broker
+            .publish("regression/cover/state", b"open".to_vec(), true)
+            .await;
+        wait_state(&runtime, "cover.direction_cover", "open").await;
+        runtime
+            .call_service_async(service_call("cover", "toggle", "cover.direction_cover"))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_published(&mut broker, "regression/cover/set").await.0,
+            json!(after_stop_command)
+        );
+    }
+    for (position, expected) in [(0, 100), (100, 0)] {
+        broker
+            .publish(
+                "regression/cover/tilt",
+                position.to_string().into_bytes(),
+                true,
+            )
+            .await;
+        wait_state_attribute(
+            &runtime,
+            "cover.direction_cover",
+            "open",
+            "current_tilt_position",
+            &json!(position),
+        )
+        .await;
+        runtime
+            .call_service_async(service_call(
+                "cover",
+                "toggle_cover_tilt",
+                "cover.direction_cover",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_published(&mut broker, "regression/cover/set-tilt")
+                .await
+                .0,
+            json!(expected)
+        );
+    }
+    integration.shutdown().await.unwrap();
+    lifecycle.shutdown().await.unwrap();
 }
 
 #[tokio::test]

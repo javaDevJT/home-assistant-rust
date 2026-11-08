@@ -212,10 +212,11 @@ impl SystemSensors {
         }
         let drivers = vec![time_date_driver, uptime_driver];
 
-        let sensors = yaml_platforms
+        let sensors: Vec<_> = yaml_platforms
             .into_iter()
             .flat_map(|platform| platform.into_time_date_config().sensors(None))
             .collect();
+        let has_yaml_sensors = !sensors.is_empty();
         let yaml_time_date = match TimeDateIntegration::start_with_sensors(
             runtime.clone(),
             &lifecycle,
@@ -274,6 +275,15 @@ impl SystemSensors {
         let retry_task = tokio::spawn(async move {
             retry_scheduler(retry_entries, retry_rx).await;
         });
+
+        if has_yaml_sensors {
+            runtime
+                .loaded_components()
+                .record_successful_component("sensor");
+            runtime
+                .loaded_components()
+                .record_successful_component("time_date.sensor");
+        }
 
         Ok(Self {
             entries,
@@ -455,6 +465,18 @@ impl ConfigEntryDriver for TimeDateConfigEntryDriver {
                 state
                     .lock_time_date()
                     .insert(entry.entry_id.clone(), integration);
+                state
+                    .runtime
+                    .loaded_components()
+                    .record_successful_component("sensor");
+                state
+                    .runtime
+                    .loaded_components()
+                    .record_successful_component(TIME_DATE_DOMAIN);
+                state
+                    .runtime
+                    .loaded_components()
+                    .record_successful_component("time_date.sensor");
                 Ok(SetupOutcome::Ready)
             }
             Err(error) => setup_outcome(error, entry.retry_attempts),
@@ -584,6 +606,18 @@ impl ConfigEntryDriver for UptimeConfigEntryDriver {
                 state
                     .lock_uptime()
                     .insert(entry.entry_id.clone(), integration);
+                state
+                    .runtime
+                    .loaded_components()
+                    .record_successful_component("sensor");
+                state
+                    .runtime
+                    .loaded_components()
+                    .record_successful_component(UPTIME_DOMAIN);
+                state
+                    .runtime
+                    .loaded_components()
+                    .record_successful_component("uptime.sensor");
                 Ok(SetupOutcome::Ready)
             }
             Err(error) => setup_outcome(error, entry.retry_attempts),
@@ -923,6 +957,18 @@ mod tests {
         let created = config_flow(entries.clone(), "time_date", Some(time_input("time"))).await;
         assert_eq!(created["type"], "create_entry");
         assert_eq!(created["result"]["title"], "Time & Date time");
+        assert!(
+            runtime
+                .loaded_components()
+                .components()
+                .contains(&"time_date.sensor".to_owned())
+        );
+        assert!(
+            runtime
+                .loaded_components()
+                .all_components()
+                .contains(&"sensor".to_owned())
+        );
         let entry_id = created["result"]["entry_id"].as_str().unwrap().to_owned();
         let entity = registries
             .entities()
@@ -977,6 +1023,18 @@ mod tests {
         .await
         .unwrap();
 
+        assert!(
+            runtime
+                .loaded_components()
+                .components()
+                .contains(&"time_date.sensor".to_owned())
+        );
+        assert!(
+            runtime
+                .loaded_components()
+                .all_components()
+                .contains(&"sensor".to_owned())
+        );
         assert!(runtime.get_state("sensor.time").is_some());
         assert!(runtime.get_state("sensor.date").is_some());
         assert!(runtime.get_state("sensor.office_time").is_some());
@@ -1166,6 +1224,18 @@ mod tests {
         assert_eq!(created["type"], "create_entry");
         assert_eq!(created["result"]["title"], "Uptime");
         assert_eq!(created["result"]["state"], "loaded", "{created}");
+        assert!(
+            runtime
+                .loaded_components()
+                .components()
+                .contains(&"uptime.sensor".to_owned())
+        );
+        assert!(
+            runtime
+                .loaded_components()
+                .all_components()
+                .contains(&"sensor".to_owned())
+        );
         let entry_id = created["result"]["entry_id"].as_str().unwrap().to_owned();
         let entity = registries
             .entities()

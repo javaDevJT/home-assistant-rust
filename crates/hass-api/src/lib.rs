@@ -62,6 +62,9 @@ pub struct ApiState {
 #[derive(Clone, Default)]
 pub struct ApiFeatures {
     pub network: network::NetworkPolicy,
+    /// Process-lifetime receipts for components that completed setup.
+    /// When supplied, these snapshots replace static config component names.
+    pub loaded_components: Option<hass_core::LoadedComponents>,
     pub auth: Option<hass_auth::AuthManager>,
     pub registries: Option<hass_registry::Registries>,
     pub templates: Option<hass_template::TemplateEngine>,
@@ -213,6 +216,7 @@ fn build_router(
         )
         .route("/api/", get(http::api_root))
         .route("/api/config", get(http::get_config))
+        .route("/api/components", get(http::get_components))
         .route("/api/states", get(http::get_states))
         .route(
             "/api/states/{entity_id}",

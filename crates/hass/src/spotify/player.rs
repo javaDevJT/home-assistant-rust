@@ -260,7 +260,7 @@ impl SpotifyState {
 
     async fn setup_entry(
         self: &Arc<Self>,
-        _runtime: Runtime,
+        runtime: Runtime,
         entry: ConfigEntry,
         generation: u64,
     ) -> Result<(), SetupFailure> {
@@ -430,6 +430,9 @@ impl SpotifyState {
                 );
                 drop(active);
                 self.lock_reauth_started().remove(&entry.entry_id);
+                runtime
+                    .loaded_components()
+                    .record_successful_component("spotify.media_player");
                 return Ok(());
             }
         }

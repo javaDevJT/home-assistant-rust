@@ -7,6 +7,7 @@ use hass_core::{
     Context, Error, Result, Runtime, ServiceCall, ServiceCallRequest, ServiceExecutionScope,
     ServiceResponseSupport, ServiceResult, State,
 };
+use hass_registry::Registries;
 use hass_sun::{
     LegacySunCondition, LegacySunEvent, Observer, PureSunCondition, SunPeriod, TwilightBand,
     evaluate_condition as evaluate_sun_condition,
@@ -47,6 +48,41 @@ const MAX_SCENE_ENTITIES: usize = 64;
 const MAX_COMMANDS: usize = 128;
 const SERVICE_REPLY_TIMEOUT: Duration = Duration::from_secs(65);
 const SCENE_METADATA_KEY: &str = "hass-script.dynamic-scenes.v1";
+
+fn validate_action_metadata(action: &Action) -> Result<()> {
+    if action
+        .enabled
+        .as_ref()
+        .is_some_and(|value| !matches!(value, Value::Bool(_) | Value::String(_)))
+    {
+        return Err(invalid(
+            "action enabled must be a boolean or template string",
+        ));
+    }
+    Ok(())
+}
+
+fn device_action_service(domain: &str, action_type: &str) -> Result<&'static str> {
+    match (domain, action_type) {
+        ("switch", "turn_on") => Ok("turn_on"),
+        ("switch", "turn_off") => Ok("turn_off"),
+        ("switch", "toggle") => Ok("toggle"),
+        ("button", "press") => Ok("press"),
+        ("switch", other) => Err(invalid(format!(
+            "unsupported switch device action type `{other}`"
+        ))),
+        ("button", other) => Err(invalid(format!(
+            "unsupported button device action type `{other}`"
+        ))),
+        (other, _) => Err(invalid(format!(
+            "unsupported device action domain `{other}`"
+        ))),
+    }
+}
+
+fn should_continue_on_error(action: &Action, error: &Error) -> bool {
+    action.continue_on_error.unwrap_or(false) && matches!(error, Error::HomeAssistant(_))
+}
 
 thread_local! {
     /// Carries script ancestry through the scoped Runtime service dispatch.
@@ -111,6 +147,16 @@ impl Default for ScriptConfig {
 pub struct Action {
     /// Optional step name.
     pub alias: Option<String>,
+    /// Whether to execute this action. Strings are rendered as templates.
+    pub enabled: Option<Value>,
+    /// Ignore provider-level Home Assistant errors for this action.
+    pub continue_on_error: Option<bool>,
+    /// Device automation metadata required by device actions.
+    pub device_id: Option<String>,
+    /// Device automation domain (`switch` or `button`).
+    pub domain: Option<String>,
+    /// Optional frontend metadata carried by device automation actions.
+    pub metadata: Option<Map<String, Value>>,
     /// Current service spelling, for example `light.turn_on`.
     pub action: Option<String>,
     /// Legacy service spelling, for example `light.turn_on`.
@@ -518,7 +564,29 @@ impl ScriptEngine {
         scripts: BTreeMap<String, ScriptConfig>,
         scenes: Vec<SceneConfig>,
     ) -> Result<Self> {
+        Self::start_inner(runtime, scripts, scenes, None)
+    }
+
+    /// Start the script actor with the app's existing registries available for
+    /// device action entity UUID resolution. UUIDs are bound to their current
+    /// entity IDs as the actor attaches; literal entity IDs remain unchanged.
+    pub fn start_with_registries(
+        runtime: Runtime,
+        scripts: BTreeMap<String, ScriptConfig>,
+        scenes: Vec<SceneConfig>,
+        registries: &Registries,
+    ) -> Result<Self> {
+        Self::start_inner(runtime, scripts, scenes, Some(registries))
+    }
+
+    fn start_inner(
+        runtime: Runtime,
+        mut scripts: BTreeMap<String, ScriptConfig>,
+        scenes: Vec<SceneConfig>,
+        registries: Option<&Registries>,
+    ) -> Result<Self> {
         validate_config(&scripts, &scenes)?;
+        resolve_script_device_entity_references(&mut scripts, registries)?;
         let dynamic_scenes = load_dynamic_scenes(&runtime)?;
         let stored_scenes = build_scene_map(&scenes, &dynamic_scenes)?;
         let scene_store = Arc::new(SceneStore {
@@ -1333,6 +1401,11 @@ async fn execute_actions(
                 "script step must contain exactly one action kind".into(),
             ));
         }
+        if let Some(enabled) = &action.enabled
+            && !truthy(&render_value(template, enabled, variables)?)
+        {
+            continue;
+        }
         if let Some(service) = action.action.as_deref().or(action.service.as_deref()) {
             let (domain, service_name) = service
                 .split_once('.')
@@ -1357,7 +1430,7 @@ async fn execute_actions(
                 return_response: action.response_variable.is_some(),
                 authorize_targets: None,
             };
-            let Some(result) = call_service_request_cancellable(
+            let result = call_service_request_cancellable(
                 runtime.clone(),
                 request,
                 lineage.to_vec(),
@@ -1366,8 +1439,13 @@ async fn execute_actions(
                 domain,
                 service_name,
             )
-            .await?
-            else {
+            .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(error) if should_continue_on_error(action, &error) => continue,
+                Err(error) => return Err(error),
+            };
+            let Some(result) = result else {
                 return Ok(ExecutionControl::Cancelled);
             };
             if let Some(response_variable) = action
@@ -1379,6 +1457,61 @@ async fn execute_actions(
                     response_variable.to_owned(),
                     result.response.unwrap_or(Value::Null),
                 );
+            }
+        } else if action.is_device_action() {
+            let domain = action
+                .domain
+                .as_deref()
+                .ok_or_else(|| invalid("device action requires domain"))?;
+            let action_type = action
+                .twilight_type
+                .as_deref()
+                .ok_or_else(|| invalid("device action requires type"))?;
+            let service = device_action_service(domain, action_type)?;
+            let entity_id = match action.entity_id.as_ref() {
+                Some(EntityIds::One(entity_id)) => entity_id,
+                Some(EntityIds::Many(_)) => {
+                    return Err(invalid(
+                        "device action entity_id must be one entity reference",
+                    ));
+                }
+                None => return Err(invalid("device action requires entity_id")),
+            };
+            // ScriptEngine attaches device UUID references using the current
+            // registry snapshot. The standalone sequence API has no registry,
+            // so it accepts literal IDs but rejects unresolved UUIDs here.
+            if !valid_entity_id(entity_id) {
+                return Err(invalid(format!(
+                    "unresolved entity registry reference `{entity_id}` in device action"
+                )));
+            }
+            let call = ServiceCall {
+                domain: domain.to_owned(),
+                service: service.to_owned(),
+                data: Map::from_iter([("entity_id".to_owned(), Value::String(entity_id.clone()))]),
+                target: Map::new(),
+                context: context.clone(),
+            };
+            let request = ServiceCallRequest {
+                call,
+                return_response: false,
+                authorize_targets: None,
+            };
+            let result = call_service_request_cancellable(
+                runtime.clone(),
+                request,
+                lineage.to_vec(),
+                deadline,
+                cancel,
+                domain,
+                service,
+            )
+            .await;
+            match result {
+                Ok(Some(_result)) => {}
+                Ok(None) => return Ok(ExecutionControl::Cancelled),
+                Err(error) if should_continue_on_error(action, &error) => continue,
+                Err(error) => return Err(error),
             }
         } else if let Some(delay) = &action.delay {
             let duration = delay.duration()?;
@@ -3064,6 +3197,7 @@ fn validate_actions(actions: &[Action], depth: usize, total: &mut usize) -> Resu
         {
             return Err(invalid("action alias must not be empty"));
         }
+        validate_action_metadata(action)?;
         if let Some(service) = action.action.as_deref().or(action.service.as_deref()) {
             if !valid_service_name(service) {
                 return Err(invalid(format!("invalid service name `{service}`")));
@@ -3083,6 +3217,41 @@ fn validate_actions(actions: &[Action], depth: usize, total: &mut usize) -> Resu
                     "target",
                     "response_variable",
                 ],
+            )?;
+        } else if action.is_device_action() {
+            let device_id = action
+                .device_id
+                .as_deref()
+                .ok_or_else(|| invalid("device action requires device_id"))?;
+            if device_id.trim().is_empty() {
+                return Err(invalid("device action device_id must not be empty"));
+            }
+            let domain = action
+                .domain
+                .as_deref()
+                .ok_or_else(|| invalid("device action requires domain"))?;
+            let action_type = action
+                .twilight_type
+                .as_deref()
+                .ok_or_else(|| invalid("device action requires type"))?;
+            device_action_service(domain, action_type)?;
+            let entity_reference = match action.entity_id.as_ref() {
+                Some(EntityIds::One(entity_reference)) => entity_reference,
+                Some(EntityIds::Many(_)) => {
+                    return Err(invalid(
+                        "device action entity_id must be one entity reference",
+                    ));
+                }
+                None => return Err(invalid("device action requires entity_id")),
+            };
+            if !valid_entity_id(entity_reference) && Uuid::parse_str(entity_reference).is_err() {
+                return Err(invalid(format!(
+                    "invalid device entity reference `{entity_reference}`"
+                )));
+            }
+            reject_unused_action_fields(
+                action,
+                &["device_id", "domain", "entity_id", "metadata", "type"],
             )?;
         } else if let Some(delay) = &action.delay {
             delay.duration()?;
@@ -3189,10 +3358,87 @@ fn validate_actions(actions: &[Action], depth: usize, total: &mut usize) -> Resu
     Ok(())
 }
 
+fn resolve_script_device_entity_references(
+    scripts: &mut BTreeMap<String, ScriptConfig>,
+    registries: Option<&Registries>,
+) -> Result<()> {
+    for (script_id, script) in scripts {
+        resolve_device_entity_references(&mut script.sequence, registries)
+            .map_err(|error| invalid(format!("script `{script_id}`: {error}")))?;
+    }
+    Ok(())
+}
+
+fn resolve_device_entity_references(
+    actions: &mut [Action],
+    registries: Option<&Registries>,
+) -> Result<()> {
+    for action in actions {
+        if action.is_device_action() {
+            let Some(EntityIds::One(entity_reference)) = action.entity_id.as_mut() else {
+                return Err(invalid(
+                    "device action entity_id must be one entity reference",
+                ));
+            };
+            *entity_reference = resolve_device_entity_reference(entity_reference, registries)?;
+        }
+        if let Some(choose) = &mut action.choose {
+            for branch in choose {
+                resolve_device_entity_references(&mut branch.sequence, registries)?;
+            }
+        }
+        if let Some(default) = &mut action.default {
+            resolve_device_entity_references(default, registries)?;
+        }
+        if let Some(repeat) = &mut action.repeat {
+            resolve_device_entity_references(&mut repeat.sequence, registries)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_device_entity_reference(
+    entity_reference: &str,
+    registries: Option<&Registries>,
+) -> Result<String> {
+    // A syntactically valid entity ID wins before UUID parsing, matching the
+    // automation device resolver and keeping literal references unchanged.
+    if valid_entity_id(entity_reference) {
+        return Ok(entity_reference.to_owned());
+    }
+    let registry_id = Uuid::parse_str(entity_reference)
+        .map(|id| id.simple().to_string())
+        .map_err(|_| {
+            invalid(format!(
+                "invalid device entity reference `{entity_reference}`"
+            ))
+        })?;
+    registries
+        .and_then(|registries| {
+            registries
+                .entities()
+                .into_iter()
+                .find(|entry| entry.id == registry_id)
+        })
+        .map(|entry| entry.entity_id)
+        .ok_or_else(|| {
+            invalid(format!(
+                "unknown entity registry entry `{entity_reference}` in device action"
+            ))
+        })
+}
+
 impl Action {
+    fn is_device_action(&self) -> bool {
+        self.device_id.is_some()
+            || self.domain.is_some()
+            || (self.twilight_type.is_some() && self.condition.is_none())
+    }
+
     fn kind_count(&self) -> usize {
         usize::from(self.action.is_some())
             + usize::from(self.service.is_some())
+            + usize::from(self.is_device_action())
             + usize::from(self.delay.is_some())
             + usize::from(self.condition.is_some())
             + usize::from(self.choose.is_some())
@@ -3206,6 +3452,9 @@ fn reject_unused_action_fields(action: &Action, allowed: &[&str]) -> Result<()> 
     let fields = [
         ("action", action.action.is_some()),
         ("service", action.service.is_some()),
+        ("device_id", action.device_id.is_some()),
+        ("domain", action.domain.is_some()),
+        ("metadata", action.metadata.is_some()),
         ("data", action.data.is_some()),
         ("service_data", action.service_data.is_some()),
         ("target", action.target.is_some()),
@@ -3566,6 +3815,23 @@ mod tests {
         })
     }
 
+    fn call_with_context(
+        runtime: &Runtime,
+        domain: &str,
+        service: &str,
+        data: Map<String, Value>,
+        target: Map<String, Value>,
+        context: Context,
+    ) -> Result<ServiceResult> {
+        runtime.call_service(ServiceCall {
+            domain: domain.into(),
+            service: service.into(),
+            data,
+            target,
+            context,
+        })
+    }
+
     fn target(entity_id: &str) -> Value {
         json!({"entity_id": entity_id})
     }
@@ -3634,6 +3900,579 @@ mod tests {
             entities: BTreeMap::new(),
         };
         assert!(validate_config(&BTreeMap::new(), &[invalid_scene]).is_err());
+    }
+
+    #[test]
+    fn switch_and_button_device_action_yaml_validates_common_metadata_and_fields() {
+        let scripts: BTreeMap<String, ScriptConfig> = serde_yaml::from_str(
+            r#"
+switch_action:
+  sequence:
+    - alias: Turn on relay
+      enabled: "{{ should_run }}"
+      continue_on_error: true
+      device_id: frontend-device-reference
+      domain: switch
+      entity_id: switch.relay
+      type: turn_on
+      metadata:
+        secondary: false
+button_action:
+  sequence:
+    - device_id: button-device-reference
+      domain: button
+      entity_id: button.pulse
+      type: press
+"#,
+        )
+        .unwrap();
+        validate_config(&scripts, &[]).unwrap();
+        let switch_action = &scripts["switch_action"].sequence[0];
+        assert_eq!(switch_action.alias.as_deref(), Some("Turn on relay"));
+        assert_eq!(switch_action.enabled, Some(json!("{{ should_run }}")));
+        assert_eq!(switch_action.continue_on_error, Some(true));
+        assert_eq!(
+            switch_action.device_id.as_deref(),
+            Some("frontend-device-reference")
+        );
+        assert_eq!(switch_action.metadata.as_ref().unwrap()["secondary"], false);
+
+        let missing_device_id: ScriptConfig = serde_yaml::from_str(
+            r#"
+sequence:
+  - domain: switch
+    entity_id: switch.relay
+    type: turn_on
+"#,
+        )
+        .unwrap();
+        assert!(
+            validate_config(
+                &BTreeMap::from([("missing".into(), missing_device_id)]),
+                &[]
+            )
+            .is_err()
+        );
+
+        let unsupported_domain = script(
+            ScriptMode::Single,
+            json!([{
+                "device_id": "metadata-only",
+                "domain": "light",
+                "entity_id": "light.entry",
+                "type": "turn_on"
+            }]),
+        );
+        assert!(
+            validate_config(
+                &BTreeMap::from([("unsupported".into(), unsupported_domain)]),
+                &[]
+            )
+            .is_err()
+        );
+
+        let unsupported_field: std::result::Result<ScriptConfig, _> = serde_yaml::from_str(
+            r#"
+sequence:
+  - device_id: metadata-only
+    domain: switch
+    entity_id: switch.relay
+    type: turn_on
+    unsupported: true
+"#,
+        );
+        assert!(unsupported_field.is_err());
+
+        let uuid_reference = Uuid::new_v4().simple().to_string();
+        let config_only = script(
+            ScriptMode::Single,
+            json!([{
+                "device_id": "metadata-only",
+                "domain": "switch",
+                "entity_id": uuid_reference,
+                "type": "toggle"
+            }]),
+        );
+        assert!(validate_config(&BTreeMap::from([("uuid".into(), config_only)]), &[]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn switch_device_action_resolves_renamed_registry_uuid_and_keeps_literals() {
+        use hass_registry::{EntityRegistration, EntityUpdate, Registries};
+
+        let runtime = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let registered = registries
+            .get_or_create_entity(EntityRegistration {
+                suggested_object_id: Some("relay".into()),
+                ..EntityRegistration::new("switch", "test", "relay-unique")
+            })
+            .unwrap();
+        registries
+            .update_entity(
+                &registered.entity_id,
+                EntityUpdate {
+                    new_entity_id: Some("switch.relay_renamed".into()),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+
+        let calls = Arc::new(Mutex::new(Vec::<ServiceCall>::new()));
+        let calls_for_service = Arc::clone(&calls);
+        runtime
+            .register_service(
+                "switch",
+                "turn_on",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    calls_for_service
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(call.clone());
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        let scripts = BTreeMap::from([(
+            "switch_action".into(),
+            script(
+                ScriptMode::Single,
+                json!([
+                    {
+                        "device_id": "device-metadata-is-not-an-ownership-check",
+                        "domain": "switch",
+                        "entity_id": registered.id,
+                        "type": "turn_on"
+                    },
+                    {
+                        "device_id": "another-device-metadata-value",
+                        "domain": "switch",
+                        "entity_id": "switch.relay",
+                        "type": "turn_on"
+                    },
+                    {
+                        "choose": [{
+                            "conditions": [{"condition": "template", "value_template": "{{ true }}"}],
+                            "sequence": [{
+                                "device_id": "nested",
+                                "domain": "switch",
+                                "entity_id": registered.id,
+                                "type": "turn_on"
+                            }]
+                        }]
+                    },
+                    {
+                        "repeat": {
+                            "count": 1,
+                            "sequence": [{
+                                "device_id": "nested",
+                                "domain": "switch",
+                                "entity_id": "switch.literal",
+                                "type": "turn_on"
+                            }]
+                        }
+                    }
+                ]),
+            ),
+        )]);
+        let engine =
+            ScriptEngine::start_with_registries(runtime.clone(), scripts, Vec::new(), &registries)
+                .unwrap();
+        let context = Context {
+            id: "origin-context".into(),
+            parent_id: Some("parent-context".into()),
+            user_id: Some("user-7".into()),
+        };
+        call_with_context(
+            &runtime,
+            "script",
+            "switch_action",
+            Map::new(),
+            Map::new(),
+            context.clone(),
+        )
+        .unwrap();
+        let calls = calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.data["entity_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "switch.relay_renamed",
+                "switch.relay",
+                "switch.relay_renamed",
+                "switch.literal"
+            ]
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| call.domain == "switch" && call.service == "turn_on")
+        );
+        assert!(calls.iter().all(|call| call.target.is_empty()));
+        let action_context = calls[0].context.clone();
+        assert_ne!(action_context.id, context.id);
+        assert_eq!(
+            action_context.parent_id.as_deref(),
+            Some(context.id.as_str())
+        );
+        assert_eq!(action_context.user_id, context.user_id);
+        assert!(calls.iter().all(|call| call.context == action_context));
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn button_device_action_calls_press_service_and_propagates_provider_errors() {
+        let runtime = runtime();
+        let button_calls = Arc::new(Mutex::new(Vec::<ServiceCall>::new()));
+        let calls_for_service = Arc::clone(&button_calls);
+        runtime
+            .register_service(
+                "button",
+                "press",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    calls_for_service
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(call.clone());
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        runtime
+            .register_service(
+                "switch",
+                "toggle",
+                Value::Null,
+                Arc::new(|_runtime, _call| Err(Error::HomeAssistant("relay rejected".into()))),
+            )
+            .unwrap();
+        let switch_off_calls = Arc::new(Mutex::new(Vec::<ServiceCall>::new()));
+        let switch_off_calls_for_service = Arc::clone(&switch_off_calls);
+        runtime
+            .register_service(
+                "switch",
+                "turn_off",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    switch_off_calls_for_service
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(call.clone());
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        let scripts = BTreeMap::from([
+            (
+                "button_action".into(),
+                script(
+                    ScriptMode::Single,
+                    json!([{
+                        "device_id": "button-metadata-only",
+                        "domain": "button",
+                        "entity_id": "button.pulse",
+                        "type": "press"
+                    }]),
+                ),
+            ),
+            (
+                "button_disabled".into(),
+                script(
+                    ScriptMode::Single,
+                    json!([{
+                        "enabled": false,
+                        "device_id": "button-metadata-only",
+                        "domain": "button",
+                        "entity_id": "button.should_not_press",
+                        "type": "press"
+                    }]),
+                ),
+            ),
+            (
+                "switch_error".into(),
+                script(
+                    ScriptMode::Single,
+                    json!([{
+                        "device_id": "switch-metadata-only",
+                        "domain": "switch",
+                        "entity_id": "switch.rejected",
+                        "type": "toggle"
+                    }]),
+                ),
+            ),
+            (
+                "switch_turn_off".into(),
+                script(
+                    ScriptMode::Single,
+                    json!([{
+                        "device_id": "switch-metadata-only",
+                        "domain": "switch",
+                        "entity_id": "switch.relay",
+                        "type": "turn_off"
+                    }]),
+                ),
+            ),
+            (
+                "switch_continue".into(),
+                script(
+                    ScriptMode::Single,
+                    json!([
+                        {
+                            "device_id": "switch-metadata-only",
+                            "domain": "switch",
+                            "entity_id": "switch.rejected",
+                            "type": "toggle",
+                            "continue_on_error": true
+                        },
+                        {"action": "test.after_device_error"}
+                    ]),
+                ),
+            ),
+        ]);
+        let after_error = Arc::new(AtomicUsize::new(0));
+        let after_error_for_service = Arc::clone(&after_error);
+        runtime
+            .register_service(
+                "test",
+                "after_device_error",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    after_error_for_service.fetch_add(1, Ordering::SeqCst);
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        let engine = ScriptEngine::start(runtime.clone(), scripts, Vec::new()).unwrap();
+        let button_context = Context {
+            id: "button-context".into(),
+            parent_id: Some("button-parent".into()),
+            user_id: Some("user-9".into()),
+        };
+        call_with_context(
+            &runtime,
+            "script",
+            "button_action",
+            Map::new(),
+            Map::new(),
+            button_context.clone(),
+        )
+        .unwrap();
+        let button_call = button_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .first()
+            .cloned()
+            .unwrap();
+        assert_eq!(button_call.domain, "button");
+        assert_eq!(button_call.service, "press");
+        assert_eq!(
+            button_call.data,
+            Map::from_iter([("entity_id".into(), json!("button.pulse"))])
+        );
+        assert!(button_call.target.is_empty());
+        assert_ne!(button_call.context.id, button_context.id);
+        assert_eq!(
+            button_call.context.parent_id.as_deref(),
+            Some(button_context.id.as_str())
+        );
+        assert_eq!(button_call.context.user_id, button_context.user_id);
+
+        call(
+            &runtime,
+            "script",
+            "button_disabled",
+            Value::Null,
+            Value::Null,
+        )
+        .unwrap();
+        assert_eq!(
+            button_calls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1,
+            "enabled: false should skip the device action"
+        );
+
+        call(
+            &runtime,
+            "script",
+            "switch_turn_off",
+            Value::Null,
+            Value::Null,
+        )
+        .unwrap();
+        let switch_off_call = switch_off_calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .first()
+            .cloned()
+            .unwrap();
+        assert_eq!(switch_off_call.domain, "switch");
+        assert_eq!(switch_off_call.service, "turn_off");
+        assert_eq!(switch_off_call.data["entity_id"], "switch.relay");
+
+        let error = call(&runtime, "script", "switch_error", Value::Null, Value::Null).unwrap_err();
+        assert_eq!(error, Error::HomeAssistant("relay rejected".into()));
+        call(
+            &runtime,
+            "script",
+            "switch_continue",
+            Value::Null,
+            Value::Null,
+        )
+        .unwrap();
+        assert_eq!(after_error.load(Ordering::SeqCst), 1);
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn switch_device_action_awaits_provider_and_cancels_on_script_turn_off() {
+        let runtime = runtime();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started_for_service = Arc::clone(&started);
+        let release_for_service = Arc::clone(&release);
+        let dropped_for_service = Arc::clone(&dropped);
+        runtime
+            .register_async_service(
+                "switch",
+                "turn_on",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    let started = Arc::clone(&started_for_service);
+                    let release = Arc::clone(&release_for_service);
+                    let dropped = Arc::clone(&dropped_for_service);
+                    Box::pin(async move {
+                        let _drop_signal = AsyncProviderDrop(dropped);
+                        started.notify_one();
+                        release.notified().await;
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        let scripts = BTreeMap::from([(
+            "switch_action".into(),
+            script(
+                ScriptMode::Single,
+                json!([{
+                    "device_id": "device-metadata-only",
+                    "domain": "switch",
+                    "entity_id": "switch.pending",
+                    "type": "turn_on"
+                }]),
+            ),
+        )]);
+        let engine = ScriptEngine::start(runtime.clone(), scripts, Vec::new()).unwrap();
+        let caller_runtime = runtime.clone();
+        let caller = tokio::task::spawn_blocking(move || {
+            call_with_context(
+                &caller_runtime,
+                "script",
+                "switch_action",
+                Map::new(),
+                Map::new(),
+                Context {
+                    id: "cancel-context".into(),
+                    parent_id: None,
+                    user_id: Some("user-4".into()),
+                },
+            )
+        });
+        started.notified().await;
+        assert!(
+            !caller.is_finished(),
+            "script service returned before device service completed"
+        );
+        release.notify_one();
+        caller.await.unwrap().unwrap();
+
+        dropped.store(false, Ordering::SeqCst);
+        let cancel_runtime = runtime.clone();
+        let caller = tokio::task::spawn_blocking(move || {
+            call_with_context(
+                &cancel_runtime,
+                "script",
+                "switch_action",
+                Map::new(),
+                Map::new(),
+                Context::default(),
+            )
+        });
+        started.notified().await;
+        assert!(
+            !caller.is_finished(),
+            "second device service call should be pending before cancellation"
+        );
+        call(
+            &runtime,
+            "script",
+            "turn_off",
+            Value::Null,
+            target("script.switch_action"),
+        )
+        .unwrap();
+        wait_until(|| dropped.load(Ordering::SeqCst)).await;
+        caller.await.unwrap().unwrap();
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn missing_device_action_uuid_fails_only_when_registry_is_available() {
+        use hass_registry::Registries;
+
+        let runtime = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let missing_id = Uuid::new_v4().simple().to_string();
+        let scripts = BTreeMap::from([(
+            "missing_uuid".into(),
+            script(
+                ScriptMode::Single,
+                json!([{
+                    "device_id": "metadata-only",
+                    "domain": "switch",
+                    "entity_id": missing_id,
+                    "type": "toggle"
+                }]),
+            ),
+        )]);
+        validate_config(&scripts, &[]).unwrap();
+        let error = ScriptEngine::start_with_registries(runtime, scripts, Vec::new(), &registries)
+            .err()
+            .expect("missing device UUID should fail actor attachment");
+        assert!(matches!(
+            error,
+            Error::InvalidInput(message) if message.contains("unknown entity registry entry")
+        ));
     }
 
     #[tokio::test]

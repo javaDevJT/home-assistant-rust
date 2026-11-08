@@ -1,5 +1,55 @@
 # Validation evidence
 
+## Native platforms, component receipts and units (52 crates)
+
+The frozen local candidate passes **1,321 tests across 154 targets**, with zero
+failures or ignored cases, workspace formatting and strict locked offline
+all-target Clippy. The optimized workspace build passes. The native Rust
+compiled-checker matrix covers 20 isolated configuration scenarios against both
+the debug and optimized executable, including switch/button device actions and
+schema-only UUID validation. No scenario creates a database or extra file or
+echoes the ignored synthetic secret.
+
+Optimized macOS binary SHA-256:
+`de5dced125913f18d09ca28132340b1fde98b20e793e688312f167cfe9c78255`.
+Source publication and exact-source Linux CI are pending. This receipt does not
+supersede the historical accepted 48-crate source until publication is recorded.
+
+Light, cover and fan now use typed SDKs through MQTT's shared entity lifecycle.
+Focused SDK cases total 12 light, seven cover and eight fan. MQTT passes five
+unit and 18 numeric-loopback wire cases, preserving the earlier QoS, timeout,
+cancellation, availability and button/switch checks. New regressions cover
+reported fan power independent of speed, inclusive speed ranges and step count,
+zero-percent command distinctions, retained cover direction and tilt toggle.
+Each admitted target's command chain is owned by the driver and advances after
+the previous completion; real failures stop remaining effects, caller
+cancellation retains ownership, late ACKs do not repeat continuations, and
+shutdown resolves pending work. Attribute-only effects preserve current power.
+
+The compiled MQTT process fixture proves all five managed platforms, actual
+switch/button script device actions and broker commands, config-entry disable
+and re-enable, joined shutdown and SQLite-backed identity after restart. It also
+checks dynamic base/dotted component names, HTTP config agreement and receipt
+retention after entry unload. The 22-case end-to-end target remains green.
+
+Core's five new receipt tests and two API protocol cases verify runtime sharing
+and isolation, sorted dotted names, authentication and live HTTP/WebSocket
+snapshots. Logger checks preserve distinct namespaces and do not infer loaded
+modules from fake services or current entry state. Forwarded sensor receipts
+follow the source's base-platform setup order. In-progress discovery catalog
+supplementation and broader component event/producer coverage remain open.
+
+All 41 mapped sensor device classes use the shared 31-family converter module.
+The sensor target passes two table and 14 projection cases. Converter checks
+include reciprocal underflow and exceptional Beaufort inputs; an independent
+audit matched all 190 factor bit patterns. UnitSystem adds nine cases for both
+canonical systems, custom selections/maps, defaults, errors and all seven
+conversion methods. Independent source-data review matched 118 mapping rows and
+6,208 public API probes. Global app/sensor unit preferences remain separate.
+Script passes 23 cases, including UUID binding, awaited switch/button actions,
+causal context, provider errors and cancellation. None of these receipts asserts
+complete integration parity or physical-device validation.
+
 ## Accepted switch, button and awaited MQTT (48 crates)
 
 The frozen candidate passes **1,250 tests across 140 targets**, zero failures

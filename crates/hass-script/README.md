@@ -4,7 +4,10 @@ This crate implements a strict, bounded subset of Home Assistant scripts and
 scenes on top of `hass_core::Runtime`. The application may deserialize the
 top-level `script:` mapping into `BTreeMap<String, ScriptConfig>` and the
 top-level `scene:` list into `Vec<SceneConfig>`, then call
-`ScriptEngine::start(runtime, scripts, scenes)`.
+`ScriptEngine::start(runtime, scripts, scenes)` for configurations without
+device registry UUID references, or
+`ScriptEngine::start_with_registries(runtime, scripts, scenes, &registries)`
+using its existing registry manager.
 
 ```yaml
 script:
@@ -59,6 +62,12 @@ Each script step must contain exactly one of:
 - `action: domain.service` or legacy `service: domain.service`, with `target`,
   `data`, or legacy `service_data`; `response_variable` stores a supported
   service response for later actions and templates.
+- A switch or button device action with required `device_id`, `domain`,
+  `entity_id`, and `type`. Switch types are `turn_on`, `turn_off`, and `toggle`;
+  button supports `press`. These actions await the corresponding registered
+  Core service (`switch.*` or `button.press`) and pass the script's causal
+  context with `entity_id` in service data. `device_id` is required action
+  metadata and does not impose an ownership or entity-class check.
 - `delay` as seconds, `HH:MM:SS`, or a map with hours/minutes/seconds/
   milliseconds.
 - `condition` actions for `state`, `numeric_state`, `template`, `and`, `or`,
@@ -70,6 +79,21 @@ Each script step must contain exactly one of:
 - `stop`, optionally with `response_variable` to return a previously assigned
   variable from a direct script service call, or with `error: true` to fail the
   run. Error stops cannot return a response.
+
+Common action metadata includes `alias`, `enabled` (boolean or template
+string), and `continue_on_error`. A false `enabled` value skips the action;
+`continue_on_error` skips provider-level Home Assistant errors and lets the
+next action run. Device action `metadata` is retained when supplied.
+
+`validate_config` checks the action schema without reading registry state, so
+syntactically valid entity UUIDs can be parsed there. At each actor attach,
+`start_with_registries` resolves UUIDs to the current entity IDs recursively in
+top-level actions and nested `choose`/`repeat` actions. Valid literal entity IDs
+stay literal. A missing UUID fails actor attachment. UUIDs are bound at attach
+time; every application reload or reconfigure that creates a new actor must
+use `start_with_registries` with the existing, current registry manager to bind
+UUIDs again. `start` remains available for literal entity IDs and reports an
+unresolved UUID rather than dispatching it.
 
 Choose/repeat conditions support state, numeric-state, template, and nested
 and/or/not forms. Templates in service data, target values, variables, and
@@ -148,6 +172,9 @@ action validator/executor for other native integrations; `run_sequence`
 preserves the caller-supplied causal context.
 
 Verification checkpoint: `cargo test -p hass-script --locked --offline` passed
-all 10 tests; strict package Clippy and formatting checks passed. Sun condition
-regressions are `script_sun_condition_offsets_accept_clocks_and_preserve_microseconds`
-and `script_sun_elevation_condition_matches_selector_and_degree_units`.
+all 23 tests; strict all-target package Clippy and package formatting checks
+passed. Device action regressions cover schema/metadata, renamed UUIDs and
+literal IDs, nested actions, exact service calls and causal context, awaited
+completion, provider errors, and script cancellation. Sun condition regressions
+are `script_sun_condition_offsets_accept_clocks_and_preserve_microseconds` and
+`script_sun_elevation_condition_matches_selector_and_degree_units`.

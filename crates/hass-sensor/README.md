@@ -65,10 +65,15 @@ let projection = descriptor.project_with_options(
   then the automatic temperature unit, then the native unit. The automatic unit
   is considered only for the `temperature` device class with a recognized
   temperature native unit.
-- Temperature, pressure, atmospheric pressure, distance, precipitation, energy,
-  energy storage, and power use class-gated converters for the pinned common
-  unit sets. A requested unit change outside the matching converter or without
-  a native unit is an error; the projector never relabels an unchanged value.
+- The 41 device-class entries in Core's pinned `UNIT_CONVERTERS` table map to
+  all 31 `hass-units` families. User and suggested display units convert the
+  state through that class's converter; unsupported classes cannot relabel a
+  value. Converter errors retain Core's invalid-unit side and message, and
+  reciprocal energy-distance conversion of zero becomes `unknown`.
+- Same-unit conversion is an identity before unit validation, so unknown but
+  equal units keep their original state spelling and still follow the existing
+  warning path. Unitless-ratio classes may convert from a missing native unit,
+  because `None` is a real unit in that converter family.
 - Invalid device-class/state-class pairs and invalid native units for the
   complete pinned device-class unit tables are warnings, matching Core's current
   warning paths. An invalid state-class unit, invalid enum use, malformed value,
