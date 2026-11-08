@@ -17,3 +17,5 @@ tokio.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+hass-storage.workspace = true
+tempfile.workspace = true

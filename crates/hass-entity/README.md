@@ -46,6 +46,14 @@ name, icon, and device class. State attributes combine provider values with the
 current registry overrides; unavailable and restored states keep the
 appropriate registry metadata.
 
+`EntitySnapshot::attributes` are omitted while a snapshot is unavailable. Use
+`EntityHandle::publish_publication` with an `EntityPublication` for dynamic
+attributes that must remain live during unavailability. A live
+`Some(Value::Null)` publishes JSON `null`; `None` removes the attribute and
+suppresses its provider fallback. User registry overrides for name, icon, and
+device class still win. The live attribute map is saved with the provider
+snapshot for release and reentry.
+
 ## State, release, and shutdown
 
 `EntitySpec::with_unrecorded_attributes` attaches a `StateRecordingPolicy` to

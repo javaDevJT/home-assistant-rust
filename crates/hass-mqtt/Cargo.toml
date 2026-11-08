@@ -7,6 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 hass-core.workspace = true
+hass-entity.workspace = true
+hass-registry.workspace = true
+hass-switch.workspace = true
+hass-button.workspace = true
 hass-template.workspace = true
 rumqttc.workspace = true
 serde.workspace = true

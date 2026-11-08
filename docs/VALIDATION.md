@@ -1,8 +1,44 @@
 # Validation evidence
 
+## Locally validated switch, button and awaited MQTT (48 crates)
+
+The frozen candidate passes **1,250 tests across 140 targets**, zero failures
+or ignored tests, workspace formatting and strict locked offline all-target
+Clippy. The optimized workspace build passes. Thirteen owned-temporary-directory
+CLI cases pass, including valid mapping durations and rejected type/string-
+duration schemas for both binary-sensor and switch device triggers. No CLI
+check creates a database or extra file or echoes the ignored fixture secret.
+Optimized macOS binary SHA-256:
+`6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca`.
+
+Switch and button descriptors now run through the application's existing
+shared lifecycle in MQTT. Focused checks pass 11 switch, nine button, 26
+entity, 46 Core, 14 generic-control, 53 automation, 43 config, six registry
+helper, three registry-host and 16 MQTT cases. Core owns concurrent service
+calls through cancellation, scope propagation and shutdown, retaining completed
+unexpected join failures. Generic controls preserve concurrent domain start,
+first-error sibling continuation, explicit parent cancellation and contexts.
+
+The compiled MQTT process case proves discovery, registry rename, direct and
+generic commands over the actual wire, HTTP reporting of actual changed
+states, entity/config-entry disable and re-enable, joined shutdown and SQLite
+restart identity. The 22-case end-to-end target includes both binary-sensor and
+switch device YAML trigger/condition/action paths. Three driver cases exercise
+same-manager restart and canceled startup/shutdown. These use synthetic
+providers, owned SQLite and numeric loopback brokers, not physical commands.
+
+MQTT completion cases cover QoS 0 write, QoS 1 PUBACK, QoS 2 PUBCOMP, the
+source-compatible ten-second soft timeout, late acknowledgments and retained
+packet-ID ownership, caller cancellation, button timestamps and overlapping
+presses, and offline completion without reviving availability. Registry
+disablers follow source ordering around unload/setup; startup repairs entity
+flags while preserving persisted device history. Light, cover and fan SDK
+work remains outside this workspace receipt. Publication and exact-source
+Linux CI are pending.
+
 ## Accepted native sensor platforms (46 crates)
 
-The current workspace passes **1,186 tests across 134 targets**, zero failures
+That frozen workspace passes **1,186 tests across 134 targets**, zero failures
 or ignored tests, formatting and strict locked offline all-target Clippy. The
 optimized workspace build and ten isolated CLI cases pass. The CLI accepts a
 device trigger with mapping duration and rejects an unknown device type and

@@ -47,22 +47,136 @@ Source `aade9aa33ecccce1b627359f7fd1023353bb5f49` is published and passes
 [exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42438729634).
 Root independently verified all 956 evidence paths and 610 Rust symbols, unchanged
 pinned snapshots and unrelated records. Inventory is 49 partial / 1,516 unported
-/ zero complete. v150 updates only the parity Markdown/JSON immutable CI receipt.
-Switch v157 is released with eight unit plus two lifecycle cases. Root enrolled
-member 47 and SDK/Entity/Registry dependencies for MQTT; v158 owns only MQTT
-source/tests/README adoption. Root owns existing manager delivery in main and
-NativeDrivers plus the additive live-attribute publication seam. This switch
-wave remains outside the accepted 46-crate receipt.
+/ zero complete. v150's receipt update is published at
+`9cba7580a5a03d4ab5a85e8ea86002b20d23da6a`; that owner is released.
+
+### Switch and shared live metadata continuation (47 crates)
+
+Root enrolled member 47 and SDK/Entity/Registry dependencies for MQTT. Switch
+v157, MQTT adoption v158 and additive entity publication v159 are released.
+Focused checks pass 11 switch, 25 shared entity and seven MQTT wire cases,
+including unavailable assumed state, explicit null/removal, SQLite reopen,
+renamed target commands, disabled target rejection and unknown-state toggle.
+Main supplies its existing shared lifecycle and registries; only switches use
+this SDK path, with other MQTT platforms retaining their existing adapters.
+The live attribute API preserves the four-field legacy snapshot shape and
+user registry override priority. Root owns all production code again.
+
+Review v160 found driver ownership gaps in canceled startup, canceled shutdown
+and same-manager restart. Root now retains startup and cleanup tasks, closes
+admission before cleanup, drains entries and unregisters the exact driver.
+v161's three numeric-loopback lifecycle regressions pass and that owner is
+released. Compiled-process owner v164 writes only new
+`crates/hass/tests/mqtt_process.rs` to verify actual main-path MQTT adoption.
+Button v162 owns only new `crates/hass-button/**` and BUTTON-PORT.md; light v163
+owns only new `crates/hass-light/**` and LIGHT-PORT.md. Their scaffolds remain
+outside workspace acceptance until enrolled. Every worker uses the single
+callable Luna family member `gpt-6-luna` at `max` effort, verified against the
+live native catalog on 2026-11-07; provider/tier controls are unexposed.
+The provisional 47-member gate passed 1,205 tests in 137 targets, formatting,
+strict all-target Clippy, optimized build and ten CLI cases. Its working binary
+hash was `4055171333f14b2f231586a5aa5c7b41755ebf60fb1de4b5e35579ce3c4e7cfa`.
+It was not published or accepted as an immutable source receipt: the actual
+compiled-process fixture exposed the missing config-entry registry propagation
+below. All final checks and the optimized hash must be recomputed after fixes.
+
+### Config-entry propagation and awaited MQTT commands (48 crates)
+
+v164 is released; root owns its compiled MQTT process fixture. It proves actual
+discovery, class/name/assumed state, renamed-ID wire commands and entity-level
+disable. Its final config-entry disable check remains red until registry flags
+are propagated. Source `config_entries.py:2686-2721` enables registry entities
+before setup and disables them after unload. A generic enabled-lease unload
+leaves an unavailable restored placeholder; config-entry disable subsequently
+derives `disabled_by: config_entry` and removes it. Both assertions remain
+distinct in the process fixture; no placeholder assertion substitutes for
+the required final absence. Temporary root diagnostics are removed.
+
+Root added a separate `EntryRegistryDisabledByChanged` lifecycle event with
+that source ordering, preserving Repairs' earlier visibility callback. All
+39 config unit and four integration cases pass after the observer extension.
+v168 is released; root owns new registry `config_lifecycle.rs` and app
+`registry_lifecycle.rs` plus their parent/main wiring. Six registry cases,
+strict package Clippy and formatting pass. Source review added cross-entry
+device-linked entity derivation and startup repair for rows without an owner.
+Startup preserves device history and only rederives entity flags, following
+`entity_registry.py:2610-2645`; replaying device callbacks in entry-ID order
+was rejected. The observer uses a weak config-manager reference and root added
+serialized registry projections outside config-manager locks. Source-AST
+comparison permits `hass` for entity disablers only; the separate device enum
+is preserved. Fresh host/process validation awaits the MQTT implementation.
+
+Root enrolled the released button SDK as member 48 and added its MQTT
+dependency. Nine standalone cases cover timestamp formatting, state-before-
+provider ordering, preserved timestamps on provider failure, repeated equal
+presses, inactive leases and live device-class removal. Core already returns
+successful unchanged publications; explicit lease admission is defensive.
+The actual provider adoption remains pending v169, who exclusively owns MQTT
+source/tests/README for SDK-backed buttons and awaited QoS completion. The
+command contract requires driver ownership after caller cancellation, with
+optimistic state after source-defined completion or the ten-second soft timeout.
+v170 owns only app `homeassistant.rs` for generic controls that await async
+providers; its first 12 cases and package-only strict Clippy pass. Root rejected
+sequential per-domain awaits because source gather starts all providers and
+returns the first error without canceling already-started siblings. v171 owns
+Core source/tests/README for an explicit tracked async-call API with inherited
+execution scope, explicit cancellation and owned shutdown joins. Direct inline
+async cancellation remains unchanged. v170 consumes that API for gather
+concurrency and parent cancellation; root's process fixture adds actual
+generic-control-to-MQTT wire/context proof. Root converted the four app MQTT
+service test callers to async dispatch. Neither extension is accepted before
+its focused and complete expanded gates.
+
+Light v163 and cover v167 are released outside the workspace: their isolated
+SDKs pass 12 and seven cases respectively plus strict lint/formatting. Their
+contracts are LIGHT-PORT.md and COVER-PORT.md; actual adapter migration and
+root enrollment are still pending. Inventory v165 completed a read-only audit,
+changed no files, and is released until the final expanded gate. Accepted
+inventory remains 49 partial / 1,516 unported / zero complete at source 46.
 The compiled clock fixture now validates UTC whole-second output and waits for
 an observed second boundary before proving a fresh restart timestamp.
 Read-only v154's concerns were rejected against the actual pinned
 `sensor/entity.py:574-732`; the source contract's enum wording was corrected.
 SDK warnings are logged without changing valid publication; projection errors
 use the existing provider error path. Actual loaded platform names are exposed
-in config/logger catalogs. v155 owns only `hass-automation` source/tests/README
-for binary device conditions/triggers, reusing state semantics and source UUID
-resolution; device_id is metadata and adds no invented ownership check. No new
-platform inventory status or full 46-member receipt is claimed yet.
+in config/logger catalogs. Released v155 implemented binary device conditions
+and triggers with state semantics and source UUID resolution; device_id is
+metadata and adds no invented ownership check.
+
+The final 48-member local gate is green: **1,250 tests / 140 targets**, zero
+failures or ignored cases, final workspace formatting and strict locked offline
+all-target Clippy. The optimized workspace build and all 13 owned-temp CLI
+cases pass. Three new switch device cases accept a mapping duration and reject
+an invalid type or string duration; the prior ten CLI cases remain green with
+no database/extra files or ignored-secret echo. Optimized macOS binary SHA-256
+is `6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca`.
+
+v169 and v172 are released. MQTT passes two unit and 14 wire cases, including
+actual changed-state results, completion-time availability and fresh attribute
+retention. Automation passes 53 cases. Root's compiled MQTT fixture passes
+actual direct/generic/HTTP wire calls and results, registry/config-entry disable,
+quiescence and restart identity. The three registry-host cases and both binary
+and switch compiled device-automation cases pass in the full 22-case process
+target. Root's released-placeholder cleanup regression passes with all 26
+entity cases. Core v171's final 46 cases retain completed unexpected join
+failures until shutdown while keeping intentional cancellation separate;
+generic controls pass 14 cases. Only parity v165 writes the two inventory
+files now; root owns the frozen code, other docs and publication.
+
+Next-wave v173 owns only isolated `crates/hass-fan/**` and FAN-PORT.md with the
+same explicit native Luna/max policy. Light/cover SDKs remain ready for later
+enrollment and concrete MQTT adoption. Isolated v174 owns only new
+`crates/hass-units/**` and UNITS-PORT.md for complete source-backed conversion
+families; current sensor conversion families remain partial. Neither future
+SDK enters this receipt. Root independently verified the inventory changes
+are confined to six domain records and their policy mirrors, with immutable
+snapshots and unrelated records unchanged. All 1,586 local path references and
+966 distinct Rust symbols resolve; the historical Core public `call_service`
+method is implemented in its declared `service_dispatch` module.
+Another follow-up is actual loaded
+platform names in the config/logger catalog: current API config is seeded
+from YAML, while the logger adds loaded entry domains without their platform
+dependencies. These gaps do not change the current partial acceptance.
 
 ### Accepted native media and asynchronous services (44 crates)
 

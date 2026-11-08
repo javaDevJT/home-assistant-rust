@@ -9,7 +9,10 @@ mod service_dispatch;
 mod service_snapshot_tests;
 mod service_tasks;
 
+pub use service_tasks::{OwnedServiceCall, ServiceCallCancellationHandle};
+
 use std::any::Any;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
@@ -616,6 +619,51 @@ pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<ServiceResult>> + Se
 pub type AsyncServiceHandler = Arc<dyn Fn(Runtime, ServiceCall) -> ServiceFuture + Send + Sync>;
 /// Installs a trusted execution-local scope for one handler invocation/poll.
 pub type ServiceExecutionScope = Arc<dyn Fn() -> Box<dyn Any + Send> + Send + Sync>;
+
+thread_local! {
+    static ACTIVE_SERVICE_EXECUTION_SCOPES: RefCell<Vec<ServiceExecutionScope>> = RefCell::new(Vec::new());
+}
+
+pub(crate) fn active_service_execution_scope() -> Option<ServiceExecutionScope> {
+    ACTIVE_SERVICE_EXECUTION_SCOPES.with(|scopes| scopes.borrow().last().cloned())
+}
+
+struct ActiveServiceExecutionScopeGuard;
+
+impl ActiveServiceExecutionScopeGuard {
+    fn enter(scope: ServiceExecutionScope) -> Self {
+        ACTIVE_SERVICE_EXECUTION_SCOPES.with(|scopes| scopes.borrow_mut().push(scope));
+        Self
+    }
+}
+
+impl Drop for ActiveServiceExecutionScopeGuard {
+    fn drop(&mut self) {
+        ACTIVE_SERVICE_EXECUTION_SCOPES.with(|scopes| {
+            scopes
+                .borrow_mut()
+                .pop()
+                .expect("service execution scopes are entered and left in stack order");
+        });
+    }
+}
+
+pub(crate) struct ServiceExecutionScopeGuard {
+    _scope_guard: Box<dyn Any + Send>,
+    _active_scope_guard: ActiveServiceExecutionScopeGuard,
+}
+
+impl ServiceExecutionScopeGuard {
+    pub(crate) fn enter(scope: &ServiceExecutionScope) -> Self {
+        let active_scope_guard = ActiveServiceExecutionScopeGuard::enter(Arc::clone(scope));
+        let scope_guard = scope();
+        Self {
+            _scope_guard: scope_guard,
+            _active_scope_guard: active_scope_guard,
+        }
+    }
+}
+
 /// Declares whether a service supports response-bearing calls.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceResponseSupport {
@@ -2040,6 +2088,7 @@ fn validate_time_range(start: DateTime<Utc>, end: DateTime<Utc>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    use std::cell::Cell;
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
@@ -2110,6 +2159,22 @@ mod tests {
     impl Drop for ScopeCountGuard {
         fn drop(&mut self) {
             self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    thread_local! {
+        static TEST_EXECUTION_SCOPE_VALUE: Cell<Option<u8>> = const { Cell::new(None) };
+    }
+
+    struct TestExecutionScopeGuard {
+        previous: Option<u8>,
+        active: Arc<AtomicUsize>,
+    }
+
+    impl Drop for TestExecutionScopeGuard {
+        fn drop(&mut self) {
+            TEST_EXECUTION_SCOPE_VALUE.with(|value| value.set(self.previous));
+            self.active.fetch_sub(1, Ordering::SeqCst);
         }
     }
 
@@ -4264,6 +4329,382 @@ mod tests {
         call.abort();
         let _ = call.await;
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn dropped_owned_async_waiter_detaches_and_shutdown_joins_call() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let handler_started = Arc::clone(&started_tx);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+        let handler_release = Arc::clone(&release_rx);
+        let handler_finished = Arc::new(AtomicBool::new(false));
+        let finished = Arc::clone(&handler_finished);
+        runtime
+            .register_async_service(
+                "demo",
+                "owned_waiter_drop",
+                Value::Null,
+                Arc::new(move |_runtime, call| -> ServiceFuture {
+                    let started = handler_started.lock().unwrap().take();
+                    let release = handler_release.lock().unwrap().take();
+                    let finished = Arc::clone(&finished);
+                    Box::pin(async move {
+                        if let Some(started) = started {
+                            let _ = started.send(());
+                        }
+                        release.expect("release receiver is present").await.unwrap();
+                        finished.store(true, Ordering::SeqCst);
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        let owned = runtime
+            .spawn_service_call_async(service_call("demo", "owned_waiter_drop", empty_map()))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("owned async handler did not start")
+            .unwrap();
+        drop(owned);
+
+        let shutdown_runtime = runtime.clone();
+        let shutdown =
+            tokio::spawn(async move { shutdown_runtime.shutdown_service_tasks_async().await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runtime.inner.service_tasks.admission_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown did not close owned task admission");
+        assert!(!shutdown.is_finished());
+        assert!(!handler_finished.load(Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown did not join the detached owned call")
+            .unwrap()
+            .unwrap();
+        assert!(handler_finished.load(Ordering::SeqCst));
+        assert!(matches!(
+            runtime.spawn_service_call_async(service_call("demo", "owned_waiter_drop", empty_map())),
+            Err(Error::Service(message)) if message.contains("admission is closed")
+        ));
+        assert_eq!(runtime.inner.service_tasks.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_owned_call_cancellation_drops_callback_without_shutdown_failure() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let handler_dropped = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let handler_started = Arc::clone(&started_tx);
+        runtime
+            .register_async_service(
+                "demo",
+                "owned_cancel",
+                Value::Null,
+                Arc::new(move |_runtime, _call| -> ServiceFuture {
+                    let dropped = Arc::clone(&handler_dropped);
+                    let started = handler_started.lock().unwrap().take();
+                    Box::pin(async move {
+                        let _drop_flag = DropFlag(dropped);
+                        if let Some(started) = started {
+                            let _ = started.send(());
+                        }
+                        std::future::pending::<Result<ServiceResult>>().await
+                    })
+                }),
+            )
+            .unwrap();
+
+        let mut owned = runtime
+            .spawn_service_call_async(service_call("demo", "owned_cancel", empty_map()))
+            .unwrap();
+        let cancellation = owned.cancellation_handle();
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("owned async handler did not start")
+            .unwrap();
+        cancellation.cancel();
+
+        let result = tokio::time::timeout(Duration::from_secs(2), owned.result())
+            .await
+            .expect("canceled owned call did not resolve its waiter");
+        assert!(matches!(
+            result,
+            Err(Error::Service(message)) if message.contains("owned async service call was canceled")
+        ));
+        assert!(dropped.load(Ordering::SeqCst));
+        for _ in 0..100 {
+            if runtime.inner.service_tasks.pending_count() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runtime.inner.service_tasks.pending_count(), 0);
+        let shutdown = runtime.shutdown_service_tasks_async().await;
+        assert!(
+            shutdown.is_ok(),
+            "completed intentional cancellation failed shutdown: {shutdown:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn first_owned_call_error_does_not_cancel_an_unrelated_owned_call() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        runtime
+            .register_async_service(
+                "demo",
+                "owned_error",
+                Value::Null,
+                Arc::new(|_runtime, _call| -> ServiceFuture {
+                    Box::pin(async { Err(Error::Service("first provider failed".to_owned())) })
+                }),
+            )
+            .unwrap();
+
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let handler_started = Arc::clone(&started_tx);
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+        let handler_release = Arc::clone(&release_rx);
+        let handler_finished = Arc::new(AtomicBool::new(false));
+        let finished = Arc::clone(&handler_finished);
+        runtime
+            .register_async_service(
+                "demo",
+                "owned_sibling",
+                Value::Null,
+                Arc::new(move |_runtime, call| -> ServiceFuture {
+                    let started = handler_started.lock().unwrap().take();
+                    let release = handler_release.lock().unwrap().take();
+                    let finished = Arc::clone(&finished);
+                    Box::pin(async move {
+                        if let Some(started) = started {
+                            let _ = started.send(());
+                        }
+                        release.expect("release receiver is present").await.unwrap();
+                        finished.store(true, Ordering::SeqCst);
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        let mut pending = runtime
+            .spawn_service_call_async(service_call("demo", "owned_sibling", empty_map()))
+            .unwrap();
+        let mut failing = runtime
+            .spawn_service_call_async(service_call("demo", "owned_error", empty_map()))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("unrelated owned call did not start")
+            .unwrap();
+        assert_eq!(
+            failing.result().await.unwrap_err(),
+            Error::Service("first provider failed".to_owned())
+        );
+        assert!(!handler_finished.load(Ordering::SeqCst));
+
+        let shutdown_runtime = runtime.clone();
+        let shutdown =
+            tokio::spawn(async move { shutdown_runtime.shutdown_service_tasks_async().await });
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+        assert!(!handler_finished.load(Ordering::SeqCst));
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("shutdown did not wait for the unrelated owned call")
+            .unwrap()
+            .unwrap();
+        assert!(handler_finished.load(Ordering::SeqCst));
+        assert!(pending.result().await.is_ok());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn owned_nested_call_carries_execution_scope_across_polls_and_restores_it() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let scope_active = Arc::clone(&active);
+        let scope: ServiceExecutionScope = Arc::new(move || {
+            scope_active.fetch_add(1, Ordering::SeqCst);
+            let previous = TEST_EXECUTION_SCOPE_VALUE.with(|value| value.replace(Some(7)));
+            Box::new(TestExecutionScopeGuard {
+                previous,
+                active: Arc::clone(&scope_active),
+            })
+        });
+
+        runtime
+            .register_async_service(
+                "demo",
+                "owned_scoped_child",
+                Value::Null,
+                Arc::new(|_runtime, call| -> ServiceFuture {
+                    assert_eq!(TEST_EXECUTION_SCOPE_VALUE.with(Cell::get), Some(7));
+                    Box::pin(async move {
+                        assert_eq!(TEST_EXECUTION_SCOPE_VALUE.with(Cell::get), Some(7));
+                        tokio::task::yield_now().await;
+                        assert_eq!(TEST_EXECUTION_SCOPE_VALUE.with(Cell::get), Some(7));
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        runtime
+            .register_async_service(
+                "demo",
+                "owned_scoped_parent",
+                Value::Null,
+                Arc::new(|runtime, call| -> ServiceFuture {
+                    assert_eq!(TEST_EXECUTION_SCOPE_VALUE.with(Cell::get), Some(7));
+                    let mut child = runtime
+                        .spawn_service_call_async(service_call(
+                            "demo",
+                            "owned_scoped_child",
+                            empty_map(),
+                        ))
+                        .expect("nested owned call should be admitted");
+                    Box::pin(async move {
+                        assert_eq!(TEST_EXECUTION_SCOPE_VALUE.with(Cell::get), Some(7));
+                        child.result().await?;
+                        assert_eq!(TEST_EXECUTION_SCOPE_VALUE.with(Cell::get), Some(7));
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        runtime
+            .call_service_async_scoped(
+                service_call("demo", "owned_scoped_parent", empty_map()),
+                scope,
+            )
+            .await
+            .unwrap();
+        assert_eq!(TEST_EXECUTION_SCOPE_VALUE.with(Cell::get), None);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        runtime.shutdown_service_tasks_async().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn owned_async_panics_are_observed_by_waiters_and_shutdown() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        runtime
+            .register_async_service(
+                "demo",
+                "owned_panic",
+                Value::Null,
+                Arc::new(|_runtime, call| -> ServiceFuture {
+                    let should_panic = call.service == "owned_panic";
+                    let context = call.context;
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        if should_panic {
+                            panic!("owned async panic fixture");
+                        }
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        let mut owned = runtime
+            .spawn_service_call_async(service_call("demo", "owned_panic", empty_map()))
+            .unwrap();
+
+        let shutdown = runtime.shutdown_service_tasks_async().await.unwrap_err();
+        assert!(shutdown.to_string().contains("owned async panic fixture"));
+        let result = owned.result().await.unwrap_err();
+        assert!(result.to_string().contains("owned async panic fixture"));
+        assert!(matches!(
+            runtime.spawn_service_call_async(service_call("demo", "owned_panic", empty_map())),
+            Err(Error::Service(message)) if message.contains("admission is closed")
+        ));
+    }
+
+    #[tokio::test]
+    async fn detached_owned_panic_is_retained_until_shutdown() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        runtime
+            .register_async_service(
+                "demo",
+                "detached_owned_panic",
+                Value::Null,
+                Arc::new(|_runtime, call| -> ServiceFuture {
+                    let context = call.context;
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        if context.id == "async-service-context" {
+                            panic!("detached owned async panic fixture");
+                        }
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        let owned = runtime
+            .spawn_service_call_async(service_call("demo", "detached_owned_panic", empty_map()))
+            .unwrap();
+        drop(owned);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while runtime.inner.service_tasks.pending_count() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached async task did not finish before shutdown");
+        assert_eq!(runtime.inner.service_tasks.pending_count(), 0);
+
+        let shutdown = runtime.shutdown_service_tasks_async().await.unwrap_err();
+        assert!(
+            shutdown
+                .to_string()
+                .contains("detached owned async panic fixture")
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

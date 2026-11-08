@@ -1,0 +1,17 @@
+[package]
+name = "hass-switch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed native switch entity description, state projection, and commands"
+
+[dependencies]
+hass-core.workspace = true
+hass-entity.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hass-registry.workspace = true
+tokio.workspace = true

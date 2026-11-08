@@ -2085,8 +2085,8 @@ counter:
         );
     }
 
-    #[test]
-    fn text_select_and_generic_boolean_services_use_real_helper_state() {
+    #[tokio::test]
+    async fn text_select_and_generic_boolean_services_use_real_helper_state() {
         let runtime = runtime(Arc::new(MemoryStore::default()));
         let _generic = crate::homeassistant::HomeAssistantServices::start(runtime.clone()).unwrap();
         let helpers: Helpers = serde_yaml::from_str(
@@ -2123,20 +2123,22 @@ counter:
         );
 
         runtime
-            .call_service(call(
+            .call_service_async(call(
                 "homeassistant",
                 "turn_on",
                 json!({"entity_id": "input_boolean.guest_mode"}),
                 json!({}),
             ))
+            .await
             .unwrap();
         runtime
-            .call_service(call(
+            .call_service_async(call(
                 "homeassistant",
                 "toggle",
                 json!({"entity_id": "input_boolean.guest_mode"}),
                 json!({}),
             ))
+            .await
             .unwrap();
         assert_eq!(
             runtime.get_state("input_boolean.guest_mode").unwrap().state,

@@ -59,6 +59,7 @@ impl ConfigLifecycleObserver for Lifecycle {
                     failures.push(format!("issue visibility refresh: {error}"));
                 }
             }
+            ConfigLifecycleEvent::EntryRegistryDisabledByChanged { .. } => {}
         }
         if failures.is_empty() {
             Ok(())

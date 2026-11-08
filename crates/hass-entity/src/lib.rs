@@ -226,6 +226,51 @@ impl EntitySnapshot {
     }
 }
 
+/// A provider state publication with attributes that remain live while the
+/// entity is unavailable.
+///
+/// Ordinary [`EntitySnapshot::attributes`] are published only while the
+/// snapshot is available. Use [`Self::with_live_attribute`] for attributes
+/// that must continue to reflect provider metadata during unavailability.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntityPublication {
+    /// The provider state and ordinary availability-scoped attributes.
+    pub snapshot: EntitySnapshot,
+    live_attributes: BTreeMap<String, LiveAttributeUpdate>,
+}
+
+impl From<EntitySnapshot> for EntityPublication {
+    fn from(snapshot: EntitySnapshot) -> Self {
+        Self {
+            snapshot,
+            live_attributes: BTreeMap::new(),
+        }
+    }
+}
+
+impl EntityPublication {
+    /// Add or remove one live attribute.
+    ///
+    /// `Some(Value::Null)` publishes an explicit JSON `null`. `None` removes
+    /// the attribute and suppresses its provider fallback until the next
+    /// publication changes it. Registry user overrides still take priority.
+    #[must_use]
+    pub fn with_live_attribute(mut self, name: impl Into<String>, value: Option<Value>) -> Self {
+        self.live_attributes.insert(
+            name.into(),
+            value.map_or(LiveAttributeUpdate::Remove, LiveAttributeUpdate::Set),
+        );
+        self
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+enum LiveAttributeUpdate {
+    Set(Value),
+    Remove,
+}
+
 /// Current lifecycle status for a provider entity.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EntityStatus {
@@ -501,10 +546,22 @@ impl EntityHandle {
     /// Returns `Ok(None)` when a registry entry is disabled, removed, or the
     /// lease has been released. A removed entry is never recreated by publish.
     pub fn publish(&self, snapshot: EntitySnapshot) -> Result<Option<StateChange>> {
+        self.publish_publication(EntityPublication::from(snapshot))
+    }
+
+    /// Publish provider state with live attributes that remain visible while
+    /// the entity is unavailable.
+    ///
+    /// Returns `Ok(None)` when a registry entry is disabled, removed, or the
+    /// lease has been released. A removed entry is never recreated by publish.
+    pub fn publish_publication(
+        &self,
+        publication: EntityPublication,
+    ) -> Result<Option<StateChange>> {
         let Some(inner) = self.lease.manager.upgrade() else {
             return Err(Error::Service("entity lifecycle manager is closed".into()));
         };
-        inner.publish(&self.lease.receipt_key, self.lease.id, snapshot)
+        inner.publish(&self.lease.receipt_key, self.lease.id, publication)
     }
 
     /// Release this provider lease. Registered enabled entities become
@@ -565,6 +622,7 @@ struct EntityRecord {
     info: ProviderEntityInfo,
     recording_policy: StateRecordingPolicy,
     latest: Option<EntitySnapshot>,
+    live_attributes: BTreeMap<String, LiveAttributeUpdate>,
     owned_state: Option<State>,
     status: EntityStatus,
     lease_id: u64,
@@ -591,6 +649,14 @@ struct RestoredSnapshot {
     saved_at: u64,
     #[serde(default)]
     owned_state: Option<State>,
+    #[serde(default)]
+    live_attributes: Option<BTreeMap<String, LiveAttributeUpdate>>,
+}
+
+struct SnapshotWriteOptions<'a> {
+    live_attributes: &'a BTreeMap<String, LiveAttributeUpdate>,
+    restored: bool,
+    expected: Option<&'a State>,
 }
 
 struct EntityLifecycleInner {
@@ -827,6 +893,7 @@ impl EntityLifecycleInner {
                 info,
                 recording_policy: StateRecordingPolicy::default(),
                 latest: Some(snapshot_from_state(&state)),
+                live_attributes: self.restored_live_attributes(&entry.id),
                 owned_state: Some(state.clone()),
                 status: if entry.disabled_by.is_some() {
                     EntityStatus::Disabled {
@@ -861,8 +928,13 @@ impl EntityLifecycleInner {
                 attributes: Map::new(),
                 context: snapshot.context,
             };
-            let attributes =
-                self.compose_attributes(&unavailable, Some(&entry), &record.info, true);
+            let attributes = self.compose_attributes(
+                &unavailable,
+                Some(&entry),
+                &record.info,
+                &record.live_attributes,
+                true,
+            );
             let Some(state_change) = self.runtime.set_state_if_unchanged_with_recording_policy(
                 &entry.entity_id,
                 Some(&state),
@@ -1200,6 +1272,7 @@ impl EntityLifecycleInner {
                     info,
                     recording_policy: spec.recording_policy.clone(),
                     latest: None,
+                    live_attributes: BTreeMap::new(),
                     owned_state: existing_state.clone(),
                     status,
                     lease_id: token,
@@ -1208,6 +1281,7 @@ impl EntityLifecycleInner {
                 let restored = self.restored_snapshot(&record.restore_key);
                 if let Some(restored) = restored {
                     record.latest = Some(restored);
+                    record.live_attributes = self.restored_live_attributes(&record.restore_key);
                 } else if let Some(state) = existing_state {
                     record.latest = Some(snapshot_from_state(&state));
                 }
@@ -1255,6 +1329,13 @@ impl EntityLifecycleInner {
             .map(|stored| stored.snapshot.clone())
     }
 
+    fn restored_live_attributes(&self, restore_key: &str) -> BTreeMap<String, LiveAttributeUpdate> {
+        lock(&self.restore_data)
+            .get(restore_key)
+            .and_then(|stored| stored.live_attributes.clone())
+            .unwrap_or_default()
+    }
+
     fn restored_owned_state(&self, restore_key: &str) -> Option<State> {
         lock(&self.restore_data)
             .get(restore_key)
@@ -1297,6 +1378,7 @@ impl EntityLifecycleInner {
             record.entity_id = entry.entity_id.clone();
         }
         record.latest = Some(snapshot.clone());
+        record.live_attributes = self.restored_live_attributes(&record.restore_key);
         let current = self.runtime.get_state(&record.entity_id);
         let should_restore = current
             .as_ref()
@@ -1307,8 +1389,11 @@ impl EntityLifecycleInner {
                 &record.entity_id,
                 &snapshot,
                 registry_entry.as_ref(),
-                false,
-                current.as_ref(),
+                SnapshotWriteOptions {
+                    live_attributes: &record.live_attributes,
+                    restored: false,
+                    expected: current.as_ref(),
+                },
             )?
             else {
                 record.owned_state = None;
@@ -1345,6 +1430,7 @@ impl EntityLifecycleInner {
                 snapshot,
                 saved_at: now_seconds(),
                 owned_state: record.owned_state.clone(),
+                live_attributes: Some(record.live_attributes.clone()),
             },
         );
         if let Err(error) = self.persist_restore_data(&restore_data) {
@@ -1436,8 +1522,13 @@ impl EntityLifecycleInner {
                             .map(|value| value.context.clone())
                             .unwrap_or_default(),
                     };
-                    let attributes =
-                        self.compose_attributes(&unavailable, Some(entry), &record.info, true);
+                    let attributes = self.compose_attributes(
+                        &unavailable,
+                        Some(entry),
+                        &record.info,
+                        &record.live_attributes,
+                        true,
+                    );
                     let state_change = self.runtime.set_state_if_unchanged_with_recording_policy(
                         &record.entity_id,
                         Some(expected),
@@ -1574,8 +1665,12 @@ impl EntityLifecycleInner {
         self: &Arc<Self>,
         receipt_key: &str,
         lease_id: u64,
-        snapshot: EntitySnapshot,
+        publication: EntityPublication,
     ) -> Result<Option<StateChange>> {
+        let EntityPublication {
+            snapshot,
+            live_attributes,
+        } = publication;
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::Service("entity lifecycle manager is closed".into()));
         }
@@ -1645,8 +1740,10 @@ impl EntityLifecycleInner {
             self.emit_change(record, status, EntityLifecycleReason::Renamed, Some(old_id));
         }
         record.entity_id = current_id;
-        let state_change = self.write_snapshot(record, &snapshot, entry.as_ref(), false)?;
+        let state_change =
+            self.write_snapshot(record, &snapshot, entry.as_ref(), &live_attributes, false)?;
         record.latest = Some(snapshot);
+        record.live_attributes = live_attributes;
         record.owned_state = Some(state_change.state.clone());
         Ok(Some(state_change))
     }
@@ -1684,8 +1781,11 @@ impl EntityLifecycleInner {
                 &entry.entity_id,
                 snapshot,
                 Some(entry),
-                false,
-                None,
+                SnapshotWriteOptions {
+                    live_attributes: &record.live_attributes,
+                    restored: false,
+                    expected: None,
+                },
             )?
             else {
                 return Err(Error::InvalidInput(format!(
@@ -1737,6 +1837,7 @@ impl EntityLifecycleInner {
         record: &EntityRecord,
         snapshot: &EntitySnapshot,
         registry_entry: Option<&EntityEntry>,
+        live_attributes: &BTreeMap<String, LiveAttributeUpdate>,
         restored: bool,
     ) -> Result<StateChange> {
         self.write_snapshot_to_id(
@@ -1744,6 +1845,7 @@ impl EntityLifecycleInner {
             &record.entity_id,
             snapshot,
             registry_entry,
+            live_attributes,
             restored,
         )
     }
@@ -1754,6 +1856,7 @@ impl EntityLifecycleInner {
         entity_id: &str,
         snapshot: &EntitySnapshot,
         registry_entry: Option<&EntityEntry>,
+        live_attributes: &BTreeMap<String, LiveAttributeUpdate>,
         restored: bool,
     ) -> Result<StateChange> {
         let state = if !snapshot.available {
@@ -1761,7 +1864,13 @@ impl EntityLifecycleInner {
         } else {
             snapshot.state.as_deref().unwrap_or("unknown")
         };
-        let attributes = self.compose_attributes(snapshot, registry_entry, &record.info, restored);
+        let attributes = self.compose_attributes(
+            snapshot,
+            registry_entry,
+            &record.info,
+            live_attributes,
+            restored,
+        );
         self.runtime.set_state_with_recording_policy(
             entity_id,
             state,
@@ -1778,18 +1887,23 @@ impl EntityLifecycleInner {
         entity_id: &str,
         snapshot: &EntitySnapshot,
         registry_entry: Option<&EntityEntry>,
-        restored: bool,
-        expected: Option<&State>,
+        options: SnapshotWriteOptions<'_>,
     ) -> Result<Option<StateChange>> {
         let state = if !snapshot.available {
             "unavailable"
         } else {
             snapshot.state.as_deref().unwrap_or("unknown")
         };
-        let attributes = self.compose_attributes(snapshot, registry_entry, &record.info, restored);
+        let attributes = self.compose_attributes(
+            snapshot,
+            registry_entry,
+            &record.info,
+            options.live_attributes,
+            options.restored,
+        );
         self.runtime.set_state_if_unchanged_with_recording_policy(
             entity_id,
-            expected,
+            options.expected,
             state,
             attributes,
             snapshot.context.clone(),
@@ -1803,6 +1917,7 @@ impl EntityLifecycleInner {
         snapshot: &EntitySnapshot,
         registry_entry: Option<&EntityEntry>,
         info: &ProviderEntityInfo,
+        live_attributes: &BTreeMap<String, LiveAttributeUpdate>,
         restored: bool,
     ) -> Map<String, Value> {
         let mut attributes = Map::new();
@@ -1816,53 +1931,110 @@ impl EntityLifecycleInner {
         if snapshot.available {
             attributes.extend(snapshot.attributes.clone());
         }
+        for (name, update) in live_attributes {
+            match update {
+                LiveAttributeUpdate::Set(value) => {
+                    attributes.insert(name.clone(), value.clone());
+                }
+                LiveAttributeUpdate::Remove => {
+                    attributes.remove(name);
+                }
+            }
+        }
 
+        let name_removed = matches!(
+            live_attributes.get("friendly_name"),
+            Some(LiveAttributeUpdate::Remove)
+        );
+        let name_is_live = matches!(
+            live_attributes.get("friendly_name"),
+            Some(LiveAttributeUpdate::Set(_))
+        );
         let name_override = registry_entry.and_then(|entry| non_empty(entry.name.as_deref()));
-        let original_name = registry_entry
-            .and_then(|entry| entry.original_name.as_deref())
-            .or(info.original_name.as_deref());
+        let original_name = (!name_removed)
+            .then(|| {
+                registry_entry
+                    .and_then(|entry| entry.original_name.as_deref())
+                    .or(info.original_name.as_deref())
+            })
+            .flatten();
         insert_override_or_fallback(
             &mut attributes,
             "friendly_name",
             name_override,
             original_name,
-            snapshot.available,
+            snapshot.available || name_is_live,
         );
 
+        let icon_removed = matches!(
+            live_attributes.get("icon"),
+            Some(LiveAttributeUpdate::Remove)
+        );
+        let icon_is_live = matches!(
+            live_attributes.get("icon"),
+            Some(LiveAttributeUpdate::Set(_))
+        );
         let icon_override = registry_entry.and_then(|entry| non_empty(entry.icon.as_deref()));
-        let original_icon = registry_entry
-            .and_then(|entry| entry.original_icon.as_deref())
-            .or(info.original_icon.as_deref());
+        let original_icon = (!icon_removed)
+            .then(|| {
+                registry_entry
+                    .and_then(|entry| entry.original_icon.as_deref())
+                    .or(info.original_icon.as_deref())
+            })
+            .flatten();
         insert_override_or_fallback(
             &mut attributes,
             "icon",
             icon_override,
             original_icon,
-            snapshot.available,
+            snapshot.available || icon_is_live,
         );
 
+        let class_removed = matches!(
+            live_attributes.get("device_class"),
+            Some(LiveAttributeUpdate::Remove)
+        );
+        let class_is_live = matches!(
+            live_attributes.get("device_class"),
+            Some(LiveAttributeUpdate::Set(_))
+        );
         let class_override =
             registry_entry.and_then(|entry| non_empty(entry.device_class.as_deref()));
-        let original_class = registry_entry
-            .and_then(|entry| entry.original_device_class.as_deref())
-            .or(info.original_device_class.as_deref());
+        let original_class = (!class_removed)
+            .then(|| {
+                registry_entry
+                    .and_then(|entry| entry.original_device_class.as_deref())
+                    .or(info.original_device_class.as_deref())
+            })
+            .flatten();
         insert_override_or_fallback(
             &mut attributes,
             "device_class",
             class_override,
             original_class,
-            snapshot.available,
+            snapshot.available || class_is_live,
         );
 
-        let unit = registry_entry
-            .and_then(|entry| entry.unit_of_measurement.as_deref())
-            .or(info.unit_of_measurement.as_deref());
-        if !attributes.contains_key("unit_of_measurement")
-            && let Some(unit) = unit
-        {
-            attributes.insert("unit_of_measurement".into(), Value::String(unit.into()));
+        let unit_removed = matches!(
+            live_attributes.get("unit_of_measurement"),
+            Some(LiveAttributeUpdate::Remove)
+        );
+        if !unit_removed && !attributes.contains_key("unit_of_measurement") {
+            let unit = registry_entry
+                .and_then(|entry| entry.unit_of_measurement.as_deref())
+                .or(info.unit_of_measurement.as_deref());
+            if let Some(unit) = unit {
+                attributes.insert("unit_of_measurement".into(), Value::String(unit.into()));
+            }
         }
-        if info.supported_features != 0 && !attributes.contains_key("supported_features") {
+        let features_removed = matches!(
+            live_attributes.get("supported_features"),
+            Some(LiveAttributeUpdate::Remove)
+        );
+        if !features_removed
+            && info.supported_features != 0
+            && !attributes.contains_key("supported_features")
+        {
             attributes.insert(
                 "supported_features".into(),
                 Value::from(info.supported_features),
@@ -1921,7 +2093,7 @@ impl EntityLifecycleInner {
         }
     }
 
-    fn reconcile_all(&self) -> Result<()> {
+    fn reconcile_all(&self, context: &Context) -> Result<()> {
         let mut records = lock(&self.records);
         let mut first_error = None;
         for record in records.values_mut() {
@@ -1929,6 +2101,28 @@ impl EntityLifecycleInner {
                 continue;
             }
             if let Err(error) = self.reconcile_record(record) {
+                first_error.get_or_insert(error);
+            }
+        }
+        drop(records);
+        // A provider release removes its live record, but its registered
+        // unavailable placeholder still follows registry disable changes.
+        // This is also needed when a config entry disables registries after
+        // unloading its providers, as the pinned entity registry does.
+        for entry in self.registries.entities() {
+            if entry.disabled_by.is_none() {
+                continue;
+            }
+            let Some(state) = self.runtime.get_state(&entry.entity_id) else {
+                continue;
+            };
+            if state.attributes.get("restored") != Some(&Value::Bool(true)) {
+                continue;
+            }
+            if let Err(error) = self
+                .runtime
+                .remove_state_if_unchanged(&state, context.clone())
+            {
                 first_error.get_or_insert(error);
             }
         }
@@ -1987,8 +2181,11 @@ impl EntityLifecycleInner {
                             &record.entity_id,
                             &snapshot,
                             Some(&entry),
-                            false,
-                            None,
+                            SnapshotWriteOptions {
+                                live_attributes: &record.live_attributes,
+                                restored: false,
+                                expected: None,
+                            },
                         )?
                         .ok_or_else(|| {
                             Error::InvalidInput(format!(
@@ -1997,7 +2194,13 @@ impl EntityLifecycleInner {
                             ))
                         })?
                     } else {
-                        self.write_snapshot(record, &snapshot, Some(&entry), false)?
+                        self.write_snapshot(
+                            record,
+                            &snapshot,
+                            Some(&entry),
+                            &record.live_attributes,
+                            false,
+                        )?
                     };
                     record.owned_state = Some(state_change.state);
                     self.consume_restored_snapshot(&record.restore_key)?;
@@ -2023,8 +2226,13 @@ impl EntityLifecycleInner {
             }
             EntityStatus::Active { .. } => {
                 if let Some(snapshot) = record.latest.clone() {
-                    let state_change =
-                        self.write_snapshot(record, &snapshot, Some(&entry), false)?;
+                    let state_change = self.write_snapshot(
+                        record,
+                        &snapshot,
+                        Some(&entry),
+                        &record.live_attributes,
+                        false,
+                    )?;
                     record.owned_state = Some(state_change.state);
                 }
                 self.emit_change(
@@ -2073,14 +2281,14 @@ async fn registry_event_loop(
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
-                let _ = inner.reconcile_all();
+                let _ = inner.reconcile_all(&event.context);
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 let Some(inner) = inner.upgrade() else {
                     return;
                 };
-                let _ = inner.reconcile_all();
+                let _ = inner.reconcile_all(&Context::default());
             }
             Err(broadcast::error::RecvError::Closed) => return,
         }
@@ -2952,6 +3160,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn released_placeholder_follows_registry_disable_and_preserves_foreign_state() {
+        let (runtime, _) = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+        let spec = registered_spec("fixture");
+        let handle = lifecycle
+            .register_batch(vec![spec.clone()])
+            .unwrap()
+            .remove(0);
+        let entity_id = handle.current_entity_id().unwrap();
+        handle.publish(EntitySnapshot::new("21")).unwrap();
+        handle.release().unwrap();
+        assert_eq!(
+            runtime
+                .get_state(&entity_id)
+                .unwrap()
+                .attributes
+                .get("restored"),
+            Some(&json!(true))
+        );
+
+        registries
+            .update_entity(
+                &entity_id,
+                EntityUpdate {
+                    disabled_by: Some(Some("config_entry".into())),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        wait_until(|| runtime.get_state(&entity_id).is_none()).await;
+
+        registries
+            .update_entity(
+                &entity_id,
+                EntityUpdate {
+                    disabled_by: Some(None),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        let reentered = lifecycle.register_batch(vec![spec]).unwrap().remove(0);
+        assert_eq!(runtime.get_state(&entity_id).unwrap().state, "21");
+        reentered.release().unwrap();
+        let foreign = runtime
+            .set_state(
+                &entity_id,
+                "external",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap()
+            .state;
+        registries
+            .update_entity(
+                &entity_id,
+                EntityUpdate {
+                    disabled_by: Some(Some("user".into())),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        lifecycle.inner.reconcile_all(&Context::default()).unwrap();
+        assert_eq!(runtime.get_state(&entity_id), Some(foreign.clone()));
+        lifecycle.shutdown().await.unwrap();
+        assert_eq!(runtime.get_state(&entity_id), Some(foreign));
+    }
+
+    #[tokio::test]
     async fn batch_preflight_and_explicit_release_report_lease_errors() {
         let (runtime, _) = runtime();
         let registries = Registries::new(runtime.clone()).unwrap();
@@ -3533,5 +3811,348 @@ mod tests {
                 .contains("injected metadata write failure")
         );
         assert_eq!(runtime.get_state(&entity_id).unwrap().state, "before drop");
+    }
+
+    #[tokio::test]
+    async fn live_attributes_publish_offline_and_follow_registry_lifecycle() {
+        let (runtime, _) = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+        let handle = lifecycle
+            .register_provider_batch("fixture", vec![registered_spec("fixture")])
+            .unwrap()
+            .remove(0);
+        let entity_id = handle.current_entity_id().unwrap();
+        registries
+            .update_entity(
+                &entity_id,
+                EntityUpdate {
+                    name: Some(Some("Registry name".into())),
+                    icon: Some(Some("mdi:account".into())),
+                    device_class: Some(Some("humidity".into())),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+
+        let context = Context {
+            id: "live-publication-context".into(),
+            parent_id: Some("live-publication-parent".into()),
+            user_id: Some("live-publication-user".into()),
+        };
+        let mut snapshot = EntitySnapshot::unavailable();
+        snapshot.context = context.clone();
+        snapshot
+            .attributes
+            .insert("ordinary_extra".into(), json!("must be omitted"));
+        let publication = EntityPublication::from(snapshot)
+            .with_live_attribute("assumed_state", Some(json!(true)))
+            .with_live_attribute("supported_features", Some(json!(9)))
+            .with_live_attribute("unit_of_measurement", Some(json!("live-unit")))
+            .with_live_attribute("friendly_name", Some(json!("Dynamic name")))
+            .with_live_attribute("icon", Some(json!("mdi:radio")))
+            .with_live_attribute("device_class", Some(json!("custom-class")));
+        let change = handle.publish_publication(publication).unwrap().unwrap();
+
+        let state = runtime.get_state(&entity_id).unwrap();
+        assert_eq!(state.state, "unavailable");
+        assert_eq!(state.context, context);
+        assert_eq!(change.state.context, state.context);
+        assert_eq!(state.attributes.get("assumed_state"), Some(&json!(true)));
+        assert_eq!(state.attributes.get("supported_features"), Some(&json!(9)));
+        assert_eq!(
+            state.attributes.get("unit_of_measurement"),
+            Some(&json!("live-unit"))
+        );
+        assert_eq!(
+            state.attributes.get("friendly_name"),
+            Some(&json!("Registry name"))
+        );
+        assert_eq!(state.attributes.get("icon"), Some(&json!("mdi:account")));
+        assert_eq!(
+            state.attributes.get("device_class"),
+            Some(&json!("humidity"))
+        );
+        assert!(!state.attributes.contains_key("ordinary_extra"));
+
+        let renamed_id = "sensor.live_attributes_renamed";
+        registries
+            .update_entity(
+                &entity_id,
+                EntityUpdate {
+                    new_entity_id: Some(renamed_id.into()),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        wait_until(|| {
+            runtime.get_state(renamed_id).is_some()
+                && runtime.get_state(&entity_id).is_none()
+                && handle.current_entity_id().as_deref() == Some(renamed_id)
+        })
+        .await;
+        assert_eq!(
+            runtime
+                .get_state(renamed_id)
+                .unwrap()
+                .attributes
+                .get("assumed_state"),
+            Some(&json!(true))
+        );
+
+        registries
+            .update_entity(
+                renamed_id,
+                EntityUpdate {
+                    disabled_by: Some(Some("user".into())),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        wait_until(|| {
+            runtime.get_state(renamed_id).is_none()
+                && matches!(handle.status(), EntityStatus::Disabled { .. })
+        })
+        .await;
+        registries
+            .update_entity(
+                renamed_id,
+                EntityUpdate {
+                    disabled_by: Some(None),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        wait_until(|| {
+            runtime.get_state(renamed_id).is_some()
+                && matches!(handle.status(), EntityStatus::Active { .. })
+        })
+        .await;
+        let reenabled = runtime.get_state(renamed_id).unwrap();
+        assert_eq!(reenabled.state, "unavailable");
+        assert_eq!(reenabled.context, context);
+        assert_eq!(
+            reenabled.attributes.get("assumed_state"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            reenabled.attributes.get("friendly_name"),
+            Some(&json!("Registry name"))
+        );
+        assert!(!reenabled.attributes.contains_key("ordinary_extra"));
+
+        handle.release().unwrap();
+        lifecycle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn live_attribute_removal_and_null_survive_sqlite_release_and_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("entity-lifecycle.sqlite");
+        let provider_id = "fixture:live-attributes";
+        let info = ProviderEntityInfo {
+            supported_features: 37,
+            ..info()
+        };
+        let spec = registered_spec(provider_id).with_info(info);
+        let entity_id;
+        let context = Context {
+            id: "sqlite-live-context".into(),
+            parent_id: Some("sqlite-live-parent".into()),
+            user_id: None,
+        };
+
+        {
+            let store = Arc::new(hass_storage::SqliteStore::open(&database).unwrap());
+            let runtime = Runtime::new(store).unwrap();
+            let registries = Registries::new(runtime.clone()).unwrap();
+            let lifecycle = EntityLifecycle::new(runtime.clone(), registries).unwrap();
+            let handle = lifecycle
+                .register_provider_batch(provider_id, vec![spec.clone()])
+                .unwrap()
+                .remove(0);
+            entity_id = handle.current_entity_id().unwrap();
+            let mut snapshot = EntitySnapshot::new("active");
+            snapshot.context = context.clone();
+            let publication = EntityPublication::from(snapshot)
+                .with_live_attribute("explicit_null", Some(Value::Null))
+                .with_live_attribute("unit_of_measurement", None)
+                .with_live_attribute("supported_features", None)
+                .with_live_attribute("friendly_name", None)
+                .with_live_attribute("icon", None)
+                .with_live_attribute("device_class", None);
+            handle.publish_publication(publication).unwrap().unwrap();
+            let active = runtime.get_state(&entity_id).unwrap();
+            assert_eq!(active.attributes.get("explicit_null"), Some(&Value::Null));
+            for name in [
+                "unit_of_measurement",
+                "supported_features",
+                "friendly_name",
+                "icon",
+                "device_class",
+            ] {
+                assert!(
+                    !active.attributes.contains_key(name),
+                    "{name} should be removed"
+                );
+            }
+
+            handle.release().unwrap();
+            let unavailable = runtime.get_state(&entity_id).unwrap();
+            assert_eq!(unavailable.state, "unavailable");
+            assert_eq!(unavailable.context, context);
+            assert_eq!(
+                unavailable.attributes.get("explicit_null"),
+                Some(&Value::Null)
+            );
+            assert_eq!(unavailable.attributes.get("restored"), Some(&json!(true)));
+            for name in [
+                "unit_of_measurement",
+                "supported_features",
+                "friendly_name",
+                "icon",
+                "device_class",
+            ] {
+                assert!(
+                    !unavailable.attributes.contains_key(name),
+                    "{name} should stay removed"
+                );
+            }
+            lifecycle.shutdown().await.unwrap();
+        }
+
+        {
+            let store = Arc::new(hass_storage::SqliteStore::open(&database).unwrap());
+            let runtime = Runtime::new(store).unwrap();
+            let registries = Registries::new(runtime.clone()).unwrap();
+            let lifecycle = EntityLifecycle::new(runtime.clone(), registries).unwrap();
+            let handle = lifecycle
+                .register_provider_batch(provider_id, vec![spec])
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                handle.current_entity_id().as_deref(),
+                Some(entity_id.as_str())
+            );
+            let restored = runtime.get_state(&entity_id).unwrap();
+            assert_eq!(restored.state, "active");
+            assert_eq!(restored.context, context);
+            assert_eq!(restored.attributes.get("explicit_null"), Some(&Value::Null));
+            for name in [
+                "unit_of_measurement",
+                "supported_features",
+                "friendly_name",
+                "icon",
+                "device_class",
+            ] {
+                assert!(
+                    !restored.attributes.contains_key(name),
+                    "{name} should stay removed after reopen"
+                );
+            }
+            handle.release().unwrap();
+            let unavailable = runtime.get_state(&entity_id).unwrap();
+            assert_eq!(unavailable.state, "unavailable");
+            assert_eq!(
+                unavailable.attributes.get("explicit_null"),
+                Some(&Value::Null)
+            );
+            for name in [
+                "unit_of_measurement",
+                "supported_features",
+                "friendly_name",
+                "icon",
+                "device_class",
+            ] {
+                assert!(
+                    !unavailable.attributes.contains_key(name),
+                    "{name} should stay removed after reentry"
+                );
+            }
+            lifecycle.shutdown().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_live_publication_keeps_the_previous_snapshot_and_attribute_map() {
+        let (runtime, store) = fault_runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries).unwrap();
+        let handle = lifecycle
+            .register_provider_batch("fixture", vec![registered_spec("fixture")])
+            .unwrap()
+            .remove(0);
+        let entity_id = handle.current_entity_id().unwrap();
+        handle
+            .publish_publication(
+                EntityPublication::from(EntitySnapshot::new("last good"))
+                    .with_live_attribute("version", Some(json!(1))),
+            )
+            .unwrap();
+        store.fail_next_put_state.store(true, Ordering::SeqCst);
+        let error = handle
+            .publish_publication(
+                EntityPublication::from(EntitySnapshot::new("failed"))
+                    .with_live_attribute("version", Some(json!(2))),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("injected state write failure"));
+        let state = runtime.get_state(&entity_id).unwrap();
+        assert_eq!(state.state, "last good");
+        assert_eq!(state.attributes.get("version"), Some(&json!(1)));
+
+        handle.release().unwrap();
+        let unavailable = runtime.get_state(&entity_id).unwrap();
+        assert_eq!(unavailable.state, "unavailable");
+        assert_eq!(unavailable.attributes.get("version"), Some(&json!(1)));
+        assert_eq!(unavailable.attributes.get("restored"), Some(&json!(true)));
+        lifecycle.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_publish_keeps_availability_scoped_attributes_and_empty_live_map() {
+        let (runtime, _) = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let lifecycle = EntityLifecycle::new(runtime.clone(), registries).unwrap();
+        let handle = lifecycle
+            .register_provider_batch("fixture", vec![registered_spec("fixture")])
+            .unwrap()
+            .remove(0);
+        let entity_id = handle.current_entity_id().unwrap();
+        handle
+            .publish_publication(
+                EntityPublication::from(EntitySnapshot::new("online"))
+                    .with_live_attribute("live_only", Some(json!("present"))),
+            )
+            .unwrap();
+
+        let mut unavailable = EntitySnapshot::unavailable();
+        unavailable
+            .attributes
+            .insert("ordinary_extra".into(), json!("omitted"));
+        handle.publish(unavailable).unwrap();
+        let state = runtime.get_state(&entity_id).unwrap();
+        assert_eq!(state.state, "unavailable");
+        assert_eq!(
+            state.attributes.get("friendly_name"),
+            Some(&json!("Temperature"))
+        );
+        assert_eq!(
+            state.attributes.get("icon"),
+            Some(&json!("mdi:thermometer"))
+        );
+        assert_eq!(
+            state.attributes.get("device_class"),
+            Some(&json!("temperature"))
+        );
+        assert_eq!(
+            state.attributes.get("unit_of_measurement"),
+            Some(&json!("°C"))
+        );
+        assert!(!state.attributes.contains_key("live_only"));
+        assert!(!state.attributes.contains_key("ordinary_extra"));
+
+        handle.release().unwrap();
+        lifecycle.shutdown().await.unwrap();
     }
 }

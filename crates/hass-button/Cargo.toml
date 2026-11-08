@@ -1,0 +1,19 @@
+[package]
+name = "hass-button"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed native button descriptions, service validation, and press-state projection"
+
+[dependencies]
+chrono.workspace = true
+hass-core.workspace = true
+hass-entity.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+hass-registry.workspace = true
+hass-storage.workspace = true
+tokio.workspace = true

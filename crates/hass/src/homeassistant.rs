@@ -7,7 +7,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use hass_core::{Context, Error, Result, Runtime, ServiceCall, ServiceHandler, ServiceResult};
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
+use hass_core::{
+    AsyncServiceHandler, Context, Error, Result, Runtime, ServiceCall,
+    ServiceCallCancellationHandle, ServiceResult,
+};
 use hass_group::{GroupLookup, expand_entity_ids};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -29,6 +34,38 @@ pub struct HomeAssistantServices {
     owner: String,
 }
 
+struct DomainCallCancellationGuard {
+    handles: Vec<ServiceCallCancellationHandle>,
+    armed: bool,
+}
+
+impl DomainCallCancellationGuard {
+    fn new() -> Self {
+        Self {
+            handles: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn push(&mut self, handle: ServiceCallCancellationHandle) {
+        self.handles.push(handle);
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DomainCallCancellationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            for handle in &self.handles {
+                handle.cancel();
+            }
+        }
+    }
+}
+
 impl HomeAssistantServices {
     /// Register the generic services without an active group provider.
     ///
@@ -45,13 +82,15 @@ impl HomeAssistantServices {
 
         for service in TURN_SERVICES {
             let groups = groups.clone();
-            let handler: ServiceHandler =
-                Arc::new(move |runtime, call| handle_turn_service(runtime, call, &groups));
+            let handler: AsyncServiceHandler = Arc::new(move |runtime, call| {
+                let groups = groups.clone();
+                Box::pin(async move { handle_turn_service_async(runtime, call, groups).await })
+            });
             let description = json!({
                 "description": format!("Call {service} on each targeted entity's domain")
             });
             if let Err(error) =
-                runtime.register_owned_service(&owner, DOMAIN, service, description, handler)
+                runtime.register_owned_async_service(&owner, DOMAIN, service, description, handler)
             {
                 let _ = runtime.unregister_owned_services(&owner);
                 return Err(error);
@@ -73,10 +112,10 @@ impl Drop for HomeAssistantServices {
     }
 }
 
-fn handle_turn_service(
-    runtime: &Runtime,
-    call: &ServiceCall,
-    groups: &GroupLookup,
+async fn handle_turn_service_async(
+    runtime: Runtime,
+    call: ServiceCall,
+    groups: GroupLookup,
 ) -> Result<ServiceResult> {
     if !TURN_SERVICES.contains(&call.service.as_str()) {
         return Err(Error::Service(format!(
@@ -85,9 +124,9 @@ fn handle_turn_service(
         )));
     }
 
-    validate_normalized_targets(call)?;
-    let excluded = parse_excluded_entity_ids(runtime, call, groups)?;
-    let Some(target_value) = selected_entity_value(call)? else {
+    validate_normalized_targets(&call)?;
+    let excluded = parse_excluded_entity_ids(&runtime, &call, &groups)?;
+    let Some(target_value) = selected_entity_value(&call)? else {
         // Upstream accepts a service call with no target and logs an error.
         // Keep the call a no-op while preserving the causal context.
         tracing::error!(service = %call.service, "Home Assistant generic service called without a target");
@@ -99,7 +138,7 @@ fn handle_turn_service(
         return Ok(empty_result(call.context.clone()));
     }
 
-    let mut expanded = expand_entity_ids(runtime, groups, &requested)?;
+    let mut expanded = expand_entity_ids(&runtime, &groups, &requested)?;
     if expanded.len() > MAX_TARGETS {
         return Err(Error::InvalidInput(format!(
             "expanded service target exceeds the {MAX_TARGETS} entity limit"
@@ -153,30 +192,69 @@ fn handle_turn_service(
         );
     }
 
-    let mut changed_states = Vec::new();
-    for (domain, entity_ids) in by_domain {
-        let mut data = call.data.clone();
-        // Runtime target resolution normally moves target fields into service
-        // data before invoking this handler. Preserve that placement for direct
-        // callers as well, with target taking precedence as in Home Assistant.
-        for (field, value) in &call.target {
-            data.insert(field.clone(), value.clone());
-        }
-        data.remove(EXCLUDE);
-        data.insert(
-            ENTITY_ID.to_owned(),
-            Value::Array(entity_ids.into_iter().map(Value::String).collect()),
-        );
+    let service_calls = by_domain
+        .into_iter()
+        .map(|(domain, entity_ids)| {
+            let mut data = call.data.clone();
+            // Runtime target resolution normally moves target fields into service
+            // data before invoking this handler. Preserve that placement for direct
+            // callers as well, with target taking precedence as in Home Assistant.
+            for (field, value) in &call.target {
+                data.insert(field.clone(), value.clone());
+            }
+            data.remove(EXCLUDE);
+            data.insert(
+                ENTITY_ID.to_owned(),
+                Value::Array(entity_ids.into_iter().map(Value::String).collect()),
+            );
 
-        let result = runtime.call_service(ServiceCall {
-            domain,
-            service: call.service.clone(),
-            data,
-            target: Map::new(),
-            context: call.context.clone(),
-        })?;
-        changed_states.extend(result.changed_states);
+            ServiceCall {
+                domain,
+                service: call.service.clone(),
+                data,
+                target: Map::new(),
+                context: call.context.clone(),
+            }
+        })
+        .collect::<Vec<_>>();
+    if service_calls.is_empty() {
+        return Ok(empty_result(call.context.clone()));
     }
+
+    let mut cancellation = DomainCallCancellationGuard::new();
+    let mut calls = Vec::with_capacity(service_calls.len());
+    for service_call in service_calls {
+        let call = runtime.spawn_service_call_async(service_call)?;
+        cancellation.push(call.cancellation_handle());
+        calls.push(call);
+    }
+
+    let call_count = calls.len();
+    let mut result_waiters = FuturesUnordered::new();
+    for (index, call) in calls.iter_mut().enumerate() {
+        result_waiters.push(async move { (index, call.result().await) });
+    }
+    let mut ordered_results = (0..call_count)
+        .map(|_| None)
+        .collect::<Vec<Option<ServiceResult>>>();
+    while let Some((index, result)) = result_waiters.next().await {
+        match result {
+            Ok(result) => ordered_results[index] = Some(result),
+            Err(error) => {
+                // Core retains the other domain calls. They must finish without
+                // being canceled when one provider returns an error.
+                drop(result_waiters);
+                cancellation.disarm();
+                return Err(error);
+            }
+        }
+    }
+    cancellation.disarm();
+    let changed_states = ordered_results
+        .into_iter()
+        .flatten()
+        .flat_map(|result| result.changed_states)
+        .collect();
 
     // Home Assistant's generic turn handler awaits domain calls but does not
     // return their service responses. Preserve only states reported by those
@@ -361,7 +439,9 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
 
-    use hass_core::{Context, MemoryStore, Runtime, ServiceCall, ServiceResult};
+    use hass_core::{
+        AsyncServiceHandler, Context, Error, MemoryStore, Runtime, ServiceCall, ServiceResult,
+    };
     use hass_group::{GroupConfig, GroupIntegration, GroupLookup, expand_entity_ids};
     use serde_json::{Map, Value, json};
 
@@ -476,8 +556,8 @@ mod tests {
     // components/homeassistant/services.py::_async_handle_turn_service and
     // tests/components/homeassistant/test_init.py::{test_turn_on_without_entities,
     // test_turn_on_skips_domains_without_service,test_not_allowing_recursion}.
-    #[test]
-    fn mixed_domain_dispatch_preserves_payload_context_and_provider_results() {
+    #[tokio::test]
+    async fn mixed_domain_dispatch_preserves_payload_context_and_provider_results() {
         let runtime = runtime();
         let observations = Arc::new(Mutex::new(Vec::new()));
         set_state(&runtime, "light.ceiling", "off", Context::default());
@@ -498,7 +578,7 @@ mod tests {
         call.data.insert("brightness".into(), json!(137));
         call.data.insert("transition".into(), json!(2.5));
 
-        let result = runtime.call_service(call).unwrap();
+        let result = runtime.call_service_async(call).await.unwrap();
         assert_eq!(result.context, context);
         assert_eq!(result.response, None);
         assert_eq!(
@@ -525,6 +605,329 @@ mod tests {
         );
         assert_eq!(observations[1].domain, "switch");
         assert_eq!(observations[1].target["entity_id"], json!(["switch.pump"]));
+    }
+
+    #[tokio::test]
+    async fn generic_turn_waits_for_async_provider_and_preserves_context() {
+        let runtime = runtime();
+        set_state(&runtime, "light.ceiling", "off", Context::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let release_rx = Arc::new(Mutex::new(Some(release_rx)));
+        let handler: AsyncServiceHandler = Arc::new(move |runtime, call| {
+            let started_tx = Arc::clone(&started_tx);
+            let release_rx = Arc::clone(&release_rx);
+            Box::pin(async move {
+                started_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("provider should only run once")
+                    .send(call.clone())
+                    .expect("test should still observe the provider call");
+                let release = {
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("provider should only run once")
+                };
+                release
+                    .await
+                    .expect("test should release the held provider");
+
+                let change = runtime.set_state(
+                    "light.ceiling",
+                    "on",
+                    empty_map(),
+                    call.context.clone(),
+                    false,
+                )?;
+                Ok(ServiceResult {
+                    changed_states: change.changed.then_some(change.state).into_iter().collect(),
+                    response: Some(json!({"provider": "completed"})),
+                    context: call.context.clone(),
+                })
+            })
+        });
+        runtime
+            .register_entity_async_service(
+                "fixture-light-held-turn-on",
+                "light",
+                "turn_on",
+                json!({"description": "held async provider fixture"}),
+                Arc::new(|entity_id| entity_id == "light.ceiling"),
+                handler,
+            )
+            .unwrap();
+        let _services = HomeAssistantServices::start(runtime.clone()).unwrap();
+        let context = Context {
+            id: "held-provider-context".into(),
+            parent_id: Some("parent-action".into()),
+            user_id: Some("user-7".into()),
+        };
+        let outer = tokio::spawn({
+            let runtime = runtime.clone();
+            let context = context.clone();
+            async move {
+                runtime
+                    .call_service_async(service_call("turn_on", json!("light.ceiling"), context))
+                    .await
+            }
+        });
+
+        let provider_call = tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .expect("generic service should start its async provider")
+            .expect("async provider should report its call");
+        assert_eq!(provider_call.context, context);
+        assert_eq!(provider_call.target["entity_id"], json!(["light.ceiling"]));
+        assert!(
+            !outer.is_finished(),
+            "outer service must await the provider"
+        );
+        assert_eq!(runtime.get_state("light.ceiling").unwrap().state, "off");
+
+        release_tx.send(()).unwrap();
+        let result = outer.await.unwrap().unwrap();
+        assert_eq!(result.context, context);
+        assert_eq!(result.response, None);
+        assert_eq!(result.changed_states.len(), 1);
+        assert_eq!(runtime.get_state("light.ceiling").unwrap().state, "on");
+    }
+
+    #[tokio::test]
+    async fn domain_calls_start_together_and_provider_error_does_not_cancel_sibling() {
+        let runtime = runtime();
+        set_state(&runtime, "light.ceiling", "off", Context::default());
+        set_state(&runtime, "switch.pump", "off", Context::default());
+        let (light_started_tx, light_started_rx) = tokio::sync::oneshot::channel();
+        let (light_release_tx, light_release_rx) = tokio::sync::oneshot::channel();
+        let (switch_started_tx, switch_started_rx) = tokio::sync::oneshot::channel();
+        let (switch_release_tx, switch_release_rx) = tokio::sync::oneshot::channel();
+        let (switch_finished_tx, switch_finished_rx) = tokio::sync::oneshot::channel();
+        let light_started_tx = Arc::new(Mutex::new(Some(light_started_tx)));
+        let light_release_rx = Arc::new(Mutex::new(Some(light_release_rx)));
+        let light_handler: AsyncServiceHandler = Arc::new(move |_runtime, call| {
+            let started_tx = Arc::clone(&light_started_tx);
+            let release_rx = Arc::clone(&light_release_rx);
+            Box::pin(async move {
+                started_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("light provider should only run once")
+                    .send(call)
+                    .expect("test should still observe the light provider");
+                let release = {
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("light provider should only run once")
+                };
+                release
+                    .await
+                    .expect("test should release the light provider");
+                Err(Error::Service("light fixture failure".into()))
+            })
+        });
+        runtime
+            .register_entity_async_service(
+                "fixture-light-held-failure",
+                "light",
+                "turn_on",
+                json!({"description": "held failing provider fixture"}),
+                Arc::new(|entity_id| entity_id == "light.ceiling"),
+                light_handler,
+            )
+            .unwrap();
+
+        let switch_started_tx = Arc::new(Mutex::new(Some(switch_started_tx)));
+        let switch_release_rx = Arc::new(Mutex::new(Some(switch_release_rx)));
+        let switch_finished_tx = Arc::new(Mutex::new(Some(switch_finished_tx)));
+        let switch_handler: AsyncServiceHandler = Arc::new(move |runtime, call| {
+            let started_tx = Arc::clone(&switch_started_tx);
+            let release_rx = Arc::clone(&switch_release_rx);
+            let finished_tx = Arc::clone(&switch_finished_tx);
+            Box::pin(async move {
+                started_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("switch provider should only run once")
+                    .send(call.clone())
+                    .expect("test should still observe the switch provider");
+                let release = {
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .expect("switch provider should only run once")
+                };
+                release
+                    .await
+                    .expect("test should release the switch provider");
+                let change = runtime.set_state(
+                    "switch.pump",
+                    "on",
+                    empty_map(),
+                    call.context.clone(),
+                    false,
+                )?;
+                finished_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("switch provider should only finish once")
+                    .send(())
+                    .expect("test should still observe switch completion");
+                Ok(ServiceResult {
+                    changed_states: change.changed.then_some(change.state).into_iter().collect(),
+                    response: None,
+                    context: call.context.clone(),
+                })
+            })
+        });
+        runtime
+            .register_entity_async_service(
+                "fixture-switch-held-success",
+                "switch",
+                "turn_on",
+                json!({"description": "held successful provider fixture"}),
+                Arc::new(|entity_id| entity_id == "switch.pump"),
+                switch_handler,
+            )
+            .unwrap();
+        let _services = HomeAssistantServices::start(runtime.clone()).unwrap();
+        let context = Context {
+            id: "two-domain-held-context".into(),
+            parent_id: Some("parent-action".into()),
+            user_id: Some("user-9".into()),
+        };
+        let outer = tokio::spawn({
+            let runtime = runtime.clone();
+            let context = context.clone();
+            async move {
+                runtime
+                    .call_service_async(service_call(
+                        "turn_on",
+                        json!(["light.ceiling", "switch.pump"]),
+                        context,
+                    ))
+                    .await
+            }
+        });
+
+        let (light_call, switch_call) = tokio::join!(
+            tokio::time::timeout(std::time::Duration::from_secs(5), light_started_rx,),
+            tokio::time::timeout(std::time::Duration::from_secs(5), switch_started_rx,),
+        );
+        let light_call = light_call
+            .expect("generic service should start its light provider")
+            .expect("light provider should report its call");
+        let switch_call = switch_call
+            .expect("generic service should start its switch provider")
+            .expect("switch provider should report its call");
+        assert_eq!(light_call.context, context);
+        assert_eq!(switch_call.context, context);
+        assert_eq!(light_call.target["entity_id"], json!(["light.ceiling"]));
+        assert_eq!(switch_call.target["entity_id"], json!(["switch.pump"]));
+        assert!(
+            !outer.is_finished(),
+            "generic call should await provider results"
+        );
+
+        light_release_tx.send(()).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), outer)
+            .await
+            .expect("first provider failure should be returned promptly")
+            .unwrap();
+        assert!(
+            matches!(result, Err(Error::Service(message)) if message.contains("light fixture failure"))
+        );
+        assert_eq!(runtime.get_state("switch.pump").unwrap().state, "off");
+
+        switch_release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), switch_finished_rx)
+            .await
+            .expect("remaining provider should continue after sibling failure")
+            .expect("switch provider should finish");
+        assert_eq!(runtime.get_state("switch.pump").unwrap().state, "on");
+    }
+
+    #[tokio::test]
+    async fn canceling_generic_call_cancels_owned_domain_provider() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let runtime = runtime();
+        set_state(&runtime, "light.ceiling", "off", Context::default());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let dropped_tx = Arc::new(Mutex::new(Some(dropped_tx)));
+        let handler: AsyncServiceHandler = Arc::new(move |_runtime, call| {
+            let started_tx = Arc::clone(&started_tx);
+            let dropped_tx = Arc::clone(&dropped_tx);
+            Box::pin(async move {
+                let _drop_signal = DropSignal(dropped_tx.lock().unwrap().take());
+                started_tx
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("provider should only start once")
+                    .send(call.context.clone())
+                    .expect("test should still observe provider start");
+                std::future::pending::<std::result::Result<ServiceResult, Error>>().await
+            })
+        });
+        runtime
+            .register_entity_async_service(
+                "fixture-light-canceled-turn-on",
+                "light",
+                "turn_on",
+                json!({"description": "canceled async provider fixture"}),
+                Arc::new(|entity_id| entity_id == "light.ceiling"),
+                handler,
+            )
+            .unwrap();
+        let _services = HomeAssistantServices::start(runtime.clone()).unwrap();
+        let context = Context {
+            id: "canceled-provider-context".into(),
+            parent_id: Some("parent-action".into()),
+            user_id: Some("user-10".into()),
+        };
+        let outer = tokio::spawn({
+            let runtime = runtime.clone();
+            let context = context.clone();
+            async move {
+                runtime
+                    .call_service_async(service_call("turn_on", json!("light.ceiling"), context))
+                    .await
+            }
+        });
+
+        let started_context = tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .expect("generic service should start its async provider")
+            .expect("provider should report its start");
+        assert_eq!(started_context, context);
+        outer.abort();
+        assert!(outer.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
+            .await
+            .expect("outer cancellation should cancel its owned provider")
+            .expect("provider future should be dropped");
+        assert_eq!(runtime.get_state("light.ceiling").unwrap().state, "off");
     }
 
     #[tokio::test]
@@ -567,7 +970,7 @@ mod tests {
             Context::default(),
         );
 
-        let result = runtime.call_service(call).unwrap();
+        let result = runtime.call_service_async(call).await.unwrap();
         assert_eq!(result.changed_states.len(), 2);
         let observations = observations.lock().unwrap();
         assert_eq!(observations.len(), 2);
@@ -598,8 +1001,8 @@ mod tests {
 
     // Upstream does not filter unavailable entities before dispatch; it only
     // skips targets whose domain has no matching service.
-    #[test]
-    fn unavailable_known_entity_is_dispatched_but_unknown_unsupported_domain_is_skipped() {
+    #[tokio::test]
+    async fn unavailable_known_entity_is_dispatched_but_unknown_unsupported_domain_is_skipped() {
         let runtime = runtime();
         let observations = Arc::new(Mutex::new(Vec::new()));
         set_state(
@@ -616,7 +1019,7 @@ mod tests {
             Context::default(),
         );
 
-        let result = runtime.call_service(call).unwrap();
+        let result = runtime.call_service_async(call).await.unwrap();
         assert!(result.changed_states.is_empty());
         assert_eq!(observations.lock().unwrap().len(), 1);
         assert_eq!(
@@ -625,8 +1028,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unknown_target_in_a_supported_domain_errors_before_provider_mutation() {
+    #[tokio::test]
+    async fn unknown_target_in_a_supported_domain_errors_before_provider_mutation() {
         let runtime = runtime();
         let observations = Arc::new(Mutex::new(Vec::new()));
         set_state(&runtime, "switch.known", "off", Context::default());
@@ -655,13 +1058,13 @@ mod tests {
             Context::default(),
         );
 
-        assert!(runtime.call_service(call).is_err());
+        assert!(runtime.call_service_async(call).await.is_err());
         assert!(observations.lock().unwrap().is_empty());
         assert_eq!(runtime.get_state("switch.known").unwrap().state, "off");
     }
 
-    #[test]
-    fn no_target_is_a_context_preserving_noop() {
+    #[tokio::test]
+    async fn no_target_is_a_context_preserving_noop() {
         let runtime = runtime();
         let _services = HomeAssistantServices::start(runtime.clone()).unwrap();
         let context = Context {
@@ -670,32 +1073,34 @@ mod tests {
             user_id: Some("user-2".into()),
         };
         let result = runtime
-            .call_service(ServiceCall {
+            .call_service_async(ServiceCall {
                 domain: "homeassistant".into(),
                 service: "turn_off".into(),
                 data: empty_map(),
                 target: empty_map(),
                 context: context.clone(),
             })
+            .await
             .unwrap();
         assert!(result.changed_states.is_empty());
         assert_eq!(result.response, None);
         assert_eq!(result.context, context);
     }
 
-    #[test]
-    fn toggle_is_forwarded_as_toggle_to_the_entity_domain() {
+    #[tokio::test]
+    async fn toggle_is_forwarded_as_toggle_to_the_entity_domain() {
         let runtime = runtime();
         let observations = Arc::new(Mutex::new(Vec::new()));
         register_recording_service(&runtime, "light", "toggle", Arc::clone(&observations));
         let _services = HomeAssistantServices::start(runtime.clone()).unwrap();
 
         let result = runtime
-            .call_service(service_call(
+            .call_service_async(service_call(
                 "toggle",
                 json!("light.ceiling"),
                 Context::default(),
             ))
+            .await
             .unwrap();
         assert!(result.changed_states.is_empty());
         let observations = observations.lock().unwrap();
@@ -704,8 +1109,8 @@ mod tests {
         assert_eq!(observations[0].service, "toggle");
     }
 
-    #[test]
-    fn entity_id_exclude_is_applied_before_any_domain_dispatch() {
+    #[tokio::test]
+    async fn entity_id_exclude_is_applied_before_any_domain_dispatch() {
         let runtime = runtime();
         let observations = Arc::new(Mutex::new(Vec::new()));
         set_state(&runtime, "light.ceiling", "on", Context::default());
@@ -720,7 +1125,7 @@ mod tests {
         call.data
             .insert(EXCLUDE.into(), json!({"entity_id": "light.kitchen"}));
 
-        let result = runtime.call_service(call).unwrap();
+        let result = runtime.call_service_async(call).await.unwrap();
         assert_eq!(result.changed_states.len(), 1);
         let observations = observations.lock().unwrap();
         assert_eq!(observations.len(), 1);
@@ -731,8 +1136,8 @@ mod tests {
         assert!(!observations[0].data.contains_key(EXCLUDE));
     }
 
-    #[test]
-    fn malformed_or_unimplemented_excludes_fail_before_dispatch() {
+    #[tokio::test]
+    async fn malformed_or_unimplemented_excludes_fail_before_dispatch() {
         let runtime = runtime();
         let observations = Arc::new(Mutex::new(Vec::new()));
         set_state(&runtime, "light.ceiling", "off", Context::default());
@@ -747,7 +1152,7 @@ mod tests {
         ] {
             let mut call = service_call("turn_on", json!("light.ceiling"), Context::default());
             call.data.insert(EXCLUDE.into(), exclude);
-            assert!(runtime.call_service(call).is_err());
+            assert!(runtime.call_service_async(call).await.is_err());
         }
         assert!(observations.lock().unwrap().is_empty());
     }
@@ -799,8 +1204,8 @@ mod tests {
         assert!(services["homeassistant"].get("custom").is_some());
     }
 
-    #[test]
-    fn target_map_takes_precedence_over_service_data_only_after_validation() {
+    #[tokio::test]
+    async fn target_map_takes_precedence_over_service_data_only_after_validation() {
         let runtime = runtime();
         let _services = HomeAssistantServices::start(runtime.clone()).unwrap();
         let mut call = service_call("turn_on", json!("light.ceiling"), Context::default());
@@ -808,6 +1213,6 @@ mod tests {
             .as_object()
             .unwrap()
             .clone();
-        assert!(runtime.call_service(call).is_err());
+        assert!(runtime.call_service_async(call).await.is_err());
     }
 }

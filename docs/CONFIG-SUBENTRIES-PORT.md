@@ -122,6 +122,35 @@ handler class and step, while the native capability error names the subentry
 type. Native callbacks can return the typed `InvalidData` error with schema
 details; the HTTP adapter maps it to the pinned 400 `{ "errors": ... }` shape.
 
+## Derived registry disablers
+
+The current native continuation adds a separate
+`EntryRegistryDisabledByChanged` observer phase. Pinned
+[`config_entries.py:2686-2721`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/config_entries.py#L2686)
+refreshes device/entity disablers before enabled setup and after disabled
+unload; the earlier Repairs visibility callback remains separate. An enabled
+registered entity can retain an unavailable restored placeholder on unload,
+but disabling its config entry subsequently derives `config_entry` and removes
+that placeholder. The compiled MQTT fixture checks those final registry flags
+and state removal through the actual API.
+
+The registry helper preserves explicit `user`, `integration`, and entity-only
+`hass` disablers. Derived `config_entry`, `device`, and empty values follow
+the current owning config entry and device. Device transitions retain the
+source's per-entry callback behavior for shared devices; no all-entry device
+policy is inferred. A changed device rederives every linked entity using that
+entity's own config-entry state
+([`entity_registry.py:1969-1988`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/helpers/entity_registry.py#L1969)).
+Startup rederives entity flags, including rows without a config entry, from
+loaded entries and persisted device flags, preserving device history
+([`entity_registry.py:2610-2645`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/helpers/entity_registry.py#L2610)).
+
+The app host keeps its observer weak and serializes registry projections
+outside config-manager locks. Six focused registry cases and strict package
+Clippy pass. The new observer's full app and compiled-process acceptance remain
+pending the expanded 48-crate gate; the earlier two host cases passed before
+the startup refinement.
+
 ## Verification status
 
 `cargo test -p hass-config` passes, including the typed active-flow checks,

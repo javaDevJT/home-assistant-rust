@@ -1015,6 +1015,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hass-button"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "hass-storage",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "hass-config"
 version = "0.1.0"
 dependencies = [
@@ -1098,8 +1111,10 @@ dependencies = [
  "chrono",
  "hass-core",
  "hass-registry",
+ "hass-storage",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
 ]
 
@@ -1192,8 +1207,12 @@ name = "hass-mqtt"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hass-button",
  "hass-core",
+ "hass-entity",
+ "hass-registry",
  "hass-storage",
+ "hass-switch",
  "hass-template",
  "regex",
  "rumqttc",
@@ -1448,6 +1467,17 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "hass-switch"
+version = "0.1.0"
+dependencies = [
+ "hass-core",
+ "hass-entity",
+ "hass-registry",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

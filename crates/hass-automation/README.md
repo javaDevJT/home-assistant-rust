@@ -81,7 +81,14 @@ matching state is older than the configured duration. The accepted type tables
 follow Core `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf` in
 `components/binary_sensor/device_condition.py` and `device_trigger.py`.
 
-Triggers include state, numeric state, binary-sensor device, template, local
+Switch device triggers and conditions use the same state engine: `turned_on`
+and `turned_off` match transitions to `on` and `off`, while `is_on` and `is_off`
+check the current state. Their optional `for` values follow the pinned generic
+toggle automation mapping in `components/device_automation/toggle_entity.py`.
+The domain-specific wrappers are `components/switch/device_condition.py` and
+`components/switch/device_trigger.py`.
+
+Triggers include state, numeric state, binary-sensor and switch device, template, local
 `time`, `time_pattern`, Home Assistant startup/shutdown, event, tag scans, MQTT
 message signals, and persistent notification changes. Tag triggers accept a scalar or list of
 `tag_id` values and an optional scalar or list of `device_id` values. They
@@ -143,7 +150,7 @@ follows Home Assistant Core `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf`
 `helpers/trigger/models.py`.
 
 Verification checkpoint: `cargo test -p hass-automation --locked --offline`
-passed all 47 tests; strict package Clippy and formatting checks passed. Sun
+passed all 53 tests; strict package Clippy and formatting checks passed. Sun
 regressions include `legacy_and_registry_sun_trigger_yaml_use_pinned_names`,
 `sun_trigger_and_condition_offsets_accept_clocks_and_preserve_microseconds`,
 `sun_offset_string_matches_python_timedelta_format_and_precision`,
@@ -156,10 +163,14 @@ regressions include `legacy_and_registry_sun_trigger_yaml_use_pinned_names`,
 Binary-sensor coverage includes class-semantic type mapping, strict condition
 duration boundaries, UUID resolution after registry rename, disabled/missing
 state behavior, event context, trigger cancellation, and shutdown cleanup.
+Switch coverage includes pinned type/schema validation, strict condition
+duration boundaries, UUID rename versus literal references, off/on/unknown/
+unavailable transitions, event context, trigger cancellation, and shutdown
+cleanup.
 The root-owned compiled-process sunrise fixture passed before this correction
 pass; the root owner will rerun it after integration.
 
-Conditions include state, numeric-state, binary-sensor device, template, Sun
+Conditions include state, numeric-state, binary-sensor and switch device, template, Sun
 elevation, and nested `and`, `or`, and `not`. Automation and trigger variables are available to the
 shared template renderer. Actions are validated and executed by `hass-script`'s
 shared sequence runner, including its service, delay, condition, choose, repeat,

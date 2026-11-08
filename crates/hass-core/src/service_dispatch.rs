@@ -7,10 +7,10 @@ use serde_json::Value;
 
 use crate::service_tasks;
 use crate::{
-    Context, Error, Result, Runtime, ServiceCall, ServiceCallRequest, ServiceExecutionScope,
-    ServiceHandlerKind, ServiceRegistrations, ServiceResponseSupport, ServiceResult,
-    ServiceTargetAuthorizer, entity_domain, parse_service_target, validate_component,
-    validate_entity_id,
+    Context, Error, OwnedServiceCall, Result, Runtime, ServiceCall, ServiceCallRequest,
+    ServiceExecutionScope, ServiceExecutionScopeGuard, ServiceHandlerKind, ServiceRegistrations,
+    ServiceResponseSupport, ServiceResult, ServiceTargetAuthorizer, active_service_execution_scope,
+    entity_domain, parse_service_target, validate_component, validate_entity_id,
 };
 
 impl Runtime {
@@ -55,6 +55,21 @@ impl Runtime {
     /// synchronous handlers use the runtime's shared blocking pool.
     pub async fn call_service_async(&self, call: ServiceCall) -> Result<ServiceResult> {
         self.call_service_async_with_scope(call, None).await
+    }
+
+    /// Start an owned async service call whose task remains tracked after its
+    /// result waiter is dropped. Explicitly cancel it through its cancellation
+    /// handle, or join it with [`OwnedServiceCall::result`].
+    pub fn spawn_service_call_async(&self, call: ServiceCall) -> Result<OwnedServiceCall> {
+        let scope = active_service_execution_scope();
+        let registrations = self.snapshot_service_registrations(&call.domain, &call.service)?;
+        let prepared = self.prepare_service_call(call, registrations, None)?;
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            Error::Service("owned async service calls require an active Tokio runtime".to_owned())
+        })?;
+        let runtime = self.clone();
+        let work = async move { runtime.invoke_prepared_service_async(prepared, scope).await };
+        self.inner.service_tasks.spawn_async(&handle, work)
     }
 
     /// Invoke a trusted call with an execution-local scope installed for each
@@ -119,8 +134,8 @@ impl Runtime {
         Ok(result)
     }
 
-    /// Close synchronous service-task admission and join every admitted
-    /// blocking handler. Concurrent and canceled waiters share one drain.
+    /// Close tracked service-task admission and join admitted blocking handlers
+    /// and explicitly owned async calls. Canceled waiters share one drain.
     pub async fn shutdown_service_tasks_async(&self) -> Result<()> {
         self.inner.service_tasks.shutdown().await
     }
@@ -435,7 +450,8 @@ impl Runtime {
                 })?;
                 let mut completion =
                     self.inner.service_tasks.spawn_blocking(&handle, move || {
-                        let _scope = blocking_scope.map(|scope| scope());
+                        let _scope =
+                            blocking_scope.map(|scope| ServiceExecutionScopeGuard::enter(&scope));
                         handler(&runtime, &call)
                     })?;
                 service_tasks::wait_for_result(&mut completion).await
@@ -443,7 +459,7 @@ impl Runtime {
             ServiceHandlerKind::Async(handler) => {
                 let runtime = self.clone();
                 let future = if let Some(scope) = &scope {
-                    let _scope = scope();
+                    let _scope = ServiceExecutionScopeGuard::enter(scope);
                     handler(runtime, call)
                 } else {
                     handler(runtime, call)
@@ -451,7 +467,7 @@ impl Runtime {
                 if let Some(scope) = scope {
                     let mut future = future;
                     std::future::poll_fn(move |cx| {
-                        let _scope = scope();
+                        let _scope = ServiceExecutionScopeGuard::enter(&scope);
                         future.as_mut().poll(cx)
                     })
                     .await

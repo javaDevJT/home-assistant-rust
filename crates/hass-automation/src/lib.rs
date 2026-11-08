@@ -1264,22 +1264,23 @@ pub fn validate(automations: &[Automation]) -> Result<()> {
                     device_type,
                     r#for,
                 } => {
-                    if domain != "binary_sensor"
-                        || device_id.trim().is_empty()
+                    if device_id.trim().is_empty()
                         || !valid_device_entity_reference(entity_id)
-                        || binary_sensor_trigger_state(device_type).is_none()
+                        || device_trigger_state(domain, device_type).is_none()
                     {
                         return Err(Error::InvalidInput(format!(
-                            "automation `{}` has an invalid binary_sensor device trigger",
-                            automation.id
+                            "automation `{}` has an invalid {domain} device trigger",
+                            automation.id,
                         )));
                     }
-                    validate_binary_sensor_for(r#for.as_ref(), MAX_TRIGGER_FOR).map_err(|error| {
-                        Error::InvalidInput(format!(
-                            "automation `{}` has an invalid binary_sensor device trigger: {error}",
-                            automation.id
-                        ))
-                    })?;
+                    validate_device_for(domain, r#for.as_ref(), MAX_TRIGGER_FOR).map_err(
+                        |error| {
+                            Error::InvalidInput(format!(
+                                "automation `{}` has an invalid {domain} device trigger: {error}",
+                                automation.id,
+                            ))
+                        },
+                    )?;
                 }
                 Trigger::NumericState {
                     entity_id,
@@ -1469,18 +1470,17 @@ fn validate_condition(automation_id: &str, condition: &Condition) -> Result<()> 
             device_type,
             r#for,
         } => {
-            if domain != "binary_sensor"
-                || device_id.trim().is_empty()
+            if device_id.trim().is_empty()
                 || !valid_device_entity_reference(entity_id)
-                || binary_sensor_condition_state(device_type).is_none()
+                || device_condition_state(domain, device_type).is_none()
             {
                 return Err(Error::InvalidInput(format!(
-                    "automation `{automation_id}` has an invalid binary_sensor device condition"
+                    "automation `{automation_id}` has an invalid {domain} device condition"
                 )));
             }
-            validate_binary_sensor_for(r#for.as_ref(), Duration::MAX).map_err(|error| {
+            validate_device_for(domain, r#for.as_ref(), Duration::MAX).map_err(|error| {
                 Error::InvalidInput(format!(
-                    "automation `{automation_id}` has an invalid binary_sensor device condition: {error}"
+                    "automation `{automation_id}` has an invalid {domain} device condition: {error}"
                 ))
             })
         }
@@ -1591,12 +1591,44 @@ fn binary_sensor_trigger_state(device_type: &str) -> Option<&'static str> {
     device_type_state(BINARY_SENSOR_TRIGGER_TYPES, device_type)
 }
 
-fn validate_binary_sensor_for(duration: Option<&DelayValue>, limit: Duration) -> Result<()> {
+fn switch_condition_state(device_type: &str) -> Option<&'static str> {
+    match device_type {
+        "is_on" => Some("on"),
+        "is_off" => Some("off"),
+        _ => None,
+    }
+}
+
+fn switch_trigger_state(device_type: &str) -> Option<&'static str> {
+    match device_type {
+        "turned_on" => Some("on"),
+        "turned_off" => Some("off"),
+        _ => None,
+    }
+}
+
+fn device_condition_state(domain: &str, device_type: &str) -> Option<&'static str> {
+    match domain {
+        "binary_sensor" => binary_sensor_condition_state(device_type),
+        "switch" => switch_condition_state(device_type),
+        _ => None,
+    }
+}
+
+fn device_trigger_state(domain: &str, device_type: &str) -> Option<&'static str> {
+    match domain {
+        "binary_sensor" => binary_sensor_trigger_state(device_type),
+        "switch" => switch_trigger_state(device_type),
+        _ => None,
+    }
+}
+
+fn validate_device_for(domain: &str, duration: Option<&DelayValue>, limit: Duration) -> Result<()> {
     if let Some(duration) = duration {
         if !matches!(duration, DelayValue::Parts(_)) {
-            return Err(Error::InvalidInput(
-                "binary_sensor device `for` must be a positive time-period mapping".into(),
-            ));
+            return Err(Error::InvalidInput(format!(
+                "{domain} device `for` must be a positive time-period mapping"
+            )));
         }
         duration
             .duration_with_limit(limit)
@@ -1606,6 +1638,7 @@ fn validate_binary_sensor_for(duration: Option<&DelayValue>, limit: Duration) ->
 }
 
 fn resolve_device_entity_reference(
+    domain: &str,
     entity_reference: &str,
     registries: Option<&Registries>,
 ) -> Result<String> {
@@ -1618,7 +1651,7 @@ fn resolve_device_entity_reference(
         .map(|id| id.simple().to_string())
         .map_err(|_| {
             Error::InvalidInput(format!(
-                "invalid binary_sensor device entity reference `{entity_reference}`"
+                "invalid {domain} device entity reference `{entity_reference}`"
             ))
         })?;
     registries
@@ -1631,7 +1664,7 @@ fn resolve_device_entity_reference(
         .map(|entry| entry.entity_id)
         .ok_or_else(|| {
             Error::InvalidInput(format!(
-                "unknown entity registry entry `{entity_reference}` in binary_sensor device automation"
+                "unknown entity registry entry `{entity_reference}` in {domain} device automation"
             ))
         })
 }
@@ -1641,8 +1674,10 @@ fn normalize_device_condition_entity_references(
     registries: Option<&Registries>,
 ) -> Result<()> {
     match condition {
-        Condition::Device { entity_id, .. } => {
-            *entity_id = resolve_device_entity_reference(entity_id, registries)?;
+        Condition::Device {
+            domain, entity_id, ..
+        } => {
+            *entity_id = resolve_device_entity_reference(domain, entity_id, registries)?;
         }
         Condition::And { conditions } | Condition::Or { conditions } => {
             for child in conditions {
@@ -1665,8 +1700,11 @@ fn normalize_device_entity_references(
 ) -> Result<()> {
     for automation in automations {
         for trigger in &mut automation.triggers {
-            if let Trigger::Device { entity_id, .. } = trigger {
-                *entity_id = resolve_device_entity_reference(entity_id, registries)?;
+            if let Trigger::Device {
+                domain, entity_id, ..
+            } = trigger
+            {
+                *entity_id = resolve_device_entity_reference(domain, entity_id, registries)?;
             }
         }
         for condition in &mut automation.conditions {
@@ -3621,6 +3659,7 @@ async fn wait_for_trigger_for(
 
 fn device_trigger_event_invalidates_for(trigger: &Trigger, event: &Event) -> Result<bool> {
     let Trigger::Device {
+        domain,
         entity_id,
         device_type,
         ..
@@ -3628,7 +3667,7 @@ fn device_trigger_event_invalidates_for(trigger: &Trigger, event: &Event) -> Res
     else {
         return Ok(false);
     };
-    let Some(expected_state) = binary_sensor_trigger_state(device_type) else {
+    let Some(expected_state) = device_trigger_state(domain, device_type) else {
         return Ok(true);
     };
     let (_old_state, new_state, changed_entity) = trigger_state_values(event)?;
@@ -3681,12 +3720,15 @@ fn match_event_trigger(
             (entity.is_some(), r#for, entity)
         }
         Trigger::Device {
-            device_type, r#for, ..
+            domain,
+            device_type,
+            r#for,
+            ..
         } => {
             let entity = if native_signal {
                 None
             } else {
-                binary_sensor_device_trigger_matches(trigger, device_type, event)?
+                device_trigger_matches(trigger, domain, device_type, event)?
             };
             (entity.is_some(), r#for, entity)
         }
@@ -4874,15 +4916,16 @@ fn state_value(state: &State, attribute: Option<&str>) -> Option<String> {
     }
 }
 
-fn binary_sensor_device_trigger_matches(
+fn device_trigger_matches(
     trigger: &Trigger,
+    domain: &str,
     device_type: &str,
     event: &Event,
 ) -> Result<Option<String>> {
     let Trigger::Device { entity_id, .. } = trigger else {
         return Ok(None);
     };
-    let Some(to_state) = binary_sensor_trigger_state(device_type) else {
+    let Some(to_state) = device_trigger_state(domain, device_type) else {
         return Ok(None);
     };
     let state_trigger = Trigger::State {
@@ -5115,11 +5158,12 @@ fn trigger_for_still_matches(
                     .is_none_or(|forbidden| current_value.as_ref() != Some(forbidden)))
         }
         Trigger::Device {
+            domain,
             entity_id,
             device_type,
             ..
         } => {
-            let Some(expected_state) = binary_sensor_trigger_state(device_type) else {
+            let Some(expected_state) = device_trigger_state(domain, device_type) else {
                 return Ok(false);
             };
             let Some(Value::Object(trigger_vars)) = variables.get("trigger") else {
@@ -5235,12 +5279,13 @@ fn condition_matches_at(
             }
         })),
         Condition::Device {
+            domain,
             entity_id,
             device_type,
             r#for,
             ..
         } => {
-            let Some(expected_state) = binary_sensor_condition_state(device_type) else {
+            let Some(expected_state) = device_condition_state(domain, device_type) else {
                 return Ok(false);
             };
             let Some(current) = runtime.get_state(entity_id) else {
@@ -5701,6 +5746,13 @@ mod tests {
         registration.suggested_object_id = Some(object_id.to_owned());
         registration.original_device_class = Some(device_class.to_owned());
         registration.disabled_by = disabled_by.map(str::to_owned);
+        registries.get_or_create_entity(registration).unwrap()
+    }
+
+    fn register_switch(registries: &Registries, object_id: &str) -> hass_registry::EntityEntry {
+        let mut registration =
+            EntityRegistration::new("switch", "test", format!("switch_{object_id}"));
+        registration.suggested_object_id = Some(object_id.to_owned());
         registries.get_or_create_entity(registration).unwrap()
     }
 
@@ -6191,6 +6243,579 @@ type: is_not_bat_low
         tokio::time::sleep(StdDuration::from_millis(20)).await;
         engine.shutdown().await.unwrap();
         tokio::time::sleep(StdDuration::from_millis(180)).await;
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn switch_device_types_match_pinned_toggle_semantics() {
+        assert_eq!(device_condition_state("switch", "is_on"), Some("on"));
+        assert_eq!(device_condition_state("switch", "is_off"), Some("off"));
+        assert_eq!(device_trigger_state("switch", "turned_on"), Some("on"));
+        assert_eq!(device_trigger_state("switch", "turned_off"), Some("off"));
+        assert_eq!(device_condition_state("switch", "is_open"), None);
+        assert_eq!(device_trigger_state("switch", "opened"), None);
+        assert_eq!(device_condition_state("light", "is_on"), None);
+        assert_eq!(device_trigger_state("light", "turned_on"), None);
+        assert_eq!(binary_sensor_condition_state("is_open"), Some("on"));
+        assert_eq!(binary_sensor_trigger_state("opened"), Some("on"));
+    }
+
+    #[test]
+    fn switch_device_schema_accepts_pinned_yaml_and_rejects_invalid_fields() {
+        let accepted = config(
+            r#"
+- id: switch_device_automation
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: metadata-only
+      entity_id: switch.relay
+      type: turned_on
+      for:
+        seconds: 5
+  conditions:
+    - condition: device
+      domain: switch
+      device_id: metadata-only
+      entity_id: switch.relay
+      type: is_off
+      for:
+        seconds: 5
+  actions:
+    - action: test.notify
+"#,
+        );
+        validate(&accepted).unwrap();
+
+        let bad_trigger_type = config(
+            r#"
+- id: bad_switch_trigger_type
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: device-1
+      entity_id: switch.relay
+      type: opened
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(validate(&bad_trigger_type).is_err());
+
+        let bad_condition_type = config(
+            r#"
+- id: bad_switch_condition_type
+  triggers:
+    - trigger: event
+      event_type: check
+  conditions:
+    - condition: device
+      domain: switch
+      device_id: device-1
+      entity_id: switch.relay
+      type: turned_on
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(validate(&bad_condition_type).is_err());
+
+        let bad_for = config(
+            r#"
+- id: bad_switch_for
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: device-1
+      entity_id: switch.relay
+      type: turned_on
+      for: "00:00:05"
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(validate(&bad_for).is_err());
+
+        let missing_device_id = serde_yaml::from_str::<Vec<Automation>>(
+            r#"
+- id: missing_switch_device_id
+  triggers:
+    - platform: device
+      domain: switch
+      entity_id: switch.relay
+      type: turned_on
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(missing_device_id.is_err());
+
+        let extra_field = serde_yaml::from_str::<Vec<Automation>>(
+            r#"
+- id: extra_switch_device_field
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: device-1
+      entity_id: switch.relay
+      type: turned_on
+      invented: true
+  actions:
+    - action: test.notify
+"#,
+        );
+        assert!(extra_field.is_err());
+    }
+
+    #[test]
+    fn switch_device_condition_checks_state_and_strict_for_boundary() {
+        let runtime = runtime();
+        runtime
+            .set_state("switch.relay", "on", Map::new(), Context::default(), false)
+            .unwrap();
+        let condition: Condition = serde_yaml::from_str(
+            r#"
+condition: device
+domain: switch
+device_id: metadata-only
+entity_id: switch.relay
+type: is_on
+for:
+  seconds: 5
+"#,
+        )
+        .unwrap();
+        validate_condition("switch_check", &condition).unwrap();
+        let current = runtime.get_state("switch.relay").unwrap();
+        let exact = current.last_changed + ChronoDuration::seconds(5);
+        assert!(!condition_matches_at(&runtime, &condition, &Map::new(), exact).unwrap());
+        assert!(
+            condition_matches_at(
+                &runtime,
+                &condition,
+                &Map::new(),
+                exact + ChronoDuration::nanoseconds(1),
+            )
+            .unwrap()
+        );
+
+        let off_condition: Condition = serde_yaml::from_str(
+            r#"
+condition: device
+domain: switch
+device_id: metadata-only
+entity_id: switch.relay
+type: is_off
+"#,
+        )
+        .unwrap();
+        runtime
+            .set_state("switch.relay", "off", Map::new(), Context::default(), false)
+            .unwrap();
+        assert!(condition_matches_at(&runtime, &off_condition, &Map::new(), Utc::now()).unwrap());
+
+        for state in ["unknown", "unavailable"] {
+            runtime
+                .set_state("switch.relay", state, Map::new(), Context::default(), false)
+                .unwrap();
+            assert!(!condition_matches_at(&runtime, &condition, &Map::new(), Utc::now(),).unwrap());
+            assert!(
+                !condition_matches_at(&runtime, &off_condition, &Map::new(), Utc::now(),).unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn switch_device_triggers_match_states_and_preserve_context() {
+        let runtime = runtime();
+        runtime
+            .set_state("switch.relay", "off", Map::new(), Context::default(), false)
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: switch_turned_on
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: metadata-only
+      entity_id: switch.relay
+      type: turned_on
+  actions:
+    - action: test.notify
+      data:
+        type: turned_on
+        platform: "{{ trigger.platform }}"
+        entity_id: "{{ trigger.entity_id }}"
+        from_state: "{{ trigger.from_state.state }}"
+        to_state: "{{ trigger.to_state.state }}"
+- id: switch_turned_off
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: metadata-only
+      entity_id: switch.relay
+      type: turned_off
+  actions:
+    - action: test.notify
+      data:
+        type: turned_off
+        platform: "{{ trigger.platform }}"
+        entity_id: "{{ trigger.entity_id }}"
+        from_state: "{{ trigger.from_state.state }}"
+        to_state: "{{ trigger.to_state.state }}"
+"#,
+            ),
+        )
+        .unwrap();
+
+        let on_context = Context {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            user_id: Some("switch-on-user".into()),
+        };
+        runtime
+            .set_state("switch.relay", "on", Map::new(), on_context.clone(), false)
+            .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["type"], "turned_on");
+        assert_eq!(call.data["platform"], "device");
+        assert_eq!(call.data["entity_id"], "switch.relay");
+        assert_eq!(call.data["from_state"], "off");
+        assert_eq!(call.data["to_state"], "on");
+        assert_eq!(
+            call.context.parent_id.as_deref(),
+            Some(on_context.id.as_str())
+        );
+        assert_eq!(call.context.user_id.as_deref(), Some("switch-on-user"));
+
+        runtime
+            .set_state(
+                "switch.relay",
+                "unknown",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(40), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        runtime
+            .set_state("switch.relay", "off", Map::new(), Context::default(), false)
+            .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["type"], "turned_off");
+        assert_eq!(call.data["from_state"], "unknown");
+        assert_eq!(call.data["to_state"], "off");
+
+        runtime
+            .set_state(
+                "switch.relay",
+                "unavailable",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        assert!(
+            tokio::time::timeout(StdDuration::from_millis(40), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        runtime
+            .set_state("switch.relay", "on", Map::new(), Context::default(), false)
+            .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["type"], "turned_on");
+        assert_eq!(call.data["from_state"], "unavailable");
+        assert_eq!(call.data["to_state"], "on");
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn switch_device_uuid_follows_rename_and_literal_ids_stay_literal() {
+        let runtime = runtime();
+        let registries = Registries::new(runtime.clone()).unwrap();
+        let entry = register_switch(&registries, "relay");
+        registries
+            .update_entity(
+                &entry.entity_id,
+                EntityUpdate {
+                    new_entity_id: Some("switch.relay_renamed".into()),
+                    ..EntityUpdate::default()
+                },
+            )
+            .unwrap();
+        for entity_id in [entry.entity_id.as_str(), "switch.relay_renamed"] {
+            runtime
+                .set_state(entity_id, "off", Map::new(), Context::default(), false)
+                .unwrap();
+        }
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let automations = config(&format!(
+            r#"
+- id: uuid_trigger
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: no-owner-check
+      entity_id: {}
+      type: turned_on
+  actions:
+    - action: test.notify
+      data:
+        result: uuid_trigger
+- id: literal_trigger
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: no-owner-check
+      entity_id: {}
+      type: turned_on
+  actions:
+    - action: test.notify
+      data:
+        result: literal_trigger
+- id: uuid_condition
+  triggers:
+    - trigger: event
+      event_type: check_switch_conditions
+  conditions:
+    - condition: device
+      domain: switch
+      device_id: no-owner-check
+      entity_id: {}
+      type: is_on
+  actions:
+    - action: test.notify
+      data:
+        result: uuid_condition
+- id: literal_condition
+  triggers:
+    - trigger: event
+      event_type: check_switch_conditions
+  conditions:
+    - condition: device
+      domain: switch
+      device_id: no-owner-check
+      entity_id: {}
+      type: is_on
+  actions:
+    - action: test.notify
+      data:
+        result: literal_condition
+"#,
+            entry.id.as_str(),
+            entry.entity_id.as_str(),
+            entry.id.as_str(),
+            entry.entity_id.as_str()
+        ));
+        let engine = start_with_features(
+            runtime.clone(),
+            automations,
+            AutomationFeatures {
+                registries: Some(registries),
+                ..AutomationFeatures::default()
+            },
+        )
+        .unwrap();
+
+        runtime
+            .set_state(
+                "switch.relay_renamed",
+                "on",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            receive_notification_run(&mut receiver).await.data["result"],
+            "uuid_trigger"
+        );
+        runtime
+            .fire_event("check_switch_conditions", Map::new(), Context::default())
+            .unwrap();
+        assert_eq!(
+            receive_notification_run(&mut receiver).await.data["result"],
+            "uuid_condition"
+        );
+
+        runtime
+            .set_state(
+                "switch.relay_renamed",
+                "off",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        runtime
+            .set_state(
+                &entry.entity_id,
+                "on",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            receive_notification_run(&mut receiver).await.data["result"],
+            "literal_trigger"
+        );
+        runtime
+            .fire_event("check_switch_conditions", Map::new(), Context::default())
+            .unwrap();
+        assert_eq!(
+            receive_notification_run(&mut receiver).await.data["result"],
+            "literal_condition"
+        );
+        engine.shutdown().await.unwrap();
+
+        let missing_uuid = Uuid::new_v4().simple().to_string();
+        let missing_uuid_config = config(&format!(
+            r#"
+- id: missing_switch_entity
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: device-1
+      entity_id: {missing_uuid}
+      type: turned_on
+  actions:
+    - action: test.notify
+"#
+        ));
+        assert!(
+            start_with_features(runtime, missing_uuid_config, AutomationFeatures::default(),)
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn switch_device_trigger_for_cancels_on_exit_and_shutdown() {
+        let runtime = runtime();
+        runtime
+            .set_state("switch.relay", "off", Map::new(), Context::default(), false)
+            .unwrap();
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        register_notifier(&runtime, sender);
+        let engine = start(
+            runtime.clone(),
+            config(
+                r#"
+- id: switch_stays_on
+  triggers:
+    - platform: device
+      domain: switch
+      device_id: metadata-only
+      entity_id: switch.relay
+      type: turned_on
+      for:
+        seconds: 0.12
+  actions:
+    - action: test.notify
+      data:
+        platform: "{{ trigger.platform }}"
+        entity_id: "{{ trigger.entity_id }}"
+        from_state: "{{ trigger.from_state.state }}"
+        to_state: "{{ trigger.to_state.state }}"
+"#,
+            ),
+        )
+        .unwrap();
+
+        let canceled_unknown = Context {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            user_id: Some("canceled-unknown".into()),
+        };
+        runtime
+            .set_state("switch.relay", "on", Map::new(), canceled_unknown, false)
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        runtime
+            .set_state(
+                "switch.relay",
+                "unknown",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+
+        let canceled_unavailable = Context {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            user_id: Some("canceled-unavailable".into()),
+        };
+        runtime
+            .set_state(
+                "switch.relay",
+                "on",
+                Map::new(),
+                canceled_unavailable,
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        runtime
+            .set_state(
+                "switch.relay",
+                "unavailable",
+                Map::new(),
+                Context::default(),
+                false,
+            )
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+
+        let sustained_context = Context {
+            id: Uuid::new_v4().to_string(),
+            parent_id: None,
+            user_id: Some("sustained-switch".into()),
+        };
+        runtime
+            .set_state(
+                "switch.relay",
+                "on",
+                Map::new(),
+                sustained_context.clone(),
+                false,
+            )
+            .unwrap();
+        let call = receive_notification_run(&mut receiver).await;
+        assert_eq!(call.data["platform"], "device");
+        assert_eq!(call.data["entity_id"], "switch.relay");
+        assert_eq!(call.data["from_state"], "unavailable");
+        assert_eq!(call.data["to_state"], "on");
+        assert_eq!(
+            call.context.parent_id.as_deref(),
+            Some(sustained_context.id.as_str())
+        );
+        assert_eq!(call.context.user_id.as_deref(), Some("sustained-switch"));
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
+        assert!(receiver.try_recv().is_err());
+
+        runtime
+            .set_state("switch.relay", "off", Map::new(), Context::default(), false)
+            .unwrap();
+        runtime
+            .set_state("switch.relay", "on", Map::new(), Context::default(), false)
+            .unwrap();
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        engine.shutdown().await.unwrap();
+        tokio::time::sleep(StdDuration::from_millis(150)).await;
         assert!(receiver.try_recv().is_err());
     }
 

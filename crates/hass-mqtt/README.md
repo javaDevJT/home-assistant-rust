@@ -91,6 +91,22 @@ then publish `online` to `lab/available` and
 `{"temperature":21.5}` to `lab/temperature`; the runtime reports
 `sensor.room_temperature = 21.5` with the configured unit.
 
+## Switch and button lifecycle
+
+The application config-entry driver starts MQTT with its shared entity
+lifecycle and registries. Discovered switches and buttons use their native
+descriptors and snapshot projections there, while MQTT keeps its discovery,
+state-topic, command queue, reconnect, and removal flow. Registry names,
+device-class and icon overrides remain effective; raw MQTT device metadata is
+preserved while its supported identity and details are registered against the
+config entry. Renamed entity IDs are resolved from the live lifecycle handle,
+and disabled or removed entities are not service targets.
+
+Standalone callers can continue using `MqttIntegration::start`; that entry
+point keeps the direct runtime path for compatibility. The shared lifecycle
+path covers switches and buttons; other MQTT platforms retain their current
+handling.
+
 ## Commands and optimistic state
 
 The integration registers switch and basic light `turn_on/off/toggle`, cover
@@ -111,7 +127,9 @@ This supports the usual JSON wrapper, for example:
 entity QoS (or global QoS) and retain setting. The integration leaves reported
 state untouched until `lab/heater/state` reports `1`. State is updated after a
 service call only when the root `optimistic` option or that discovery entity's
-`optimistic: true` explicitly enables it. Light-specific brightness/color
+`optimistic: true` explicitly enables it. Optimistic switches publish
+`assumed_state: true`; the attribute stays visible while unavailable, and a
+toggle from `unknown` requests `on`. Light-specific brightness/color
 topics and options are not implemented; light calls with extra options require
 a `command_template` and use its service variables.
 
@@ -129,6 +147,32 @@ unsupported service options return runtime service errors. Published commands
 do not change reported state unless global `optimistic: true` or the discovery
 entity explicitly sets `optimistic: true`. The tests use a local MQTT wire
 fixture; they do not contact an external broker or issue physical device calls.
+
+MQTT service handlers await the publish callback. QoS 0 completes after the
+outgoing packet is written, QoS 1 at PUBACK, and QoS 2 at PUBCOMP. The callback
+has a ten-second soft timeout: it logs and returns normally without promising
+broker delivery. A late acknowledgment still clears its packet-ID record, so
+it cannot complete a later command. Explicit optimistic state is applied only
+after callback completion or timeout, and service results include only states
+that the runtime actually changed. Repeating a command that leaves the state
+and attributes unchanged returns no changed-state entry. See pinned
+[`mqtt/entity.py:2011`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/mqtt/entity.py#L2011),
+[`mqtt/client.py:750`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/mqtt/client.py#L750),
+and [`mqtt/switch.py:150`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/mqtt/switch.py#L150).
+
+Button presses publish the generic UTC timestamp before the MQTT provider
+action. A provider error leaves that timestamp in state, and a successful
+service result includes its actual state change. If the connection or entity
+becomes unavailable while a publish is pending, completion keeps the latest
+reported attributes and the desired state for restore while the live state
+remains `unavailable`. When availability returns after reconnect, the remembered
+desired state is projected again.
+
+Canceling a service caller does not retract an already queued MQTT command; the
+event loop retains its packet tracking and applies any optimistic state when the
+callback completes. Shutdown closes command admission, resolves pending replies,
+sends DISCONNECT when possible, and joins the event-loop worker. If startup is
+canceled after the worker connects, its guard signals and reaps that worker.
 
 `subscribe_topic(filter, qos).await` adds a validated MQTT filter and retains
 it for reconnect resubscription, for example when native automations register

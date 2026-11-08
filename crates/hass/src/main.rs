@@ -14,6 +14,7 @@ mod media_player;
 mod oauth2;
 mod persons;
 mod recorder;
+mod registry_lifecycle;
 mod repairs;
 mod restart;
 mod spotify;
@@ -203,6 +204,10 @@ async fn main() -> Result<()> {
     })
     .await??;
     let repairs_manager = repairs.manager();
+    let registry_lifecycle = registry_lifecycle::RegistryLifecycleHost::start(
+        config_entries.clone(),
+        registries.clone(),
+    )?;
     let restart = restart::RestartHost::start(runtime.clone(), &auth)?;
     let system_health = system_health::start(runtime.clone())?;
     let system_health_manager = system_health.manager();
@@ -462,12 +467,13 @@ async fn main() -> Result<()> {
     )?;
     let rest = hass_rest::RestIntegration::start(runtime.clone(), config.rest, config.rest_command)
         .await?;
-    let drivers = integration_drivers::NativeDrivers::start(
+    let drivers = integration_drivers::NativeDrivers::start_with_entity_lifecycle(
         runtime.clone(),
         config_entries.clone(),
         registries.clone(),
         mqtt_topics,
         config.mqtt,
+        entity_lifecycle.clone(),
     )
     .await?;
     let templates = hass_template::TemplateEngine::new(runtime.clone());
@@ -675,6 +681,7 @@ async fn main() -> Result<()> {
     };
     let entity_lifecycle_result = entity_lifecycle.shutdown().await;
     let service_tasks_result = runtime.shutdown_service_tasks_async().await;
+    drop(registry_lifecycle);
     drop(repairs);
     network_adapters.shutdown();
     drop(_service_targets);

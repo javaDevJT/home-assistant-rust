@@ -14,7 +14,10 @@ use hass_registry::{DeviceRegistration, EntityRegistration, Registries};
 use serde_json::{Map, Value, json};
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -23,6 +26,10 @@ use tokio::{
     task::JoinHandle,
     time::{self, MissedTickBehavior},
 };
+
+#[cfg(test)]
+#[path = "integration_driver_lifecycle_tests.rs"]
+mod owned_lifecycle_tests;
 
 const MQTT_DOMAIN: &str = "mqtt";
 const MQTT_PLATFORM: &str = "mqtt";
@@ -35,6 +42,9 @@ const RETRY_MAX_SECS: u64 = 300;
 pub struct NativeDrivers {
     entries: Arc<ConfigEntries>,
     state: Arc<DriverState>,
+    driver: Option<Arc<dyn ConfigEntryDriver>>,
+    startup: Option<JoinHandle<Result<()>>>,
+    cleanup_started: bool,
     stops: Vec<oneshot::Sender<()>>,
     tasks: Vec<JoinHandle<()>>,
 }
@@ -42,6 +52,8 @@ pub struct NativeDrivers {
 struct DriverState {
     entries: Weak<ConfigEntries>,
     registries: Registries,
+    entity_lifecycle: Option<hass_entity::EntityLifecycle>,
+    closed: AtomicBool,
     handle: Handle,
     mqtt_topics: Vec<String>,
     active: Mutex<HashMap<String, MqttIntegration>>,
@@ -55,12 +67,44 @@ struct MqttConfigEntryDriver {
 
 impl NativeDrivers {
     /// Register and restore native drivers, including the real MQTT broker client.
+    #[cfg(test)]
     pub async fn start(
         runtime: Runtime,
         entries: ConfigEntries,
         registries: Registries,
         mqtt_topics: Vec<String>,
         yaml_mqtt: Option<MqttConfig>,
+    ) -> Result<Self> {
+        Self::start_inner(runtime, entries, registries, mqtt_topics, yaml_mqtt, None).await
+    }
+
+    /// Use the application's existing lifecycle for SDK-backed MQTT entities.
+    pub async fn start_with_entity_lifecycle(
+        runtime: Runtime,
+        entries: ConfigEntries,
+        registries: Registries,
+        mqtt_topics: Vec<String>,
+        yaml_mqtt: Option<MqttConfig>,
+        lifecycle: hass_entity::EntityLifecycle,
+    ) -> Result<Self> {
+        Self::start_inner(
+            runtime,
+            entries,
+            registries,
+            mqtt_topics,
+            yaml_mqtt,
+            Some(lifecycle),
+        )
+        .await
+    }
+
+    async fn start_inner(
+        runtime: Runtime,
+        entries: ConfigEntries,
+        registries: Registries,
+        mqtt_topics: Vec<String>,
+        yaml_mqtt: Option<MqttConfig>,
+        entity_lifecycle: Option<hass_entity::EntityLifecycle>,
     ) -> Result<Self> {
         // The runtime parameter is part of the public startup contract; config
         // entries carry the same clone into each synchronous driver callback.
@@ -69,86 +113,160 @@ impl NativeDrivers {
         let state = Arc::new(DriverState {
             entries: Arc::downgrade(&entries),
             registries,
+            entity_lifecycle,
+            closed: AtomicBool::new(false),
             handle: Handle::current(),
             mqtt_topics,
             active: Mutex::new(HashMap::new()),
             synced_entities: Mutex::new(HashMap::new()),
             lifecycle: Mutex::new(()),
         });
+        let driver: Arc<dyn ConfigEntryDriver> = Arc::new(MqttConfigEntryDriver {
+            state: Arc::clone(&state),
+        });
         entries
-            .register_driver(Arc::new(MqttConfigEntryDriver {
-                state: Arc::clone(&state),
-            }))
+            .register_driver(Arc::clone(&driver))
             .context("register native MQTT config-entry driver")?;
-
-        if let Some(config) = yaml_mqtt {
-            let entries_for_import = Arc::clone(&entries);
-            tokio::task::spawn_blocking(move || import_yaml_config(&entries_for_import, config))
-                .await
-                .context("join YAML MQTT import")??;
+        let mut host = Self {
+            entries,
+            state,
+            driver: Some(driver),
+            startup: None,
+            cleanup_started: false,
+            stops: Vec::new(),
+            tasks: Vec::new(),
+        };
+        let startup_entries = Arc::clone(&host.entries);
+        let startup_state = Arc::clone(&host.state);
+        host.startup = Some(tokio::task::spawn_blocking(move || {
+            if !startup_state.closed.load(Ordering::Acquire) {
+                if let Some(config) = yaml_mqtt {
+                    import_yaml_config(&startup_entries, config)?;
+                }
+                restore_mqtt_entries(&startup_entries, &startup_state);
+            }
+            Ok(())
+        }));
+        let startup_result = match host.startup.as_mut().expect("startup worker").await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::anyhow!("join native MQTT startup: {error}")),
+        };
+        host.startup.take();
+        if let Err(error) = startup_result {
+            let _ = host.shutdown().await;
+            return Err(error);
         }
 
-        let entries_for_restore = Arc::clone(&entries);
-        tokio::task::spawn_blocking(move || restore_mqtt_entries(&entries_for_restore))
-            .await
-            .context("join restored MQTT config entries")?;
-
         let (retry_stop, retry_rx) = oneshot::channel();
-        let retry_entries = Arc::clone(&entries);
+        let retry_entries = Arc::clone(&host.entries);
+        let retry_state = Arc::clone(&host.state);
         let retry_task = tokio::spawn(async move {
-            retry_scheduler(retry_entries, retry_rx).await;
+            retry_scheduler(retry_entries, retry_state, retry_rx).await;
         });
 
         let (registry_stop, registry_rx) = oneshot::channel();
-        let registry_state = Arc::clone(&state);
+        let registry_state = Arc::clone(&host.state);
         let registry_task = tokio::spawn(async move {
             registry_reconciler(registry_state, registry_rx).await;
         });
 
-        Ok(Self {
-            entries,
-            state,
-            stops: vec![retry_stop, registry_stop],
-            tasks: vec![retry_task, registry_task],
-        })
+        host.stops = vec![retry_stop, registry_stop];
+        host.tasks = vec![retry_task, registry_task];
+        Ok(host)
     }
 
     /// Stop background work, unload all MQTT entries, and join every MQTT task.
     pub async fn shutdown(mut self) -> Result<()> {
+        self.begin_cleanup()
+            .expect("native driver cleanup owner")
+            .await
+            .context("join native MQTT cleanup")?
+    }
+
+    fn begin_cleanup(&mut self) -> Option<JoinHandle<Result<()>>> {
+        if self.cleanup_started {
+            return None;
+        }
+        self.cleanup_started = true;
+        self.state.closed.store(true, Ordering::Release);
         for stop in self.stops.drain(..) {
             let _ = stop.send(());
         }
-        for task in self.tasks.drain(..) {
-            task.await.context("join native driver background task")?;
-        }
-
+        let startup = self.startup.take();
+        let tasks = std::mem::take(&mut self.tasks);
         let entries = Arc::clone(&self.entries);
         let state = Arc::clone(&self.state);
-        tokio::task::spawn_blocking(move || {
-            let mut unload_errors = Vec::new();
-            for entry in entries.list_entries(Some(MQTT_DOMAIN)) {
-                if entry.state == ConfigEntryState::Loaded
-                    && let Err(error) = entries.unload_entry(&entry.entry_id)
-                {
-                    unload_errors.push(format!("{}: {error}", entry.entry_id));
+        let driver = self.driver.take();
+        Some(self.state.handle.spawn(async move {
+            let mut errors = Vec::new();
+            if let Some(task) = startup {
+                match task.await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => errors.push(error.to_string()),
+                    Err(error) => errors.push(format!("join MQTT startup: {error}")),
                 }
             }
-            state.shutdown_remaining()?;
-            if !unload_errors.is_empty() {
-                bail!(
-                    "failed to unload MQTT config entries: {}",
-                    unload_errors.join("; ")
-                );
+            for task in tasks {
+                if let Err(error) = task.await {
+                    errors.push(format!("join native driver task: {error}"));
+                }
             }
-            Ok(())
-        })
-        .await
-        .context("join native MQTT shutdown")??;
-        Ok(())
+            let cleanup_entries = Arc::clone(&entries);
+            let cleanup = tokio::task::spawn_blocking(move || {
+                let mut unload_errors = Vec::new();
+                for entry in cleanup_entries.list_entries(Some(MQTT_DOMAIN)) {
+                    if entry.state == ConfigEntryState::Loaded
+                        && let Err(error) = cleanup_entries.unload_entry(&entry.entry_id)
+                    {
+                        unload_errors.push(format!("{}: {error}", entry.entry_id));
+                    }
+                }
+                if let Err(error) = state.shutdown_remaining() {
+                    unload_errors.push(error.to_string());
+                }
+                if !unload_errors.is_empty() {
+                    bail!(
+                        "failed to unload MQTT config entries: {}",
+                        unload_errors.join("; ")
+                    );
+                }
+                Ok(())
+            })
+            .await;
+            match cleanup {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => errors.push(error.to_string()),
+                Err(error) => errors.push(format!("join native MQTT shutdown: {error}")),
+            }
+            if let Some(driver) = driver {
+                entries.unregister_driver(&driver);
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                bail!("native MQTT cleanup: {}", errors.join("; "))
+            }
+        }))
+    }
+}
+
+impl Drop for NativeDrivers {
+    fn drop(&mut self) {
+        if let Some(task) = self.begin_cleanup() {
+            drop(task);
+        }
     }
 }
 
 impl DriverState {
+    fn ensure_open(&self) -> hass_core::Result<()> {
+        if self.closed.load(Ordering::Acquire) {
+            Err(CoreError::Service("native MQTT driver is stopping".into()))
+        } else {
+            Ok(())
+        }
+    }
+
     fn lock_active(&self) -> std::sync::MutexGuard<'_, HashMap<String, MqttIntegration>> {
         self.active
             .lock()
@@ -189,6 +307,11 @@ impl DriverState {
         let active = self.lock_active();
         for (entry_id, integration) in active.iter() {
             for mut metadata in integration.entity_metadata() {
+                if self.entity_lifecycle.is_some() && metadata.platform == "switch" {
+                    // The SDK lease owns switch identity and device metadata;
+                    // legacy reconciliation remains for the other platforms.
+                    continue;
+                }
                 let key = (
                     entry_id.clone(),
                     metadata.platform.clone(),
@@ -261,6 +384,7 @@ impl ConfigEntryDriver for MqttConfigEntryDriver {
     }
 
     fn setup(&self, runtime: &Runtime, entry: &ConfigEntry) -> hass_core::Result<SetupOutcome> {
+        self.state.ensure_open()?;
         let config = effective_config(entry)?;
         let _lifecycle = self.state.lock_lifecycle();
         {
@@ -275,11 +399,20 @@ impl ConfigEntryDriver for MqttConfigEntryDriver {
             }
         }
 
-        let integration = match self
-            .state
-            .handle
-            .block_on(MqttIntegration::start(runtime.clone(), config.clone()))
-        {
+        let integration = match self.state.handle.block_on(async {
+            if let Some(lifecycle) = &self.state.entity_lifecycle {
+                MqttIntegration::start_with_entity_lifecycle(
+                    runtime.clone(),
+                    config.clone(),
+                    lifecycle.clone(),
+                    self.state.registries.clone(),
+                    &entry.entry_id,
+                )
+                .await
+            } else {
+                MqttIntegration::start(runtime.clone(), config.clone()).await
+            }
+        }) {
             Ok(integration) => integration,
             Err(CoreError::InvalidInput(message)) => {
                 return Err(CoreError::InvalidInput(message));
@@ -292,6 +425,12 @@ impl ConfigEntryDriver for MqttConfigEntryDriver {
             }
         };
 
+        if self.state.closed.load(Ordering::Acquire) {
+            self.state.handle.block_on(integration.shutdown())?;
+            return Err(CoreError::Service(
+                "MQTT setup canceled during shutdown".into(),
+            ));
+        }
         for topic in &self.state.mqtt_topics {
             if let Err(error) = self
                 .state
@@ -309,9 +448,15 @@ impl ConfigEntryDriver for MqttConfigEntryDriver {
             }
         }
 
-        self.state
-            .lock_active()
-            .insert(entry.entry_id.clone(), integration);
+        let mut active = self.state.lock_active();
+        if self.state.closed.load(Ordering::Acquire) {
+            drop(active);
+            self.state.handle.block_on(integration.shutdown())?;
+            return Err(CoreError::Service(
+                "MQTT setup canceled during shutdown".into(),
+            ));
+        }
+        active.insert(entry.entry_id.clone(), integration);
         Ok(SetupOutcome::Ready)
     }
 
@@ -333,6 +478,7 @@ impl ConfigEntryDriver for MqttConfigEntryDriver {
     }
 
     fn config_flow(&self, request: &ConfigFlowRequest) -> hass_core::Result<ConfigFlowResult> {
+        self.state.ensure_open()?;
         let Some(input) = request.user_input.as_ref() else {
             return Ok(ConfigFlowResult::Form {
                 step_id: "broker".into(),
@@ -401,6 +547,7 @@ impl ConfigEntryDriver for MqttConfigEntryDriver {
     }
 
     fn options_flow(&self, request: &ConfigFlowRequest) -> hass_core::Result<ConfigFlowResult> {
+        self.state.ensure_open()?;
         let entry_id = request.entry_id.as_deref().ok_or_else(|| {
             CoreError::InvalidInput("MQTT options flow is missing entry_id".into())
         })?;
@@ -535,8 +682,11 @@ fn ensure_flow_completed(result: &Value) -> hass_core::Result<()> {
     }
 }
 
-fn restore_mqtt_entries(entries: &ConfigEntries) {
+fn restore_mqtt_entries(entries: &ConfigEntries, state: &DriverState) {
     for entry in entries.list_entries(Some(MQTT_DOMAIN)) {
+        if state.closed.load(Ordering::Acquire) {
+            break;
+        }
         if entry.disabled_by.is_some() || entry.state == ConfigEntryState::Loaded {
             continue;
         }
@@ -555,7 +705,11 @@ fn restore_mqtt_entries(entries: &ConfigEntries) {
     }
 }
 
-async fn retry_scheduler(entries: Arc<ConfigEntries>, mut stop: oneshot::Receiver<()>) {
+async fn retry_scheduler(
+    entries: Arc<ConfigEntries>,
+    state: Arc<DriverState>,
+    mut stop: oneshot::Receiver<()>,
+) {
     let mut interval = time::interval(RETRY_POLL_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     loop {
@@ -563,8 +717,10 @@ async fn retry_scheduler(entries: Arc<ConfigEntries>, mut stop: oneshot::Receive
             _ = &mut stop => break,
             _ = interval.tick() => {
                 let entries = Arc::clone(&entries);
+                let state = Arc::clone(&state);
                 if let Err(error) = tokio::task::spawn_blocking(move || {
                     for entry in entries.list_entries(Some(MQTT_DOMAIN)) {
+                        if state.closed.load(Ordering::Acquire) { break; }
                         if entry.state == ConfigEntryState::SetupRetry
                             && entry.retry_at.is_some_and(|retry_at| retry_at <= Utc::now())
                             && let Err(error) = entries.retry_entry(&entry.entry_id)
@@ -1322,16 +1478,30 @@ mod tests {
             target: Map::from_iter([("entity_id".into(), json!(entity_id))]),
             context: Context::default(),
         };
-        runtime.call_service(call("switch.template_relay")).unwrap();
+        runtime
+            .call_service_async(call("switch.template_relay"))
+            .await
+            .unwrap();
         assert_eq!(template_calls.load(Ordering::SeqCst), 1);
-        runtime.call_service(call("switch.boiler_relay")).unwrap();
+        runtime
+            .call_service_async(call("switch.boiler_relay"))
+            .await
+            .unwrap();
         broker.wait_for_publication("fixture/switch/set").await;
 
         integration.shutdown().await.unwrap();
         assert!(runtime.services()["switch"].get("turn_on").is_some());
-        runtime.call_service(call("switch.template_relay")).unwrap();
+        runtime
+            .call_service_async(call("switch.template_relay"))
+            .await
+            .unwrap();
         assert_eq!(template_calls.load(Ordering::SeqCst), 2);
-        assert!(runtime.call_service(call("switch.boiler_relay")).is_err());
+        assert!(
+            runtime
+                .call_service_async(call("switch.boiler_relay"))
+                .await
+                .is_err()
+        );
         runtime
             .unregister_entity_services("template-fixture")
             .unwrap();

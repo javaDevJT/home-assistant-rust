@@ -1,14 +1,16 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
 use hass_core::{Context, Event, MemoryStore, Runtime, ServiceCall};
+use hass_entity::EntityLifecycle;
 use hass_mqtt::{MqttConfig, MqttIntegration};
+use hass_registry::{EntityUpdate, Registries};
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 #[derive(Debug)]
@@ -20,6 +22,8 @@ enum ServerCommand {
         retain: bool,
     },
     DropConnection,
+    HoldAcknowledgments(bool),
+    Acknowledge(u16),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +38,12 @@ enum BrokerEvent {
         payload: Vec<u8>,
         qos: u8,
         retain: bool,
+        packet_id: Option<u16>,
+    },
+    AwaitingAcknowledgment {
+        topic: String,
+        packet_id: u16,
+        qos: u8,
     },
     Disconnected,
 }
@@ -86,6 +96,18 @@ impl LocalBroker {
 
     async fn drop_connection(&self) {
         self.commands.send(ServerCommand::DropConnection).unwrap();
+    }
+
+    fn hold_acknowledgments(&self, hold: bool) {
+        self.commands
+            .send(ServerCommand::HoldAcknowledgments(hold))
+            .unwrap();
+    }
+
+    fn acknowledge(&self, packet_id: u16) {
+        self.commands
+            .send(ServerCommand::Acknowledge(packet_id))
+            .unwrap();
     }
 
     async fn wait_for_subscriptions(&mut self, expected: &[(&str, u8)]) {
@@ -152,6 +174,8 @@ async fn serve_connection(
             }
         }
     });
+    let mut hold_acknowledgments = false;
+    let mut pending_acknowledgments = HashMap::new();
 
     loop {
         tokio::select! {
@@ -199,13 +223,45 @@ async fn serve_connection(
                             None
                         };
                         events.send(BrokerEvent::Published {
-                            topic,
+                            topic: topic.clone(),
                             payload: body[payload_offset..].to_vec(),
                             qos,
                             retain,
+                            packet_id: id,
                         }).ok();
                         if let Some(id) = id {
-                            write_packet(&mut writer, 0x40, &id.to_be_bytes()).await?;
+                            match qos {
+                                1 if hold_acknowledgments => {
+                                    pending_acknowledgments.insert(id, (1, topic.clone()));
+                                    events.send(BrokerEvent::AwaitingAcknowledgment {
+                                        topic,
+                                        packet_id: id,
+                                        qos: 1,
+                                    }).ok();
+                                }
+                                1 => write_packet(&mut writer, 0x40, &id.to_be_bytes()).await?,
+                                2 => {
+                                    pending_acknowledgments.insert(id, (2, topic));
+                                    write_packet(&mut writer, 0x50, &id.to_be_bytes()).await?;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    6 => {
+                        if body.len() < 2 { continue; }
+                        let id = u16::from_be_bytes([body[0], body[1]]);
+                        if let Some((2, topic)) = pending_acknowledgments.get(&id) {
+                            if hold_acknowledgments {
+                                events.send(BrokerEvent::AwaitingAcknowledgment {
+                                    topic: topic.clone(),
+                                    packet_id: id,
+                                    qos: 2,
+                                }).ok();
+                            } else {
+                                pending_acknowledgments.remove(&id);
+                                write_packet(&mut writer, 0x70, &id.to_be_bytes()).await?;
+                            }
                         }
                     }
                     12 => write_packet(&mut writer, 0xD0, &[]).await?,
@@ -233,6 +289,15 @@ async fn serve_connection(
                         events.send(BrokerEvent::Disconnected).ok();
                         reader_task.abort();
                         return Ok(());
+                    }
+                    Some(ServerCommand::HoldAcknowledgments(hold)) => {
+                        hold_acknowledgments = hold;
+                    }
+                    Some(ServerCommand::Acknowledge(packet_id)) => {
+                        if let Some((qos, _)) = pending_acknowledgments.remove(&packet_id) {
+                            let header = if qos == 1 { 0x40 } else { 0x70 };
+                            write_packet(&mut writer, header, &packet_id.to_be_bytes()).await?;
+                        }
                     }
                     None => break,
                 }
@@ -464,9 +529,10 @@ async fn real_wire_discovery_state_availability_service_reconnect_and_shutdown()
         .await;
     wait_state(&runtime, "switch.heater", "off").await;
     let result = runtime
-        .call_service(service_call("switch", "turn_on", "switch.heater"))
+        .call_service_async(service_call("switch", "turn_on", "switch.heater"))
+        .await
         .unwrap();
-    assert_eq!(result.response, Some(json!({"queued": 1})));
+    assert_eq!(result.response, None);
     let outgoing = broker.wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/heater/set")).await;
     assert!(
         matches!(outgoing, BrokerEvent::Published { payload, qos: 1, retain: false, .. } if payload == br#"{"state":"1"}"#)
@@ -509,7 +575,8 @@ async fn real_wire_discovery_state_availability_service_reconnect_and_shutdown()
         .await;
     wait_state(&runtime, "light.desk", "off").await;
     runtime
-        .call_service(service_call("light", "turn_on", "light.desk"))
+        .call_service_async(service_call("light", "turn_on", "light.desk"))
+        .await
         .unwrap();
     let outgoing = broker
         .wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/desk/set"))
@@ -575,7 +642,8 @@ async fn real_wire_discovery_state_availability_service_reconnect_and_shutdown()
     );
     assert!(
         runtime
-            .call_service(service_call("switch", "turn_on", "switch.heater"))
+            .call_service_async(service_call("switch", "turn_on", "switch.heater"))
+            .await
             .is_err()
     );
 
@@ -656,13 +724,13 @@ async fn json_light_reports_features_and_publishes_supported_commands() {
     assert_eq!(state.attributes["hs_color"], json!([180.0, 60.0]));
     assert_eq!(state.attributes["effect"], "rainbow");
 
-    let command = runtime.call_service(service_call_with_data(
+    let command = runtime.call_service_async(service_call_with_data(
         "light",
         "turn_on",
         "light.full_light",
         json!({"brightness":127,"hs_color":[180,60],"effect":"rainbow","flash":"short","transition":2.5}),
-    )).unwrap();
-    assert_eq!(command.response, Some(json!({"queued":1})));
+    )).await.unwrap();
+    assert_eq!(command.response, None);
     let (payload, qos, retain) = wait_published(&mut broker, "lab/light/set").await;
     assert_eq!(qos, 1);
     assert!(!retain);
@@ -673,23 +741,25 @@ async fn json_light_reports_features_and_publishes_supported_commands() {
     assert_eq!(runtime.get_state("light.full_light").unwrap().state, "on");
 
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "light",
             "turn_on",
             "light.full_light",
             json!({"color_temp_kelvin":3500}),
         ))
+        .await
         .unwrap();
     let (payload, _, _) = wait_published(&mut broker, "lab/light/set").await;
     assert_eq!(payload, json!({"state":"ON","color_temp":3500}));
 
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "light",
             "turn_on",
             "light.full_light",
             json!({"rgb_color":[12,34,56]}),
         ))
+        .await
         .unwrap();
     let (payload, _, _) = wait_published(&mut broker, "lab/light/set").await;
     assert_eq!(
@@ -698,12 +768,13 @@ async fn json_light_reports_features_and_publishes_supported_commands() {
     );
 
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "light",
             "turn_on",
             "light.full_light",
             json!({"rgbw_color":[12,34,56,78]}),
         ))
+        .await
         .unwrap();
     let (payload, _, _) = wait_published(&mut broker, "lab/light/set").await;
     assert_eq!(
@@ -712,12 +783,13 @@ async fn json_light_reports_features_and_publishes_supported_commands() {
     );
 
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "light",
             "turn_on",
             "light.full_light",
             json!({"rgbww_color":[12,34,56,78,90]}),
         ))
+        .await
         .unwrap();
     let (payload, _, _) = wait_published(&mut broker, "lab/light/set").await;
     assert_eq!(
@@ -726,23 +798,25 @@ async fn json_light_reports_features_and_publishes_supported_commands() {
     );
 
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "light",
             "turn_on",
             "light.full_light",
             json!({"white":128}),
         ))
+        .await
         .unwrap();
     let (payload, _, _) = wait_published(&mut broker, "lab/light/set").await;
     assert_eq!(payload, json!({"state":"ON","white":128}));
 
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "light",
             "turn_on",
             "light.full_light",
             json!({"xy_color":[0.25,0.4]}),
         ))
+        .await
         .unwrap();
     let (payload, _, _) = wait_published(&mut broker, "lab/light/set").await;
     assert_eq!(payload, json!({"state":"ON","color":{"x":0.25,"y":0.4}}));
@@ -865,12 +939,14 @@ async fn json_light_reports_features_and_publishes_supported_commands() {
     .await
     .unwrap();
 
-    let error = runtime.call_service(service_call_with_data(
-        "light",
-        "turn_on",
-        "light.full_light",
-        json!({"bogus_feature":true}),
-    ));
+    let error = runtime
+        .call_service_async(service_call_with_data(
+            "light",
+            "turn_on",
+            "light.full_light",
+            json!({"bogus_feature":true}),
+        ))
+        .await;
     assert!(error.is_err(), "unsupported light options must be rejected");
     integration.shutdown().await.unwrap();
 }
@@ -943,33 +1019,37 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
         .await;
     wait_state(&runtime, "cover.awning", "open").await;
     runtime
-        .call_service(service_call("cover", "open_cover", "cover.awning"))
+        .call_service_async(service_call("cover", "open_cover", "cover.awning"))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/awning/cmd").await.0,
         Value::String("OPEN".into())
     );
     runtime
-        .call_service(service_call("cover", "close_cover", "cover.awning"))
+        .call_service_async(service_call("cover", "close_cover", "cover.awning"))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/awning/cmd").await.0,
         Value::String("CLOSE".into())
     );
     runtime
-        .call_service(service_call("cover", "stop_cover", "cover.awning"))
+        .call_service_async(service_call("cover", "stop_cover", "cover.awning"))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/awning/cmd").await.0,
         Value::String("STOP".into())
     );
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "cover",
             "set_cover_position",
             "cover.awning",
             json!({"position":25}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/awning/set-position")
@@ -978,33 +1058,37 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
         json!(25)
     );
     runtime
-        .call_service(service_call("cover", "open_cover_tilt", "cover.awning"))
+        .call_service_async(service_call("cover", "open_cover_tilt", "cover.awning"))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/awning/set-tilt").await.0,
         json!(90)
     );
     runtime
-        .call_service(service_call("cover", "close_cover_tilt", "cover.awning"))
+        .call_service_async(service_call("cover", "close_cover_tilt", "cover.awning"))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/awning/set-tilt").await.0,
         json!(10)
     );
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "cover",
             "set_cover_tilt_position",
             "cover.awning",
             json!({"tilt_position":50}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/awning/set-tilt").await.0,
         json!(50)
     );
     runtime
-        .call_service(service_call("cover", "stop_cover_tilt", "cover.awning"))
+        .call_service_async(service_call("cover", "stop_cover_tilt", "cover.awning"))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/awning/set-tilt").await.0,
@@ -1060,12 +1144,13 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
     .await
     .unwrap();
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "fan",
             "turn_on",
             "fan.ceiling",
             json!({"percentage":75,"preset_mode":"quiet"}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/fan/set").await.0,
@@ -1082,12 +1167,13 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
         Value::String("quiet".into())
     );
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "fan",
             "set_percentage",
             "fan.ceiling",
             json!({"percentage":25}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/fan/set-percentage")
@@ -1096,24 +1182,26 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
         json!(2)
     );
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "fan",
             "set_preset_mode",
             "fan.ceiling",
             json!({"preset_mode":"auto"}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/fan/set-preset").await.0,
         Value::String("auto".into())
     );
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "fan",
             "oscillate",
             "fan.ceiling",
             json!({"oscillating":false}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/fan/set-oscillation")
@@ -1122,12 +1210,13 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
         Value::String("oscillate_off".into())
     );
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "fan",
             "set_direction",
             "fan.ceiling",
             json!({"direction":"reverse"}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/fan/set-direction").await.0,
@@ -1139,6 +1228,179 @@ async fn cover_and_fan_services_publish_and_topics_report_state() {
         "commands do not replace reported fan state when optimism is disabled"
     );
     integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_switch_lifecycle_projects_metadata_state_targets_and_commands() {
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-switch-lifecycle\nqos: 1\ndiscovery_prefix: homeassistant\nmax_payload_bytes: 1024\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        config,
+        lifecycle.clone(),
+        registries.clone(),
+        "mqtt-entry-switch-lifecycle",
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for(|event| matches!(event, BrokerEvent::Subscribed { topic, qos: 1 } if topic == "homeassistant/#"))
+        .await;
+
+    assert_eq!(
+        runtime.services()["switch"]["turn_on"],
+        json!({
+            "name": "Turn on switch",
+            "description": "Turns on a switch.",
+            "target": {"entity": {"domain": "switch"}}
+        })
+    );
+    assert_eq!(
+        runtime.services()["switch"]["turn_off"]["name"],
+        "Turn off switch"
+    );
+    assert_eq!(
+        runtime.services()["switch"]["toggle"]["description"],
+        "Toggles a switch on/off."
+    );
+
+    broker
+        .publish(
+            "homeassistant/switch/lab/heater/config",
+            br#"{"name":"Heater","unique_id":"heater-switch-id","state_topic":"lab/heater/state","command_topic":"lab/heater/set","command_template":"{\"entity\":\"{{ entity_id }}\",\"state\":\"{{ value }}\"}","availability_topic":"lab/heater/available","payload_on":"1","payload_off":"0","state_on":"1","state_off":"0","optimistic":true,"device_class":"OUTLET","icon":"mdi:power","entity_category":"config","device":{"identifiers":["switch-device"],"name":"Kitchen"}}"#.to_vec(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[("lab/heater/state", 1), ("lab/heater/available", 1)])
+        .await;
+    let entity_id = integration
+        .entity_metadata()
+        .into_iter()
+        .find(|entity| entity.unique_id == "heater-switch-id")
+        .unwrap()
+        .entity_id;
+    wait_state(&runtime, &entity_id, "unavailable").await;
+    assert_eq!(
+        runtime.get_state(&entity_id).unwrap().attributes["assumed_state"],
+        true,
+        "assumed state stays live while the entity is unavailable"
+    );
+
+    broker
+        .publish("lab/heater/available", b"online".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/heater/state", b"0".to_vec(), true)
+        .await;
+    wait_state(&runtime, &entity_id, "off").await;
+    assert_eq!(
+        runtime.get_state(&entity_id).unwrap().attributes["device_class"],
+        "outlet",
+        "switch descriptor keeps the typed source device class"
+    );
+    let device = registries.devices().into_iter().find(|device| {
+        device
+            .identifiers
+            .contains(&("mqtt".to_owned(), "switch-device".to_owned()))
+    });
+    assert!(
+        device.is_some(),
+        "the source device metadata is registered once"
+    );
+
+    let registered = registries
+        .entities()
+        .into_iter()
+        .find(|entity| entity.domain == "switch" && entity.unique_id == "heater-switch-id")
+        .unwrap();
+    let renamed_id = "switch.kitchen_heater";
+    registries
+        .update_entity(
+            &registered.entity_id,
+            EntityUpdate {
+                new_entity_id: Some(renamed_id.into()),
+                name: Some(Some("Kitchen Heater".into())),
+                device_class: Some(Some("switch".into())),
+                icon: Some(Some("mdi:toggle-switch".into())),
+                ..EntityUpdate::default()
+            },
+        )
+        .unwrap();
+    wait_state(&runtime, renamed_id, "off").await;
+    assert_eq!(
+        integration
+            .entity_metadata()
+            .into_iter()
+            .find(|entity| entity.unique_id == "heater-switch-id")
+            .unwrap()
+            .entity_id,
+        renamed_id
+    );
+    let renamed = runtime.get_state(renamed_id).unwrap();
+    assert_eq!(renamed.attributes["friendly_name"], "Kitchen Heater");
+    assert_eq!(renamed.attributes["device_class"], "switch");
+    assert_eq!(renamed.attributes["icon"], "mdi:toggle-switch");
+
+    broker
+        .publish("lab/heater/state", b"unmapped".to_vec(), true)
+        .await;
+    wait_state(&runtime, renamed_id, "unknown").await;
+    assert!(
+        runtime
+            .call_service_async(service_call_with_data(
+                "switch",
+                "turn_on",
+                renamed_id,
+                json!({"brightness": 50}),
+            ))
+            .await
+            .is_err()
+    );
+    runtime
+        .call_service_async(service_call("switch", "toggle", renamed_id))
+        .await
+        .unwrap();
+    let outgoing = broker
+        .wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/heater/set"))
+        .await;
+    assert!(matches!(
+        outgoing,
+        BrokerEvent::Published { payload, qos: 1, retain: false, .. }
+            if payload == br#"{"entity":"switch.kitchen_heater","state":"1"}"#
+    ));
+    wait_state(&runtime, renamed_id, "on").await;
+    assert_eq!(
+        runtime.get_state(renamed_id).unwrap().attributes["assumed_state"],
+        true
+    );
+
+    registries
+        .update_entity(
+            renamed_id,
+            EntityUpdate {
+                disabled_by: Some(Some("user".into())),
+                ..EntityUpdate::default()
+            },
+        )
+        .unwrap();
+    wait_removed(&runtime, renamed_id).await;
+    assert!(
+        runtime
+            .call_service_async(service_call("switch", "turn_off", renamed_id))
+            .await
+            .is_err()
+    );
+
+    integration.shutdown().await.unwrap();
+    lifecycle.shutdown().await.unwrap();
 }
 
 #[tokio::test]
@@ -1181,19 +1443,21 @@ async fn button_number_select_and_text_use_local_mqtt_wire() {
     wait_state(&runtime, "text.label", "hello").await;
 
     runtime
-        .call_service(service_call("button", "press", "button.reboot"))
+        .call_service_async(service_call("button", "press", "button.reboot"))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/reboot").await.0,
         Value::String("PUSH".into())
     );
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "number",
             "set_value",
             "number.target",
             json!({"value":6}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/target/set").await.0,
@@ -1201,12 +1465,13 @@ async fn button_number_select_and_text_use_local_mqtt_wire() {
     );
     assert_eq!(runtime.get_state("number.target").unwrap().state, "4");
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "select",
             "select_option",
             "select.mode",
             json!({"option":"high"}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/mode/set").await.0,
@@ -1214,12 +1479,13 @@ async fn button_number_select_and_text_use_local_mqtt_wire() {
     );
     assert_eq!(runtime.get_state("select.mode").unwrap().state, "low");
     runtime
-        .call_service(service_call_with_data(
+        .call_service_async(service_call_with_data(
             "text",
             "set_value",
             "text.label",
             json!({"value":"goodbye"}),
         ))
+        .await
         .unwrap();
     assert_eq!(
         wait_published(&mut broker, "lab/label/set").await.0,
@@ -1228,22 +1494,24 @@ async fn button_number_select_and_text_use_local_mqtt_wire() {
     assert_eq!(runtime.get_state("text.label").unwrap().state, "hello");
     assert!(
         runtime
-            .call_service(service_call_with_data(
+            .call_service_async(service_call_with_data(
                 "text",
                 "set_value",
                 "text.label",
                 json!({"value":"not valid"})
             ))
+            .await
             .is_err()
     );
     assert!(
         runtime
-            .call_service(service_call_with_data(
+            .call_service_async(service_call_with_data(
                 "number",
                 "set_value",
                 "number.target",
                 json!({"value":5})
             ))
+            .await
             .is_err()
     );
     broker
@@ -1257,4 +1525,610 @@ async fn button_number_select_and_text_use_local_mqtt_wire() {
             .all(|entity| entity.entity_id != "text.label")
     );
     integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn qos0_completes_after_write_and_returns_no_queued_response() {
+    let mut broker = LocalBroker::start().await;
+    let runtime = runtime();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-qos0-wire\nqos: 0\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start(runtime.clone(), config)
+        .await
+        .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 0)])
+        .await;
+    broker
+        .publish(
+            "homeassistant/switch/lab/light/config",
+            br#"{"name":"Light","unique_id":"qos0","state_topic":"lab/light/state","command_topic":"lab/light/set","optimistic":true}"#.to_vec(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[("lab/light/state", 0)])
+        .await;
+    broker
+        .publish("lab/light/state", b"OFF".to_vec(), true)
+        .await;
+    wait_state(&runtime, "switch.light", "off").await;
+
+    let result = runtime
+        .call_service_async(service_call("switch", "turn_on", "switch.light"))
+        .await
+        .unwrap();
+    assert_eq!(result.response, None);
+    assert_eq!(result.changed_states.len(), 1);
+    assert_eq!(result.changed_states[0].entity_id, "switch.light");
+    assert_eq!(result.changed_states[0].state, "on");
+    assert_eq!(runtime.get_state("switch.light").unwrap().state, "on");
+    let packet = broker
+        .wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/light/set"))
+        .await;
+    assert!(matches!(
+        packet,
+        BrokerEvent::Published {
+            qos: 0,
+            packet_id: None,
+            ..
+        }
+    ));
+    let unchanged = runtime
+        .call_service_async(service_call("switch", "turn_on", "switch.light"))
+        .await
+        .unwrap();
+    assert!(unchanged.changed_states.is_empty());
+    let _ = broker
+        .wait_for(|event| matches!(event, BrokerEvent::Published { topic, .. } if topic == "lab/light/set"))
+        .await;
+    integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn qos1_out_of_order_acks_cancellation_and_shutdown_are_deterministic() {
+    let mut broker = LocalBroker::start().await;
+    broker.hold_acknowledgments(true);
+    let runtime = runtime();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-qos1-held\nqos: 1\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start(runtime.clone(), config)
+        .await
+        .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    for (object, topic) in [("one", "lab/one/set"), ("two", "lab/two/set")] {
+        broker
+            .publish(
+                &format!("homeassistant/switch/lab/{object}/config"),
+                format!(r#"{{"name":"{object}","unique_id":"{object}","command_topic":"{topic}","optimistic":true}}"#).into_bytes(),
+                true,
+            )
+            .await;
+    }
+    wait_state(&runtime, "switch.one", "unknown").await;
+    wait_state(&runtime, "switch.two", "unknown").await;
+    let call = ServiceCall {
+        domain: "switch".into(),
+        service: "turn_on".into(),
+        data: Map::new(),
+        target: Map::from_iter([("entity_id".into(), json!(["switch.one", "switch.two"]))]),
+        context: Context::default(),
+    };
+    let mut service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move { runtime.call_service_async(call).await }
+    });
+    let (_, first_id) = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, .. } if topic == "lab/one/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, topic, .. } => (topic, packet_id),
+        _ => unreachable!(),
+    };
+    let second_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, .. } if topic == "lab/two/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    broker.acknowledge(second_id);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if runtime
+                .get_state("switch.two")
+                .is_some_and(|state| state.state == "on")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut service)
+            .await
+            .is_err()
+    );
+    assert!(
+        runtime
+            .get_state("switch.one")
+            .is_none_or(|state| state.state != "on")
+    );
+    broker.acknowledge(first_id);
+    let result = service.await.unwrap().unwrap();
+    assert_eq!(result.changed_states.len(), 2);
+    assert_eq!(
+        result
+            .changed_states
+            .iter()
+            .map(|state| state.entity_id.as_str())
+            .collect::<Vec<_>>(),
+        ["switch.one", "switch.two"]
+    );
+
+    let canceled = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call("switch", "turn_off", "switch.two"))
+                .await
+        }
+    });
+    let canceled_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, .. } if topic == "lab/two/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    canceled.abort();
+    assert!(canceled.await.is_err());
+    assert_eq!(runtime.get_state("switch.two").unwrap().state, "on");
+    broker.acknowledge(canceled_id);
+    wait_state(&runtime, "switch.two", "off").await;
+
+    let pending = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call("switch", "turn_on", "switch.two"))
+                .await
+        }
+    });
+    let _ = broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, .. } if topic == "lab/two/set"))
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), integration.shutdown())
+        .await
+        .expect("shutdown must join with a pending acknowledgment")
+        .unwrap();
+    assert!(pending.await.unwrap().is_err());
+}
+
+#[tokio::test]
+async fn qos2_service_waits_for_pubcomp() {
+    let mut broker = LocalBroker::start().await;
+    broker.hold_acknowledgments(true);
+    let runtime = runtime();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-qos2-held\nqos: 2\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start(runtime.clone(), config)
+        .await
+        .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 2)])
+        .await;
+    broker
+        .publish(
+            "homeassistant/button/lab/action/config",
+            br#"{"name":"Action","unique_id":"qos2","command_topic":"lab/action/set"}"#.to_vec(),
+            true,
+        )
+        .await;
+    wait_state(&runtime, "button.action", "unknown").await;
+    let mut service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call("button", "press", "button.action"))
+                .await
+        }
+    });
+    let packet_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 2, .. } if topic == "lab/action/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut service)
+            .await
+            .is_err()
+    );
+    let pressed_state = runtime.get_state("button.action").unwrap();
+    assert!(pressed_state.state.ends_with("+00:00"));
+    assert!(pressed_state.state.contains('T'));
+    broker.acknowledge(packet_id);
+    let result = service.await.unwrap().unwrap();
+    assert_eq!(result.changed_states.len(), 1);
+    assert_eq!(result.changed_states[0].entity_id, "button.action");
+    assert_eq!(result.changed_states[0].state, pressed_state.state);
+    integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn qos1_callback_timeout_completes_normally_and_late_ack_does_not_stick() {
+    let mut broker = LocalBroker::start().await;
+    broker.hold_acknowledgments(true);
+    let runtime = runtime();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-qos1-timeout\nqos: 1\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start(runtime.clone(), config)
+        .await
+        .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    broker
+        .publish(
+            "homeassistant/switch/lab/timeout/config",
+            br#"{"name":"Timeout","unique_id":"timeout","command_topic":"lab/timeout/set","optimistic":true}"#.to_vec(),
+            true,
+        )
+        .await;
+    wait_state(&runtime, "switch.timeout", "unknown").await;
+
+    let mut service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call("switch", "turn_on", "switch.timeout"))
+                .await
+        }
+    });
+    let packet_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/timeout/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    assert!(
+        runtime
+            .get_state("switch.timeout")
+            .is_none_or(|state| state.state != "on")
+    );
+    let timed_out = tokio::time::timeout(Duration::from_secs(12), &mut service)
+        .await
+        .expect("the source-compatible ten-second callback timeout should finish the service")
+        .unwrap()
+        .unwrap();
+    assert_eq!(timed_out.changed_states.len(), 1);
+    assert_eq!(timed_out.changed_states[0].state, "on");
+    assert_eq!(runtime.get_state("switch.timeout").unwrap().state, "on");
+
+    broker.acknowledge(packet_id);
+    let mut next = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call("switch", "turn_off", "switch.timeout"))
+                .await
+        }
+    });
+    let next_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/timeout/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    broker.acknowledge(next_id);
+    let next_result = tokio::time::timeout(Duration::from_secs(3), &mut next)
+        .await
+        .expect("a late acknowledgment must not prevent later commands")
+        .unwrap()
+        .unwrap();
+    assert_eq!(next_result.changed_states.len(), 1);
+    assert_eq!(next_result.changed_states[0].state, "off");
+    assert_eq!(runtime.get_state("switch.timeout").unwrap().state, "off");
+    integration.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn held_ack_completion_while_unavailable_preserves_new_attributes_and_reconnects() {
+    let mut broker = LocalBroker::start().await;
+    broker.hold_acknowledgments(true);
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-offline-pending-ack\nqos: 1\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        config,
+        lifecycle.clone(),
+        registries,
+        "mqtt-entry-offline-pending-ack",
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    broker
+        .publish(
+            "homeassistant/switch/lab/heater/config",
+            br#"{"name":"Heater","unique_id":"offline-ack","state_topic":"lab/heater/state","command_topic":"lab/heater/set","availability_topic":"lab/heater/available","json_attributes_topic":"lab/heater/attributes","optimistic":true}"#.to_vec(),
+            true,
+        )
+        .await;
+    broker
+        .wait_for_subscriptions(&[
+            ("lab/heater/state", 1),
+            ("lab/heater/available", 1),
+            ("lab/heater/attributes", 1),
+        ])
+        .await;
+    broker
+        .publish("lab/heater/available", b"online".to_vec(), true)
+        .await;
+    broker
+        .publish("lab/heater/state", b"OFF".to_vec(), true)
+        .await;
+    broker
+        .publish(
+            "lab/heater/attributes",
+            br#"{"temperature":20}"#.to_vec(),
+            true,
+        )
+        .await;
+    wait_state(&runtime, "switch.heater", "off").await;
+
+    let mut service = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call("switch", "turn_on", "switch.heater"))
+                .await
+        }
+    });
+    let packet_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/heater/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    broker
+        .publish(
+            "lab/heater/attributes",
+            br#"{"temperature":21,"humidity":41}"#.to_vec(),
+            true,
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if runtime
+                .get_state("switch.heater")
+                .is_some_and(|state| state.attributes.get("humidity") == Some(&json!(41)))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    broker
+        .publish("lab/heater/available", b"offline".to_vec(), true)
+        .await;
+    wait_state(&runtime, "switch.heater", "unavailable").await;
+    assert_eq!(
+        runtime.get_state("switch.heater").unwrap().attributes["assumed_state"],
+        true
+    );
+
+    broker.acknowledge(packet_id);
+    let result = tokio::time::timeout(Duration::from_secs(3), &mut service)
+        .await
+        .expect("the held acknowledgment should complete the service")
+        .unwrap()
+        .unwrap();
+    assert!(result.changed_states.is_empty());
+    let unavailable = runtime.get_state("switch.heater").unwrap();
+    assert_eq!(unavailable.state, "unavailable");
+    assert_eq!(unavailable.attributes["assumed_state"], true);
+    assert!(!unavailable.attributes.contains_key("humidity"));
+
+    broker.drop_connection().await;
+    wait_state(&runtime, "switch.heater", "unavailable").await;
+    broker
+        .wait_for(|event| matches!(event, BrokerEvent::Connected))
+        .await;
+    broker
+        .wait_for_subscriptions(&[
+            ("homeassistant/#", 1),
+            ("lab/heater/state", 1),
+            ("lab/heater/available", 1),
+            ("lab/heater/attributes", 1),
+        ])
+        .await;
+    broker
+        .publish("lab/heater/available", b"online".to_vec(), true)
+        .await;
+    wait_state(&runtime, "switch.heater", "on").await;
+    let restored = runtime.get_state("switch.heater").unwrap();
+    assert_eq!(restored.attributes["assumed_state"], true);
+    assert_eq!(restored.attributes["humidity"], 41);
+    integration.shutdown().await.unwrap();
+    lifecycle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_button_presses_ack_independently_and_report_their_timestamp_states() {
+    let mut broker = LocalBroker::start().await;
+    broker.hold_acknowledgments(true);
+    let runtime = runtime();
+    let registries = Registries::new(runtime.clone()).unwrap();
+    let lifecycle = EntityLifecycle::new(runtime.clone(), registries.clone()).unwrap();
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-button-async\nqos: 1\n",
+        broker.address.rsplit(':').next().unwrap()
+    ))
+    .unwrap();
+    let integration = MqttIntegration::start_with_entity_lifecycle(
+        runtime.clone(),
+        config,
+        lifecycle.clone(),
+        registries,
+        "mqtt-entry-button-async",
+    )
+    .await
+    .unwrap();
+    broker
+        .wait_for_subscriptions(&[("homeassistant/#", 1)])
+        .await;
+    broker
+        .publish(
+            "homeassistant/button/lab/action/config",
+            br#"{"name":"Action","unique_id":"async-action","command_topic":"lab/action/set"}"#
+                .to_vec(),
+            true,
+        )
+        .await;
+    wait_state(&runtime, "button.action", "unknown").await;
+
+    let mut first = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call("button", "press", "button.action"))
+                .await
+        }
+    });
+    let first_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/action/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    let first_state = runtime.get_state("button.action").unwrap().state;
+    assert!(first_state.ends_with("+00:00"));
+
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let mut second = tokio::spawn({
+        let runtime = runtime.clone();
+        async move {
+            runtime
+                .call_service_async(service_call("button", "press", "button.action"))
+                .await
+        }
+    });
+    let second_id = match broker
+        .wait_for(|event| matches!(event, BrokerEvent::AwaitingAcknowledgment { topic, qos: 1, .. } if topic == "lab/action/set"))
+        .await
+    {
+        BrokerEvent::AwaitingAcknowledgment { packet_id, .. } => packet_id,
+        _ => unreachable!(),
+    };
+    let second_state = runtime.get_state("button.action").unwrap().state;
+    assert_ne!(first_state, second_state);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut first)
+            .await
+            .is_err()
+    );
+
+    broker.acknowledge(second_id);
+    let second_result = tokio::time::timeout(Duration::from_secs(3), &mut second)
+        .await
+        .expect("the second button call must progress while the first awaits PUBACK")
+        .unwrap()
+        .unwrap();
+    assert_eq!(second_result.changed_states.len(), 1);
+    assert_eq!(second_result.changed_states[0].state, second_state);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut first)
+            .await
+            .is_err()
+    );
+
+    broker.acknowledge(first_id);
+    let first_result = first.await.unwrap().unwrap();
+    assert_eq!(first_result.changed_states.len(), 1);
+    assert_eq!(first_result.changed_states[0].state, first_state);
+    assert_eq!(
+        runtime.get_state("button.action").unwrap().state,
+        second_state
+    );
+    integration.shutdown().await.unwrap();
+    lifecycle.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn canceling_start_signals_and_reaps_the_connected_event_loop() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (connect_tx, connect_rx) = oneshot::channel();
+    let (disconnect_tx, disconnect_rx) = oneshot::channel();
+    let broker = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (header, _) = read_packet(&mut stream).await.unwrap();
+        assert_eq!(header >> 4, 1, "first MQTT packet must be CONNECT");
+        let _ = connect_tx.send(());
+        let stopped =
+            match tokio::time::timeout(Duration::from_secs(3), read_packet(&mut stream)).await {
+                Ok(Ok((header, _))) => header >> 4 == 14,
+                Ok(Err(_)) => true,
+                Err(_) => false,
+            };
+        let _ = disconnect_tx.send(stopped);
+    });
+    let config: MqttConfig = serde_yaml::from_str(&format!(
+        "host: 127.0.0.1\nport: {}\nclient_id: mqtt-cancel-start\n",
+        address.port()
+    ))
+    .unwrap();
+    let start = tokio::spawn(async move { MqttIntegration::start(runtime(), config).await });
+    tokio::time::timeout(Duration::from_secs(3), connect_rx)
+        .await
+        .expect("the client should connect before the start future is canceled")
+        .unwrap();
+    start.abort();
+    match start.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("the startup task should have been canceled"),
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), disconnect_rx)
+            .await
+            .expect("canceling startup must signal and reap the event-loop worker")
+            .unwrap()
+    );
+    tokio::time::timeout(Duration::from_secs(3), broker)
+        .await
+        .expect("the loopback broker task should finish")
+        .unwrap();
 }

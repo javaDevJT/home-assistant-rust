@@ -43,6 +43,31 @@ Provide `Runtime::call_service_async(call)` for trusted/internal dispatch and `R
 
 The async dispatcher awaits async handlers directly. For existing sync registrations, it may use Tokio's shared `spawn_blocking` pool and await the join; it must not create an executor or thread per request. A started blocking handler cannot be interrupted: retain ownership of its join through cancellation/timeout and join it before reporting completion. If the outer request future can be dropped, an owning call scope/task tracker must still reap that join; dropping a `spawn_blocking` handle detaches the work. Native async handler futures should remain request-owned and must not launch detached provider work.
 
+## Owned concurrent call continuation
+
+The pinned generic Home Assistant turn handler groups by domain and awaits
+`asyncio.gather`, preserving the caller's context
+([`homeassistant/services.py:68-130`](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/homeassistant/services.py#L68)).
+Sequential domain awaits change behavior: a held or failed provider prevents
+later domains from starting. Waiting for every result before returning the
+first error also differs from the source's early error response.
+
+The 48-crate candidate adds `Runtime::spawn_service_call_async`, returning an
+`OwnedServiceCall` with `result()` and a cloneable cancellation handle.
+Ordinary inline async dispatch retains its caller-cancellation behavior. The
+opt-in call captures active execution scope at admission, retains and observes
+its task independently of result-waiter lifetime, supports explicit
+cancellation, and joins during Core shutdown. Completed unexpected join
+failures remain visible to shutdown; intentional cancellation and ordinary
+provider errors are separate outcomes.
+
+The generic parent starts all domain calls before awaiting results; caller
+cancellation cancels children, while a first-error response leaves
+already-started siblings owned by Core. Focused Core and generic-control
+checks pass 46 and 14 cases respectively, including scope propagation,
+first-error sibling continuation, canceled callers and completed-panic
+reporting. The complete expanded workspace gate is still pending.
+
 ## Ordering and lifecycle invariants
 
 1. Apply the transport's coarse command authorization first (`can_control`, plus existing admin-only restrictions), then validate exact service registration and response capability.

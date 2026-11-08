@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
+pub mod config_lifecycle;
 mod provider;
 pub mod targets;
 mod websocket;
@@ -1084,7 +1085,7 @@ impl Registries {
                 new.device_id = value;
             }
             if let Some(value) = update.disabled_by {
-                validate_disabler(value.as_deref())?;
+                validate_entity_disabler(value.as_deref())?;
                 new.disabled_by = value;
             }
             if let Some(value) = update.hidden_by {
@@ -2432,6 +2433,12 @@ fn validate_disabler(value: Option<&str>) -> Result<()> {
     }
     Ok(())
 }
+fn validate_entity_disabler(value: Option<&str>) -> Result<()> {
+    if value == Some("hass") {
+        return Ok(());
+    }
+    validate_disabler(value)
+}
 fn validate_entity_id(value: &str) -> Result<()> {
     let Some((domain, object)) = value.split_once('.') else {
         return Err(invalid("entity_id must contain one domain separator"));
@@ -2580,7 +2587,7 @@ fn validate_registration(input: &EntityRegistration) -> Result<()> {
             "entity domain must be lowercase alphanumeric or underscore",
         ));
     }
-    validate_disabler(input.disabled_by.as_deref())?;
+    validate_entity_disabler(input.disabled_by.as_deref())?;
     Ok(())
 }
 fn validate_device_registration(input: &DeviceRegistration) -> Result<()> {

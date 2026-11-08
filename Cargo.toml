@@ -29,6 +29,8 @@ members = [
     "crates/hass-spotify",
     "crates/hass-binary-sensor",
     "crates/hass-sensor",
+    "crates/hass-switch",
+    "crates/hass-button",
 ]
 
 [workspace.package]
@@ -55,6 +57,8 @@ hass-media-player = { path = "crates/hass-media-player" }
 hass-spotify = { path = "crates/hass-spotify" }
 hass-binary-sensor = { path = "crates/hass-binary-sensor" }
 hass-sensor = { path = "crates/hass-sensor" }
+hass-switch = { path = "crates/hass-switch" }
+hass-button = { path = "crates/hass-button" }
 hass-storage = { path = "crates/hass-storage" }
 hass-automation = { path = "crates/hass-automation" }
 hass-api = { path = "crates/hass-api" }

@@ -357,6 +357,11 @@ pub enum ConfigLifecycleEvent {
         entry_id: String,
         disabled_by: Option<String>,
     },
+    /// Refresh derived device/entity disablers before enable setup or after
+    /// disable unload. Observers read the entry's current committed state.
+    EntryRegistryDisabledByChanged {
+        entry_id: String,
+    },
     SubentryRemoved {
         entry_id: String,
         subentry_id: String,
@@ -3052,6 +3057,13 @@ impl ConfigEntries {
                 entry_id: entry_id.to_owned(),
                 disabled_by: disabled_by.map(str::to_owned),
             });
+        let registry_enable_result = if disabled_by.is_none() {
+            self.notify_lifecycle_observers(&ConfigLifecycleEvent::EntryRegistryDisabledByChanged {
+                entry_id: entry_id.to_owned(),
+            })
+        } else {
+            Ok(())
+        };
 
         // The observer runs before unload/setup, like the pinned source. The
         // state may be changed by a concurrent request while it runs, so only
@@ -3085,9 +3097,18 @@ impl ConfigEntries {
             },
         };
         drop(operation);
+        let registry_disable_result = if disabled_by.is_some() {
+            self.notify_lifecycle_observers(&ConfigLifecycleEvent::EntryRegistryDisabledByChanged {
+                entry_id: entry_id.to_owned(),
+            })
+        } else {
+            Ok(())
+        };
         let success = operation_result?;
         entry_change_result?;
         observer_result?;
+        registry_enable_result?;
+        registry_disable_result?;
         Ok(success)
     }
 
@@ -8026,9 +8047,15 @@ mod tests {
                     entry_id: entry.entry_id.clone(),
                     disabled_by: Some("user".into()),
                 },
+                ConfigLifecycleEvent::EntryRegistryDisabledByChanged {
+                    entry_id: entry.entry_id.clone(),
+                },
                 ConfigLifecycleEvent::EntryDisabledByChanged {
                     entry_id: entry.entry_id.clone(),
                     disabled_by: None,
+                },
+                ConfigLifecycleEvent::EntryRegistryDisabledByChanged {
+                    entry_id: entry.entry_id.clone(),
                 },
                 ConfigLifecycleEvent::EntryRemoved {
                     entry_id: entry.entry_id.clone(),
@@ -8058,7 +8085,7 @@ mod tests {
             .disable_entry(&entry.entry_id, Some("user"))
             .unwrap();
         assert!(guarded.events.lock().unwrap().is_empty());
-        assert_eq!(retained.events.lock().unwrap().len(), 1);
+        assert_eq!(retained.events.lock().unwrap().len(), 2);
         assert!(manager.unregister_lifecycle_observer(&retained_trait));
     }
 
@@ -8428,7 +8455,7 @@ mod tests {
             .disable_entry(&entry.entry_id, Some("user"))
             .unwrap();
         manager.remove_entry(&entry.entry_id).unwrap();
-        assert_eq!(observer.events.lock().unwrap().len(), 3);
+        assert_eq!(observer.events.lock().unwrap().len(), 4);
         manager.unregister_lifecycle_observer(&observer_trait);
     }
 

@@ -2121,6 +2121,15 @@ async fn sigterm_exits_with_an_authenticated_websocket_open() {
 
 #[tokio::test]
 async fn real_process_binary_device_yaml_automation_executes_condition_and_action() {
+    run_device_yaml_automation("binary_sensor").await;
+}
+
+#[tokio::test]
+async fn real_process_switch_device_yaml_automation_executes_condition_and_action() {
+    run_device_yaml_automation("switch").await;
+}
+
+async fn run_device_yaml_automation(domain: &str) {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("configuration.yaml");
     std::fs::write(
@@ -2151,7 +2160,8 @@ automation:
           entity_id: input_text.device_result
         data:
           value: "{{ trigger.platform }}"
-"#,
+"#
+        .replace("binary_sensor", domain),
     )
     .unwrap();
     let mut server = Server::start(&config).await;
@@ -2171,7 +2181,7 @@ automation:
         assert!(
             server
                 .post(
-                    "/api/states/binary_sensor.synthetic_fixture",
+                    &format!("/api/states/{domain}.synthetic_fixture"),
                     json!({"state":state,"attributes":{"fixture":"synthetic"}})
                 )
                 .await
