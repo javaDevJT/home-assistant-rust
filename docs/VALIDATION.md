@@ -1,6 +1,6 @@
 # Validation evidence
 
-## Native sensor platform candidate (46 crates)
+## Accepted native sensor platforms (46 crates)
 
 The current workspace passes **1,186 tests across 134 targets**, zero failures
 or ignored tests, formatting and strict locked offline all-target Clippy. The
@@ -26,9 +26,10 @@ integer/boolean state strings, 16 independent built-in float-format vectors,
 all 57 native-unit rules and 13 native-unit spelling aliases. Raw provider units
 remain available independently of the compatible display spelling.
 
-Publication and exact-source Linux CI remain pending. Isolated switch SDK work
-is outside this 46-crate receipt. The following receipt remains the last
-published and Linux-accepted implementation.
+Source `aade9aa33ecccce1b627359f7fd1023353bb5f49` is published and passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42438729634):
+formatting, strict all-target Clippy, full tests and CLI validation. Subsequent
+switch SDK and live-attribute work is outside this immutable 46-crate receipt.
 
 ## Accepted native media and services (44 crates)
 

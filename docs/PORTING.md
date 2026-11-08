@@ -43,9 +43,16 @@ ignored cases, strict all-target Clippy and formatting. The optimized build and
 ten owned-temp CLI cases pass, including device mapping/type/duration checks;
 binary SHA-256 is
 `9ff135c40fd11f90a9d1dd84dda102285aee5f704a52f2f80dbab7503f88390e`.
-Publication/exact-source Linux CI remain pending. v150 owns
-only the parity Markdown/JSON for sensor/binary partial evidence. v157 owns only isolated `hass-switch/**` and
-`SWITCH-PORT.md` for the next SDK; it remains outside this workspace gate.
+Source `aade9aa33ecccce1b627359f7fd1023353bb5f49` is published and passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42438729634).
+Root independently verified all 956 evidence paths and 610 Rust symbols, unchanged
+pinned snapshots and unrelated records. Inventory is 49 partial / 1,516 unported
+/ zero complete. v150 updates only the parity Markdown/JSON immutable CI receipt.
+Switch v157 is released with eight unit plus two lifecycle cases. Root enrolled
+member 47 and SDK/Entity/Registry dependencies for MQTT; v158 owns only MQTT
+source/tests/README adoption. Root owns existing manager delivery in main and
+NativeDrivers plus the additive live-attribute publication seam. This switch
+wave remains outside the accepted 46-crate receipt.
 The compiled clock fixture now validates UTC whole-second output and waits for
 an observed second boundary before proving a fresh restart timestamp.
 Read-only v154's concerns were rejected against the actual pinned
