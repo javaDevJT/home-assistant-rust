@@ -106,6 +106,8 @@ struct ProviderHooks {
     post_authorize_calls: AtomicUsize,
     setup_calls: AtomicUsize,
     unload_calls: AtomicUsize,
+    require_blocking_setup: AtomicBool,
+    abort_reason: Mutex<Option<&'static str>>,
 }
 
 struct TestProvider {
@@ -123,6 +125,15 @@ impl ConfigEntryDriver for TestProvider {
     }
 
     fn setup(&self, _runtime: &Runtime, _entry: &ConfigEntry) -> hass_core::Result<SetupOutcome> {
+        if self.hooks.require_blocking_setup.load(Ordering::Acquire) {
+            // Real synchronous integration drivers drive their async setup
+            // through the runtime handle. This panics on a Tokio worker and
+            // succeeds on its blocking pool (which also has a current handle).
+            assert!(tokio::runtime::Handle::current().block_on(async {
+                tokio::task::yield_now().await;
+                true
+            }));
+        }
         self.hooks.setup_calls.fetch_add(1, Ordering::Relaxed);
         Ok(SetupOutcome::Ready)
     }
@@ -154,6 +165,9 @@ impl OAuthFlowProvider for TestProvider {
             self.hooks
                 .post_authorize_calls
                 .fetch_add(1, Ordering::Relaxed);
+            if let Some(reason) = *self.hooks.abort_reason.lock().unwrap() {
+                return Err(OAuthFlowError::ProviderAbort(reason));
+            }
             if self
                 .hooks
                 .block_next_post_authorize
@@ -487,6 +501,75 @@ fn entry_from_result(fixture: &Fixture, result: &Value) -> ConfigEntry {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provider_activation_runs_on_an_owned_blocking_thread() {
+    let fixture = Fixture::new(Duration::from_secs(600)).await;
+    fixture
+        .hooks
+        .require_blocking_setup
+        .store(true, Ordering::Release);
+    let (flow_id, state, _) = start_flow(&fixture).await;
+    let result = finish_code_flow(&fixture, &flow_id, &state).await;
+    assert_eq!(result["type"], "create_entry");
+    assert_eq!(result["result"]["state"], "loaded");
+    assert_eq!(fixture.hooks.setup_calls.load(Ordering::Acquire), 1);
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn provider_identity_abort_finishes_the_flow_without_persisting_a_token() {
+    let fixture = Fixture::new(Duration::from_secs(600)).await;
+    *fixture.hooks.abort_reason.lock().unwrap() = Some("reauth_wrong_account");
+    let (flow_id, state, _) = start_flow(&fixture).await;
+    let result = finish_code_flow(&fixture, &flow_id, &state).await;
+    assert_eq!(result["type"], "abort");
+    assert_eq!(result["reason"], "reauth_wrong_account");
+    assert!(fixture.entries.list_entries(Some(DOMAIN)).is_empty());
+    assert!(fixture.entries.flow_result(&flow_id).is_err());
+    assert_eq!(fixture.hooks.setup_calls.load(Ordering::Acquire), 0);
+    assert_eq!(fixture.token_server.request_count(), 1);
+    fixture.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn exchanged_and_refreshed_private_tokens_survive_sqlite_runtime_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("oauth.sqlite");
+    let store = Arc::new(hass_storage::SqliteStore::open(&path).unwrap());
+    let fixture = Fixture::with_store(Duration::from_secs(600), store).await;
+    let (flow_id, state, _) = start_flow(&fixture).await;
+    let result = finish_code_flow(&fixture, &flow_id, &state).await;
+    let entry = entry_from_result(&fixture, &result);
+    fixture.clock.advance(4_000);
+    let session = fixture
+        .manager
+        .session_for_entry(DOMAIN, &entry.entry_id)
+        .await
+        .unwrap();
+    // Build authorization only; no resource GET is sent to this callback URL.
+    let request = reqwest::Client::new().get(fixture.callback_url.clone());
+    let authorized = session.authorized_request(request).await.unwrap();
+    assert_eq!(
+        authorized.headers()[reqwest::header::AUTHORIZATION],
+        "Bearer oauth-access-refreshed"
+    );
+    assert_eq!(fixture.token_server.request_count(), 2);
+    let expected = fixture.entries.get_entry(&entry.entry_id).unwrap();
+    drop(session);
+    fixture.shutdown().await;
+    let runtime = Runtime::new(Arc::new(hass_storage::SqliteStore::open(&path).unwrap())).unwrap();
+    let reopened = ConfigEntries::new(runtime).unwrap();
+    let actual = reopened.get_entry(&entry.entry_id).unwrap();
+    assert_eq!(actual.data, expected.data);
+    assert_eq!(actual.unique_id, expected.unique_id);
+    assert!(
+        !actual
+            .public_json()
+            .to_string()
+            .contains("oauth-access-refreshed")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn callback_stages_external_done_then_get_commits_private_token_and_refreshes() {
     let fixture = Fixture::new(Duration::from_secs(600)).await;
     let (flow_id, state, authorization_url) = start_flow(&fixture).await;
@@ -508,6 +591,7 @@ async fn callback_stages_external_done_then_get_commits_private_token_and_refres
         .await
         .unwrap();
     assert_eq!(format!("{callback:?}"), "OAuthCallbackResponse");
+    assert!(fixture.manager.flow_is_active(&flow_id).await);
     assert_eq!(fixture.token_server.request_count(), 0);
     let external_done = fixture.entries.flow_result(&flow_id).unwrap();
     assert_eq!(external_done["type"], "external_done");
@@ -1096,10 +1180,10 @@ async fn canceled_shutdown_waiter_preserves_cleanup_and_concurrent_callers_join(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ttl_prunes_flow_and_releases_sdk_verifier_and_provider_can_reregister() {
-    let mut fixture = Fixture::new(Duration::from_millis(20)).await;
+    let mut fixture = Fixture::new(Duration::from_secs(1)).await;
     let (expired_flow, expired_state, _) = start_flow(&fixture).await;
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    let _next = start_flow(&fixture).await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert!(!fixture.manager.flow_is_active(&expired_flow).await);
     assert!(!fixture.manager.owns_flow(&expired_flow));
     assert!(fixture.entries.flow_result(&expired_flow).is_err());
     assert!(matches!(

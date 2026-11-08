@@ -19,6 +19,7 @@ mod http;
 mod images;
 mod logger;
 mod login;
+mod media_player;
 pub mod network;
 mod network_adapters;
 mod oauth2;
@@ -89,6 +90,7 @@ pub struct ApiFeatures {
         Option<hass_application_credentials::ApplicationCredentialsManager>,
     /// Weak manager; the application retains the strong OAuth flow host.
     pub oauth2_flows: Option<hass_oauth2_flow::OAuthFlowManager>,
+    pub media_players: Option<hass_media_player::MediaPlayerDispatcher>,
 }
 
 pub use usb::{UsbDiscoveryFlowUsage, UsbUsageClaim, UsbUsageProvider, UsbUsageSnapshot};

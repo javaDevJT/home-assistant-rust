@@ -1868,10 +1868,11 @@ fn register_schedule_service(runtime: &Runtime, shared: Arc<ScheduleShared>) -> 
             context: call.context.clone(),
         })
     });
-    runtime.register_service(
+    runtime.register_service_with_response_support(
         "schedule",
         "get_schedule",
         json!({"supports_response":"only"}),
+        hass_core::ServiceResponseSupport::Only,
         handler,
     )
 }

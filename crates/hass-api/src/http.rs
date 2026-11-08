@@ -13,7 +13,9 @@ use axum::{
 };
 use chrono::{DateTime, Duration, Utc};
 use futures_util::StreamExt;
-use hass_core::{Error as CoreError, ServiceCall, State as HassState};
+use hass_core::{
+    Error as CoreError, ServiceCall, ServiceCallRequest, ServiceResult, State as HassState,
+};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 #[cfg(test)]
@@ -57,12 +59,19 @@ impl ApiError {
             message: message.into(),
         }
     }
+    pub(crate) fn shutting_down() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: "API is shutting down.".into(),
+        }
+    }
 }
 
 impl From<CoreError> for ApiError {
     fn from(error: CoreError) -> Self {
         match error {
             CoreError::InvalidInput(message) => Self::invalid(message),
+            CoreError::ServiceValidation(message) => Self::invalid(message),
             CoreError::InvalidData { .. } => Self::invalid("Invalid data"),
             CoreError::NotFound(message) => Self::not_found(message),
             CoreError::HomeAssistant(message) => Self::invalid(message),
@@ -339,10 +348,7 @@ pub(crate) async fn call_service(
     Extension(identity): Extension<Identity>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if (matches!(domain.as_str(), "recorder" | "logger")
-        || (matches!(domain.as_str(), "zone" | "person") && service == "reload"))
-        && !identity.is_admin
-    {
+    if !service_call_authorized(&identity, &domain, &service) {
         return Err(ApiError::forbidden());
     }
     if query.keys().any(|key| key != "return_response") {
@@ -359,21 +365,31 @@ pub(crate) async fn call_service(
         context: identity.context(),
     };
     let runtime = state.api.runtime.clone();
-    let check_runtime = runtime.clone();
-    let domain = call.domain.clone();
-    let service = call.service.clone();
-    let exists = run_blocking(move || {
-        Ok(check_runtime
-            .services()
-            .get(&domain)
-            .and_then(Value::as_object)
-            .is_some_and(|services| services.contains_key(&service)))
-    })
-    .await?;
-    if !exists {
-        return Err(ApiError::not_found("Service not found."));
-    }
-    let result = run_blocking(move || runtime.call_service(call)).await?;
+    let service_domain = call.domain.clone();
+    let service_name = call.service.clone();
+    let request = ServiceCallRequest {
+        call,
+        return_response,
+        authorize_targets: Some(service_target_authorizer()),
+    };
+    let operation = runtime.call_service_request_async(request);
+    // The native restart handler signals shutdown itself. Let that admitted
+    // command return its result before closing its connection; the handler's
+    // blocking job is also owned by Core's shutdown drain.
+    let shutdown = service_call_shutdown(&state, &service_domain, &service_name);
+    let result: ServiceResult = if let Some(mut shutdown) = shutdown {
+        tokio::select! {
+            biased;
+            result = operation => result.map_err(|error| {
+                map_service_call_error(error, &service_domain, &service_name)
+            })?,
+            _ = crate::oauth2::wait_for_shutdown(&mut shutdown) => return Err(ApiError::shutting_down()),
+        }
+    } else {
+        operation
+            .await
+            .map_err(|error| map_service_call_error(error, &service_domain, &service_name))?
+    };
 
     if return_response {
         Ok(Json(json!({
@@ -383,6 +399,47 @@ pub(crate) async fn call_service(
         .into_response())
     } else {
         Ok(Json(result.changed_states).into_response())
+    }
+}
+
+/// The transport has one coarse control role today. Core calls this policy
+/// after target selectors have been normalized and before any provider runs.
+/// Identity currently has no per-entity ACL, so this explicitly authorizes all
+/// normalized targets for callers that passed the shared service role check.
+pub(crate) fn service_call_shutdown(
+    state: &AppState,
+    domain: &str,
+    service: &str,
+) -> Option<tokio::sync::watch::Receiver<bool>> {
+    if domain == "homeassistant" && service == "restart" {
+        None
+    } else {
+        state.shutdown.clone()
+    }
+}
+
+pub(crate) fn service_target_authorizer() -> hass_core::ServiceTargetAuthorizer {
+    Arc::new(|_entity_ids| Ok(()))
+}
+
+/// Shared coarse command policy for HTTP and WebSocket service calls.
+pub(crate) fn service_call_authorized(identity: &Identity, domain: &str, service: &str) -> bool {
+    identity.can_control
+        && ((!matches!(domain, "recorder" | "logger")
+            && !(matches!(domain, "zone" | "person") && service == "reload"))
+            || identity.is_admin)
+}
+
+fn map_service_call_error(error: CoreError, domain: &str, service: &str) -> ApiError {
+    match error {
+        CoreError::HomeAssistant(message) => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message,
+        },
+        CoreError::Service(message) if message == format!("unknown service {domain}.{service}") => {
+            ApiError::not_found("Service not found.")
+        }
+        error => ApiError::from(error),
     }
 }
 

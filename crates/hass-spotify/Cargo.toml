@@ -1,0 +1,21 @@
+[package]
+name = "hass-spotify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "Native, bounded Spotify Web API client for Home Assistant Rust"
+license = "MIT"
+
+[dependencies]
+async-trait.workspace = true
+hass-oauth2-client.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

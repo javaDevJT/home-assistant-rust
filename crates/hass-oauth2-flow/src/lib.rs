@@ -72,6 +72,9 @@ pub enum OAuthFlowError {
     ShuttingDown,
     #[error("OAuth provider callback failed")]
     ProviderFailure,
+    /// A trusted provider's static, translated config-flow abort reason.
+    #[error("the OAuth provider aborted authorization")]
+    ProviderAbort(&'static str),
     #[error("configuration entry is not available")]
     EntryUnavailable,
     #[error("configuration flow operation failed")]
@@ -2315,6 +2318,18 @@ impl OAuthFlowManager {
             .is_some_and(|inner| lock(&inner.state).flows.contains_key(flow_id))
     }
 
+    /// Check whether a provider's existing flow is still active, enforcing
+    /// expiry without resolving an external callback or exchanging a code.
+    pub async fn flow_is_active(&self, flow_id: &str) -> bool {
+        let Ok(inner) = self.upgrade() else {
+            return false;
+        };
+        if inner.ensure_accepting().is_err() || inner.expire_flow_if_due(flow_id).await {
+            return false;
+        }
+        lock(&inner.state).flows.contains_key(flow_id)
+    }
+
     /// Resolve the selected local application-credentials implementation for
     /// one real entry and return its stable-factory session.
     pub async fn session_for_entry(
@@ -2661,6 +2676,9 @@ async fn resolve_external_flow(
     let details =
         match tokio::time::timeout(resolver_timeout, provider.post_authorize(context)).await {
             Ok(Ok(details)) => details,
+            Ok(Err(OAuthFlowError::ProviderAbort(reason))) => {
+                return finish_abort(&entries, lease, reason);
+            }
             Ok(Err(_)) | Err(_) => {
                 if entries.release_external_flow(lease.clone()).is_err() {
                     return ResolverOutcome::Failed(ResolverFailure::Core);
@@ -2709,7 +2727,7 @@ async fn resolve_external_flow(
         .await;
 
     match completion {
-        Ok(completion) => finish_completion(&entries, completion),
+        Ok(completion) => finish_completion_async(entries, completion).await,
         Err(_) => finish_abort(&entries, lease, "oauth_error"),
     }
 }
@@ -2736,6 +2754,19 @@ fn finish_completion(
 ) -> ResolverOutcome {
     match entries.finish_external_flow(completion) {
         Ok(value) => ResolverOutcome::Complete(value),
+        Err(_) => ResolverOutcome::Failed(ResolverFailure::Core),
+    }
+}
+
+async fn finish_completion_async(
+    entries: ConfigEntries,
+    completion: DeferredExternalFlowCompletion,
+) -> ResolverOutcome {
+    // The resolver's Committing lease stays held while real synchronous
+    // setup/reload hooks finish. Those hooks may drive async integrations from
+    // this blocking thread; they must not run on a Tokio worker.
+    match tokio::task::spawn_blocking(move || finish_completion(&entries, completion)).await {
+        Ok(outcome) => outcome,
         Err(_) => ResolverOutcome::Failed(ResolverFailure::Core),
     }
 }

@@ -418,6 +418,22 @@ Falsifiers to run against that loopback server:
 
 ## Source anchors
 
+Cancellation acceptance follows the pinned
+[`config_entries.py` setup exception handler](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/config_entries.py#L875-L895):
+canceled in-progress setup settles as `setup_error`. It must have no loaded
+player and remain eligible for a later restoration attempt. A previously loaded
+entry that is explicitly unloaded settles as `not_loaded`; persistent entity
+registry rows survive ordinary unload.
+
+Browser media wrappers use the once-decoded final path segment, independently
+of the account authority. Verified as source text in yarl v1.25.1:
+[`URL.name`](https://github.com/aio-libs/yarl/blob/v1.25.1/yarl/_url.py#L1079-L1081)
+calls `UNQUOTER(self.raw_name)`, and
+[`UNQUOTER`](https://github.com/aio-libs/yarl/blob/v1.25.1/yarl/_quoters.py#L17)
+has no reserved-character ignore list. Thus `%3A` becomes `:`, `+` remains `+`,
+and `%252F` is decoded only once. The separately defined path-safe unquoter
+does not determine `URL.name`. This lookup did not import or execute yarl.
+
 - [Pinned manifest](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/manifest.json#L1-L13), [all requirements pin](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/requirements_all.txt#L3249), [scopes and media types](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/const.py#L11-L40), and [Spotify application credentials endpoints](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/application_credentials.py#L7-L12).
 - [Config flow and reauth](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/config_flow.py#L35-L107), [setup/unload](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/__init__.py#L42-L89), and [coordinators](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/coordinator.py#L47-L232).
 - [Entity/device metadata](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/entity.py#L10-L26), [media-player features/setup](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/media_player.py#L48-L147), [state/properties/services/listener](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/media_player.py#L151-L452), and [browse reads](https://github.com/home-assistant/core/blob/cbf2c02c9bff331537c19bff69da8dc11c3fbfbf/homeassistant/components/spotify/browse_media.py#L277-L399).

@@ -28,6 +28,7 @@ pub fn catalog() -> IntegrationCatalog {
         ("input_select", &["hass::helpers::input_select"]),
         ("input_text", &["hass::helpers::input_text"]),
         ("logger", &["hass_logger"]),
+        ("media_player", &["hass_media_player", "hass::media_player"]),
         ("mqtt", &["hass_mqtt"]),
         ("network", &["hass_network", "hass_api::network_adapters"]),
         ("persistent_notification", &["hass_notifications"]),
@@ -42,6 +43,7 @@ pub fn catalog() -> IntegrationCatalog {
         ("scene", &["hass_script::scene"]),
         ("schedule", &["hass_native::schedule"]),
         ("script", &["hass_script"]),
+        ("spotify", &["hass_spotify", "hass::spotify"]),
         ("tag", &["hass_tag"]),
         ("sun", &["hass_sun"]),
         (

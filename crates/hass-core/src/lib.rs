@@ -4,7 +4,15 @@
 //! contracts used by the Rust rewrite. It implements a bounded core runtime;
 //! it does not run Python integrations or control devices by itself.
 
+mod service_dispatch;
+#[cfg(test)]
+mod service_snapshot_tests;
+mod service_tasks;
+
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
@@ -39,6 +47,9 @@ pub enum Error {
     /// A service registration or invocation failed.
     #[error("service error: {0}")]
     Service(String),
+    /// A known service rejected its response mode or resolved entity targets.
+    #[error("{0}")]
+    ServiceValidation(String),
     /// A domain operation raised a user-facing Home Assistant error.
     #[error("{0}")]
     HomeAssistant(String),
@@ -599,6 +610,30 @@ pub struct ServiceResult {
 /// A synchronous handler registered for a service.
 pub type ServiceHandler =
     Arc<dyn Fn(&Runtime, &ServiceCall) -> Result<ServiceResult> + Send + Sync>;
+/// Future returned by an async service handler.
+pub type ServiceFuture = Pin<Box<dyn Future<Output = Result<ServiceResult>> + Send + 'static>>;
+/// An async handler receives owned inputs so they can safely live across `.await`.
+pub type AsyncServiceHandler = Arc<dyn Fn(Runtime, ServiceCall) -> ServiceFuture + Send + Sync>;
+/// Installs a trusted execution-local scope for one handler invocation/poll.
+pub type ServiceExecutionScope = Arc<dyn Fn() -> Box<dyn Any + Send> + Send + Sync>;
+/// Declares whether a service supports response-bearing calls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceResponseSupport {
+    /// The service does not return a response.
+    None,
+    /// The caller may choose whether to request a response.
+    Optional,
+    /// The caller must request a response.
+    Only,
+}
+/// Authorization hook applied to every normalized entity target before dispatch.
+pub type ServiceTargetAuthorizer = Arc<dyn Fn(&[String]) -> Result<()> + Send + Sync>;
+/// Transport options kept outside [`ServiceCall`] for source compatibility.
+pub struct ServiceCallRequest {
+    pub call: ServiceCall,
+    pub return_response: bool,
+    pub authorize_targets: Option<ServiceTargetAuthorizer>,
+}
 
 /// Resolves Home Assistant targets before service dispatch. Return `false`
 /// when explicit selectors match no entities; the runtime then returns an
@@ -639,17 +674,45 @@ impl Drop for ServiceTargetResolverLease {
 /// Selects whether an owner can handle one entity's service call.
 pub type EntityMatcher = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 
+#[derive(Clone)]
 struct RegisteredService {
     owner: Option<String>,
     description: Value,
-    handler: ServiceHandler,
+    response_support: ServiceResponseSupport,
+    handler: ServiceHandlerKind,
 }
 
 #[derive(Clone)]
 struct RegisteredEntityService {
     description: Value,
+    response_support: ServiceResponseSupport,
     matcher: EntityMatcher,
-    handler: ServiceHandler,
+    handler: ServiceHandlerKind,
+}
+
+#[derive(Clone)]
+enum ServiceHandlerKind {
+    Sync(ServiceHandler),
+    Async(AsyncServiceHandler),
+}
+
+struct ServiceRegistrations {
+    legacy: Option<RegisteredService>,
+    providers: BTreeMap<String, RegisteredEntityService>,
+}
+
+impl ServiceRegistrations {
+    fn response_support(&self) -> ServiceResponseSupport {
+        self.legacy
+            .as_ref()
+            .map(|registered| registered.response_support)
+            .or_else(|| {
+                self.providers
+                    .first_key_value()
+                    .map(|(_, provider)| provider.response_support)
+            })
+            .unwrap_or(ServiceResponseSupport::None)
+    }
 }
 
 // A store has one authoritative runtime cache. Runtime clones share that cache;
@@ -724,6 +787,8 @@ struct RuntimeInner {
     home_context: RwLock<HomeContext>,
     services: RwLock<BTreeMap<String, BTreeMap<String, RegisteredService>>>,
     entity_services: RwLock<BTreeMap<(String, String), BTreeMap<String, RegisteredEntityService>>>,
+    service_registration: Mutex<()>,
+    service_tasks: Arc<service_tasks::ServiceTaskTracker>,
     service_target_resolver: Mutex<Option<InstalledServiceTargetResolver>>,
 }
 
@@ -764,6 +829,8 @@ impl Runtime {
                 home_context: RwLock::new(HomeContext::default()),
                 services: RwLock::new(BTreeMap::new()),
                 entity_services: RwLock::new(BTreeMap::new()),
+                service_registration: Mutex::new(()),
+                service_tasks: Arc::new(service_tasks::ServiceTaskTracker::new()),
                 service_target_resolver: Mutex::new(None),
             }),
         })
@@ -1281,29 +1348,173 @@ impl Runtime {
         description: Value,
         handler: ServiceHandler,
     ) -> Result<()> {
+        self.register_service_kind(
+            None,
+            domain,
+            service,
+            description,
+            ServiceResponseSupport::None,
+            ServiceHandlerKind::Sync(handler),
+        )
+    }
+    /// Register or replace a legacy service with an explicit response capability.
+    pub fn register_service_with_response_support(
+        &self,
+        domain: &str,
+        service: &str,
+        description: Value,
+        support: ServiceResponseSupport,
+        handler: ServiceHandler,
+    ) -> Result<()> {
+        self.register_service_kind(
+            None,
+            domain,
+            service,
+            description,
+            support,
+            ServiceHandlerKind::Sync(handler),
+        )
+    }
+    /// Register or replace a legacy async service handler.
+    pub fn register_async_service(
+        &self,
+        domain: &str,
+        service: &str,
+        description: Value,
+        handler: AsyncServiceHandler,
+    ) -> Result<()> {
+        self.register_service_kind(
+            None,
+            domain,
+            service,
+            description,
+            ServiceResponseSupport::None,
+            ServiceHandlerKind::Async(handler),
+        )
+    }
+    /// Register or replace a legacy async service with an explicit response capability.
+    pub fn register_async_service_with_response_support(
+        &self,
+        domain: &str,
+        service: &str,
+        description: Value,
+        support: ServiceResponseSupport,
+        handler: AsyncServiceHandler,
+    ) -> Result<()> {
+        self.register_service_kind(
+            None,
+            domain,
+            service,
+            description,
+            support,
+            ServiceHandlerKind::Async(handler),
+        )
+    }
+    fn register_service_kind(
+        &self,
+        owner: Option<&str>,
+        domain: &str,
+        service: &str,
+        description: Value,
+        response_support: ServiceResponseSupport,
+        handler: ServiceHandlerKind,
+    ) -> Result<()> {
+        if let Some(owner) = owner {
+            validate_owner(owner)?;
+        }
         validate_component(domain, "service domain")?;
         validate_component(service, "service name")?;
-        let mut services = self
+        let _registration = self
+            .inner
+            .service_registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let existing_owner = self
+            .inner
+            .services
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(domain)
+            .and_then(|entries| entries.get(service))
+            .and_then(|registered| registered.owner.clone());
+        if existing_owner.as_deref() != owner
+            && self
+                .inner
+                .services
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(domain)
+                .and_then(|entries| entries.get(service))
+                .is_some()
+        {
+            if owner.is_none() {
+                let existing_owner = existing_owner.unwrap_or_default();
+                return Err(Error::Service(format!(
+                    "service {domain}.{service} is owned by {existing_owner}"
+                )));
+            }
+            return Err(Error::Service(format!(
+                "service {domain}.{service} is already registered by another owner"
+            )));
+        }
+        self.validate_response_support(domain, service, response_support, Some(owner), None)?;
+        let replaced = self
             .inner
             .services
             .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(domain.to_owned())
+            .or_default()
+            .insert(
+                service.to_owned(),
+                RegisteredService {
+                    owner: owner.map(str::to_owned),
+                    description,
+                    response_support,
+                    handler,
+                },
+            );
+        drop(_registration);
+        drop(replaced);
+        Ok(())
+    }
+    fn validate_response_support(
+        &self,
+        domain: &str,
+        service: &str,
+        response_support: ServiceResponseSupport,
+        replaced_service_owner: Option<Option<&str>>,
+        replaced_entity_owner: Option<&str>,
+    ) -> Result<()> {
+        let legacy = self
+            .inner
+            .services
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(domain)
+            .and_then(|entries| entries.get(service))
+            .filter(|registered| {
+                replaced_service_owner.is_none_or(|owner| registered.owner.as_deref() != owner)
+            })
+            .map(|registered| registered.response_support);
+        let entities = self
+            .inner
+            .entity_services
+            .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entries = services.entry(domain.to_owned()).or_default();
-        if let Some(existing) = entries.get(service)
-            && let Some(owner) = &existing.owner
-        {
+        let entity_conflict = entities
+            .get(&(domain.to_owned(), service.to_owned()))
+            .into_iter()
+            .flat_map(|providers| providers.iter())
+            .any(|(owner, provider)| {
+                Some(owner.as_str()) != replaced_entity_owner
+                    && provider.response_support != response_support
+            });
+        if legacy.is_some_and(|support| support != response_support) || entity_conflict {
             return Err(Error::Service(format!(
-                "service {domain}.{service} is owned by {owner}"
+                "service {domain}.{service} response support conflicts with an existing registration"
             )));
         }
-        entries.insert(
-            service.to_owned(),
-            RegisteredService {
-                owner: None,
-                description,
-                handler,
-            },
-        );
         Ok(())
     }
 
@@ -1317,52 +1528,109 @@ impl Runtime {
         description: Value,
         handler: ServiceHandler,
     ) -> Result<()> {
-        validate_owner(owner)?;
-        validate_component(domain, "service domain")?;
-        validate_component(service, "service name")?;
-        let mut services = self
-            .inner
-            .services
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let entries = services.entry(domain.to_owned()).or_default();
-        if let Some(existing) = entries.get(service)
-            && existing.owner.as_deref() != Some(owner)
-        {
-            return Err(Error::Service(format!(
-                "service {domain}.{service} is already registered by another owner"
-            )));
-        }
-        entries.insert(
-            service.to_owned(),
-            RegisteredService {
-                owner: Some(owner.to_owned()),
-                description,
-                handler,
-            },
-        );
-        Ok(())
+        self.register_service_kind(
+            Some(owner),
+            domain,
+            service,
+            description,
+            ServiceResponseSupport::None,
+            ServiceHandlerKind::Sync(handler),
+        )
+    }
+    /// Register or update an owned synchronous service with a response capability.
+    pub fn register_owned_service_with_response_support(
+        &self,
+        owner: &str,
+        domain: &str,
+        service: &str,
+        description: Value,
+        support: ServiceResponseSupport,
+        handler: ServiceHandler,
+    ) -> Result<()> {
+        self.register_service_kind(
+            Some(owner),
+            domain,
+            service,
+            description,
+            support,
+            ServiceHandlerKind::Sync(handler),
+        )
+    }
+    /// Register or update an async service owned by one integration.
+    pub fn register_owned_async_service(
+        &self,
+        owner: &str,
+        domain: &str,
+        service: &str,
+        description: Value,
+        handler: AsyncServiceHandler,
+    ) -> Result<()> {
+        self.register_service_kind(
+            Some(owner),
+            domain,
+            service,
+            description,
+            ServiceResponseSupport::None,
+            ServiceHandlerKind::Async(handler),
+        )
+    }
+    /// Register or update an owned async service with a response capability.
+    pub fn register_owned_async_service_with_response_support(
+        &self,
+        owner: &str,
+        domain: &str,
+        service: &str,
+        description: Value,
+        support: ServiceResponseSupport,
+        handler: AsyncServiceHandler,
+    ) -> Result<()> {
+        self.register_service_kind(
+            Some(owner),
+            domain,
+            service,
+            description,
+            support,
+            ServiceHandlerKind::Async(handler),
+        )
     }
 
     /// Remove the legacy services registered by `owner`, leaving every other
     /// owner's and every legacy registration in place.
     pub fn unregister_owned_services(&self, owner: &str) -> Result<usize> {
         validate_owner(owner)?;
-        let mut services = self
+        let registration = self
             .inner
-            .services
-            .write()
+            .service_registration
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut removed = 0;
-        services.retain(|_, entries| {
-            entries.retain(|_, registered| {
-                let remove = registered.owner.as_deref() == Some(owner);
-                removed += usize::from(remove);
-                !remove
-            });
-            !entries.is_empty()
-        });
-        Ok(removed)
+        let removed = {
+            let mut services = self
+                .inner
+                .services
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut removed = Vec::new();
+            for entries in services.values_mut() {
+                let keys = entries
+                    .iter()
+                    .filter(|(_, entry)| entry.owner.as_deref() == Some(owner))
+                    .map(|(name, _)| name.clone())
+                    .collect::<Vec<_>>();
+                for name in keys {
+                    if let Some(entry) = entries.remove(&name) {
+                        removed.push(entry);
+                    }
+                }
+            }
+            services.retain(|_, entries| !entries.is_empty());
+            removed
+        };
+        let count = removed.len();
+        // A captured resource may unregister another owner in its destructor.
+        // Release every registry lock before dropping callbacks.
+        drop(registration);
+        drop(removed);
+        Ok(count)
     }
 
     /// Install a global service-target resolver only when no resolver is
@@ -1404,10 +1672,105 @@ impl Runtime {
         matcher: EntityMatcher,
         handler: ServiceHandler,
     ) -> Result<()> {
+        self.register_entity_service_kind(
+            owner,
+            domain,
+            service,
+            description,
+            ServiceResponseSupport::None,
+            matcher,
+            ServiceHandlerKind::Sync(handler),
+        )
+    }
+    /// Register an owner-scoped sync entity provider with an explicit response capability.
+    // This mirrors the established registration fields plus one typed capability.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_entity_service_with_response_support(
+        &self,
+        owner: &str,
+        domain: &str,
+        service: &str,
+        description: Value,
+        support: ServiceResponseSupport,
+        matcher: EntityMatcher,
+        handler: ServiceHandler,
+    ) -> Result<()> {
+        self.register_entity_service_kind(
+            owner,
+            domain,
+            service,
+            description,
+            support,
+            matcher,
+            ServiceHandlerKind::Sync(handler),
+        )
+    }
+    /// Register an owner-scoped async provider for calls targeting its entities.
+    pub fn register_entity_async_service(
+        &self,
+        owner: &str,
+        domain: &str,
+        service: &str,
+        description: Value,
+        matcher: EntityMatcher,
+        handler: AsyncServiceHandler,
+    ) -> Result<()> {
+        self.register_entity_service_kind(
+            owner,
+            domain,
+            service,
+            description,
+            ServiceResponseSupport::None,
+            matcher,
+            ServiceHandlerKind::Async(handler),
+        )
+    }
+    /// Register an owner-scoped async entity provider with a response capability.
+    // Keep the async form aligned with the sync registration contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_entity_async_service_with_response_support(
+        &self,
+        owner: &str,
+        domain: &str,
+        service: &str,
+        description: Value,
+        support: ServiceResponseSupport,
+        matcher: EntityMatcher,
+        handler: AsyncServiceHandler,
+    ) -> Result<()> {
+        self.register_entity_service_kind(
+            owner,
+            domain,
+            service,
+            description,
+            support,
+            matcher,
+            ServiceHandlerKind::Async(handler),
+        )
+    }
+    // Shared implementation for the same explicit provider registration tuple.
+    #[allow(clippy::too_many_arguments)]
+    fn register_entity_service_kind(
+        &self,
+        owner: &str,
+        domain: &str,
+        service: &str,
+        description: Value,
+        response_support: ServiceResponseSupport,
+        matcher: EntityMatcher,
+        handler: ServiceHandlerKind,
+    ) -> Result<()> {
         validate_owner(owner)?;
         validate_component(domain, "service domain")?;
         validate_component(service, "service name")?;
-        self.inner
+        let _registration = self
+            .inner
+            .service_registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.validate_response_support(domain, service, response_support, None, Some(owner))?;
+        let replaced = self
+            .inner
             .entity_services
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1417,10 +1780,13 @@ impl Runtime {
                 owner.to_owned(),
                 RegisteredEntityService {
                     description,
+                    response_support,
                     matcher,
                     handler,
                 },
             );
+        drop(_registration);
+        drop(replaced);
         Ok(())
     }
 
@@ -1428,192 +1794,32 @@ impl Runtime {
     /// number of owner/service registrations removed.
     pub fn unregister_entity_services(&self, owner: &str) -> Result<usize> {
         validate_owner(owner)?;
-        let mut services = self
+        let registration = self
             .inner
-            .entity_services
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut removed = 0;
-        services.retain(|_, providers| {
-            if providers.remove(owner).is_some() {
-                removed += 1;
-            }
-            !providers.is_empty()
-        });
-        Ok(removed)
-    }
-
-    /// Invoke a registered service without holding the registry lock.
-    pub fn call_service(&self, call: ServiceCall) -> Result<ServiceResult> {
-        validate_component(&call.domain, "service domain")?;
-        validate_component(&call.service, "service name")?;
-        let mut call = call;
-        let original_domain = call.domain.clone();
-        let original_service = call.service.clone();
-        let original_context = call.context.clone();
-        let legacy = self
-            .inner
-            .services
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&call.domain)
-            .and_then(|services| services.get(&call.service))
-            .map(|registered| Arc::clone(&registered.handler));
-        let providers = self
-            .inner
-            .entity_services
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&(call.domain.clone(), call.service.clone()))
-            .cloned()
-            .unwrap_or_default();
-        if legacy.is_none() && providers.is_empty() {
-            return Err(Error::Service(format!(
-                "unknown service {}.{}",
-                call.domain, call.service
-            )));
-        }
-        let resolver = self
-            .inner
-            .service_target_resolver
+            .service_registration
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(|installed| Arc::clone(&installed.resolver));
-        if let Some(resolver) = resolver
-            && !(resolver)(self, &mut call)?
-        {
-            return Ok(ServiceResult {
-                changed_states: Vec::new(),
-                response: None,
-                context: original_context,
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removed = {
+            let mut services = self
+                .inner
+                .entity_services
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut removed = Vec::new();
+            services.retain(|_, providers| {
+                if let Some(provider) = providers.remove(owner) {
+                    removed.push(provider);
+                }
+                !providers.is_empty()
             });
-        }
-        if call.domain != original_domain || call.service != original_service {
-            return Err(Error::InvalidInput(
-                "service target resolver cannot change the service name".into(),
-            ));
-        }
-        // Resolver callbacks normalize target fields only. The original causal
-        // context remains the one passed to every handler and returned here.
-        call.context = original_context.clone();
-        if providers.is_empty() {
-            let handler = legacy.ok_or_else(|| {
-                Error::Service(format!("unknown service {}.{}", call.domain, call.service))
-            })?;
-            // Legacy handlers own their payload shape, including target maps
-            // and service data fields that happen to be named `entity_id`.
-            return handler(self, &call);
-        }
-
-        if !call.target.contains_key("entity_id")
-            && !call.data.contains_key("entity_id")
-            && let Some(handler) = legacy
-        {
-            return handler(self, &call);
-        }
-        let Some(requested_ids) = parse_service_target(&call)? else {
-            if let Some(handler) = legacy {
-                return handler(self, &call);
-            }
-            return Err(Error::Service(format!(
-                "service {}.{} requires an entity target",
-                call.domain, call.service
-            )));
+            removed
         };
-
-        let all_requested = requested_ids.len() == 1 && requested_ids[0] == "all";
-        let entity_ids = if all_requested {
-            let mut matching = Vec::new();
-            let mut states = self.states();
-            states.retain(|state| entity_domain(&state.entity_id) == call.domain);
-            for state in states {
-                let owners: Vec<_> = providers
-                    .iter()
-                    .filter(|(_, provider)| (provider.matcher)(&state.entity_id))
-                    .map(|(owner, _)| owner.clone())
-                    .collect();
-                if owners.len() > 1 {
-                    return Err(Error::Service(format!(
-                        "entity {} matches multiple providers for {}.{}",
-                        state.entity_id, call.domain, call.service
-                    )));
-                }
-                if owners.len() == 1 {
-                    matching.push(state.entity_id);
-                }
-            }
-            if matching.is_empty() {
-                return Err(Error::Service(format!(
-                    "target all matched no current entities for {}.{}",
-                    call.domain, call.service
-                )));
-            }
-            matching
-        } else {
-            requested_ids
-        };
-
-        let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for entity_id in entity_ids {
-            validate_entity_id(&entity_id)?;
-            let owners: Vec<_> = providers
-                .iter()
-                .filter(|(_, provider)| (provider.matcher)(&entity_id))
-                .map(|(owner, _)| owner.clone())
-                .collect();
-            match owners.as_slice() {
-                [owner] => grouped.entry(owner.clone()).or_default().push(entity_id),
-                [] => {
-                    return Err(Error::Service(format!(
-                        "no provider for target {entity_id} on {}.{}",
-                        call.domain, call.service
-                    )));
-                }
-                _ => {
-                    return Err(Error::Service(format!(
-                        "entity {entity_id} matches multiple providers for {}.{}",
-                        call.domain, call.service
-                    )));
-                }
-            }
-        }
-
-        // Every entity was validated and assigned before any provider runs.
-        let mut changed_states = Vec::new();
-        let mut responses = Vec::new();
-        for (owner, entity_ids) in grouped {
-            let provider = providers
-                .get(&owner)
-                .expect("grouped owners came from registered providers");
-            let mut data = call.data.clone();
-            data.remove("entity_id");
-            let subcall = ServiceCall {
-                domain: call.domain.clone(),
-                service: call.service.clone(),
-                data,
-                target: serde_json::json!({"entity_id": entity_ids})
-                    .as_object()
-                    .expect("service target is an object")
-                    .clone(),
-                context: call.context.clone(),
-            };
-            let result = (provider.handler)(self, &subcall)?;
-            changed_states.extend(result.changed_states);
-            if let Some(response) = result.response {
-                responses.push(response);
-            }
-        }
-        let response = match responses.len() {
-            0 => None,
-            1 => responses.pop(),
-            _ => Some(Value::Array(responses)),
-        };
-        Ok(ServiceResult {
-            changed_states,
-            response,
-            context: call.context,
-        })
+        let count = removed.len();
+        // A captured resource may unregister another owner in its destructor.
+        // Release every registry lock before dropping callbacks.
+        drop(registration);
+        drop(removed);
+        Ok(count)
     }
 
     /// Return service descriptions as a JSON object keyed by domain and name.
@@ -1883,6 +2089,38 @@ mod tests {
 
     fn runtime_with_store(store: Arc<dyn Store>) -> Runtime {
         Runtime::new(store).expect("runtime should load")
+    }
+
+    fn service_call(domain: &str, service: &str, target: Map<String, Value>) -> ServiceCall {
+        ServiceCall {
+            domain: domain.into(),
+            service: service.into(),
+            data: empty_map(),
+            target,
+            context: Context {
+                id: "async-service-context".into(),
+                parent_id: Some("async-service-parent".into()),
+                user_id: Some("async-service-user".into()),
+            },
+        }
+    }
+
+    struct ScopeCountGuard(Arc<AtomicUsize>);
+
+    impl Drop for ScopeCountGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct ReleaseOnDrop(Option<std::sync::mpsc::Sender<()>>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            if let Some(release) = self.0.take() {
+                let _ = release.send(());
+            }
+        }
     }
 
     #[test]
@@ -3420,7 +3658,7 @@ mod tests {
                 .clone(),
             context: Context::default(),
         });
-        assert!(matches!(error, Err(Error::Service(_))));
+        assert!(matches!(error, Err(Error::ServiceValidation(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -3458,7 +3696,7 @@ mod tests {
                 .clone(),
             context: Context::default(),
         });
-        assert!(matches!(error, Err(Error::Service(_))));
+        assert!(matches!(error, Err(Error::ServiceValidation(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
@@ -3534,5 +3772,591 @@ mod tests {
         assert_eq!(runtime.services()["switch"]["toggle"]["name"], "Toggle");
         assert_eq!(runtime.unregister_entity_services("owner.two").unwrap(), 1);
         assert!(runtime.services().get("switch").is_none());
+    }
+
+    #[tokio::test]
+    async fn async_dispatch_mixes_entity_handlers_and_preflights_once() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let sync_contexts = Arc::new(Mutex::new(Vec::new()));
+        let sync_seen = Arc::clone(&sync_contexts);
+        runtime
+            .register_entity_service_with_response_support(
+                "owner.a",
+                "light",
+                "operate",
+                serde_json::json!({"name":"Operate"}),
+                ServiceResponseSupport::Optional,
+                Arc::new(|entity_id| entity_id == "light.one"),
+                Arc::new(move |_runtime, call| {
+                    sync_seen.lock().unwrap().push(call.context.clone());
+                    Ok(ServiceResult {
+                        changed_states: vec![test_state("light.one", "on", 100)],
+                        response: Some(serde_json::json!("sync")),
+                        context: Context::default(),
+                    })
+                }),
+            )
+            .unwrap();
+        let async_contexts = Arc::new(Mutex::new(Vec::new()));
+        let async_seen = Arc::clone(&async_contexts);
+        runtime
+            .register_entity_async_service_with_response_support(
+                "owner.b",
+                "light",
+                "operate",
+                serde_json::json!({"name":"Operate"}),
+                ServiceResponseSupport::Optional,
+                Arc::new(|entity_id| entity_id == "light.two"),
+                Arc::new(move |_runtime, call| -> ServiceFuture {
+                    let seen = Arc::clone(&async_seen);
+                    Box::pin(async move {
+                        seen.lock().unwrap().push(call.context.clone());
+                        Ok(ServiceResult {
+                            changed_states: vec![test_state("light.two", "off", 101)],
+                            response: Some(serde_json::json!("async")),
+                            context: Context::default(),
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        let resolver_calls = Arc::new(AtomicUsize::new(0));
+        let resolver_count = Arc::clone(&resolver_calls);
+        let _resolver = runtime
+            .install_service_target_resolver_if_absent(Arc::new(move |_runtime, call| {
+                resolver_count.fetch_add(1, Ordering::SeqCst);
+                call.target.insert(
+                    "entity_id".into(),
+                    serde_json::json!(["light.one", "light.two"]),
+                );
+                Ok(true)
+            }))
+            .expect("resolver installs");
+        let authorized = Arc::new(Mutex::new(Vec::<Vec<String>>::new()));
+        let authorized_ids = Arc::clone(&authorized);
+        let authorize_targets: ServiceTargetAuthorizer = Arc::new(move |entity_ids| {
+            authorized_ids.lock().unwrap().push(entity_ids.to_vec());
+            Ok(())
+        });
+        let call = service_call("light", "operate", empty_map());
+        let result = runtime
+            .call_service_request_async(ServiceCallRequest {
+                call: call.clone(),
+                return_response: true,
+                authorize_targets: Some(authorize_targets),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(resolver_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *authorized.lock().unwrap(),
+            [vec!["light.one".to_owned(), "light.two".to_owned()]]
+        );
+        assert_eq!(
+            runtime.service_response_support("light", "operate"),
+            Some(ServiceResponseSupport::Optional)
+        );
+        assert_eq!(result.response, Some(serde_json::json!(["sync", "async"])));
+        assert_eq!(result.changed_states.len(), 2);
+        assert_eq!(result.context, call.context);
+        assert_eq!(
+            sync_contexts.lock().unwrap().as_slice(),
+            std::slice::from_ref(&call.context)
+        );
+        assert_eq!(*async_contexts.lock().unwrap(), [call.context]);
+        assert_eq!(runtime.services()["light"]["operate"]["name"], "Operate");
+    }
+
+    #[tokio::test]
+    async fn response_capabilities_gate_calls_and_reject_inconsistent_providers() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let effects = Arc::new(AtomicUsize::new(0));
+        let sync_effects = Arc::clone(&effects);
+        runtime
+            .register_service(
+                "demo",
+                "plain",
+                serde_json::json!({"name":"Plain"}),
+                Arc::new(move |_runtime, call| {
+                    sync_effects.fetch_add(1, Ordering::SeqCst);
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        let unsupported = runtime
+            .call_service_request_async(ServiceCallRequest {
+                call: service_call("demo", "plain", empty_map()),
+                return_response: true,
+                authorize_targets: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            unsupported,
+            Error::ServiceValidation(
+                "Service does not support responses. Remove return_response from request.".into()
+            )
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+
+        runtime
+            .register_async_service_with_response_support(
+                "demo",
+                "required",
+                serde_json::json!({"name":"Required"}),
+                ServiceResponseSupport::Only,
+                Arc::new(|_runtime, call| -> ServiceFuture {
+                    Box::pin(async move {
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: Some(Value::Null),
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        let required = runtime
+            .call_service_request_async(ServiceCallRequest {
+                call: service_call("demo", "required", empty_map()),
+                return_response: false,
+                authorize_targets: None,
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            required,
+            Error::ServiceValidation(
+                "Service call requires responses but caller did not ask for responses. Add ?return_response to query parameters."
+                    .into()
+            )
+        );
+
+        runtime
+            .register_async_service_with_response_support(
+                "demo",
+                "optional",
+                serde_json::json!({"name":"Optional"}),
+                ServiceResponseSupport::Optional,
+                Arc::new(|_runtime, call| -> ServiceFuture {
+                    Box::pin(async move {
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: Some(serde_json::json!("optional")),
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        for return_response in [false, true] {
+            let result = runtime
+                .call_service_request_async(ServiceCallRequest {
+                    call: service_call("demo", "optional", empty_map()),
+                    return_response,
+                    authorize_targets: None,
+                })
+                .await
+                .unwrap();
+            assert_eq!(
+                result.response,
+                return_response.then(|| serde_json::json!("optional"))
+            );
+        }
+
+        runtime
+            .register_entity_service_with_response_support(
+                "owner.a",
+                "light",
+                "operate",
+                serde_json::json!({"name":"Operate"}),
+                ServiceResponseSupport::Optional,
+                Arc::new(|_| true),
+                Arc::new(|_runtime, call| {
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        let inconsistent = runtime.register_entity_async_service(
+            "owner.b",
+            "light",
+            "operate",
+            serde_json::json!({"name":"Operate"}),
+            Arc::new(|_| true),
+            Arc::new(|_runtime, call| -> ServiceFuture {
+                Box::pin(async move {
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context,
+                    })
+                })
+            }),
+        );
+        assert!(
+            matches!(inconsistent, Err(Error::Service(message)) if message.contains("response support conflicts"))
+        );
+        assert_eq!(
+            runtime.service_response_support("light", "operate"),
+            Some(ServiceResponseSupport::Optional)
+        );
+        assert_eq!(runtime.services()["demo"]["plain"]["name"], "Plain");
+        runtime
+            .register_entity_service_with_response_support(
+                "owner.a",
+                "light",
+                "operate",
+                serde_json::json!({"name":"Updated operate"}),
+                ServiceResponseSupport::Only,
+                Arc::new(|_| true),
+                Arc::new(|_runtime, call| {
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: Some(Value::Null),
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.service_response_support("light", "operate"),
+            Some(ServiceResponseSupport::Only)
+        );
+        assert_eq!(
+            runtime.services()["light"]["operate"]["name"],
+            "Updated operate"
+        );
+        assert_eq!(runtime.unregister_entity_services("owner.a").unwrap(), 1);
+        assert_eq!(runtime.service_response_support("light", "operate"), None);
+    }
+
+    #[tokio::test]
+    async fn async_only_handler_is_rejected_by_sync_api_before_effects() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let effects = Arc::new(AtomicUsize::new(0));
+        let async_effects = Arc::clone(&effects);
+        runtime
+            .register_async_service(
+                "demo",
+                "async_only",
+                Value::Null,
+                Arc::new(move |_runtime, call| -> ServiceFuture {
+                    async_effects.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        let call = service_call("demo", "async_only", empty_map());
+        let error = runtime.call_service(call.clone()).unwrap_err();
+        assert!(
+            matches!(error, Error::Service(message) if message.contains("requires asynchronous dispatch"))
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        runtime.call_service_async(call).await.unwrap();
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn target_validation_and_authorization_finish_before_async_handlers() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let handler_effects = Arc::new(AtomicUsize::new(0));
+        let effects = Arc::clone(&handler_effects);
+        runtime
+            .register_entity_async_service(
+                "owner.light",
+                "light",
+                "turn_on",
+                Value::Null,
+                Arc::new(|entity_id| entity_id == "light.one"),
+                Arc::new(move |_runtime, call| -> ServiceFuture {
+                    effects.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async move {
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        let auth_calls = Arc::new(AtomicUsize::new(0));
+        let auth_count = Arc::clone(&auth_calls);
+        let deny_targets = Arc::new(AtomicBool::new(false));
+        let should_deny = Arc::clone(&deny_targets);
+        let authorize: ServiceTargetAuthorizer = Arc::new(move |_entity_ids| {
+            auth_count.fetch_add(1, Ordering::SeqCst);
+            if should_deny.load(Ordering::SeqCst) {
+                Err(Error::InvalidInput("fixture authorization denied".into()))
+            } else {
+                Ok(())
+            }
+        });
+        let invalid_target = runtime
+            .call_service_request_async(ServiceCallRequest {
+                call: service_call(
+                    "light",
+                    "turn_on",
+                    serde_json::json!({"entity_id":["light.one", "light.missing"]})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                return_response: false,
+                authorize_targets: Some(Arc::clone(&authorize)),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(invalid_target, Error::ServiceValidation(message) if message.contains("no provider for target light.missing"))
+        );
+        assert_eq!(auth_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(handler_effects.load(Ordering::SeqCst), 0);
+
+        deny_targets.store(true, Ordering::SeqCst);
+        let denied = runtime
+            .call_service_request_async(ServiceCallRequest {
+                call: service_call(
+                    "light",
+                    "turn_on",
+                    serde_json::json!({"entity_id":"light.one"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                ),
+                return_response: false,
+                authorize_targets: Some(authorize),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            denied,
+            Error::InvalidInput("fixture authorization denied".into())
+        );
+        assert_eq!(auth_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(handler_effects.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn execution_scope_wraps_handler_creation_polls_and_sync_fallback() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let active = Arc::new(AtomicUsize::new(0));
+        let scope_entries = Arc::new(AtomicUsize::new(0));
+        let scope_active = Arc::clone(&active);
+        let entries = Arc::clone(&scope_entries);
+        let scope: ServiceExecutionScope = Arc::new(move || {
+            entries.fetch_add(1, Ordering::SeqCst);
+            scope_active.fetch_add(1, Ordering::SeqCst);
+            Box::new(ScopeCountGuard(Arc::clone(&scope_active)))
+        });
+        let async_active = Arc::clone(&active);
+        runtime
+            .register_async_service(
+                "demo",
+                "scoped_async",
+                Value::Null,
+                Arc::new(move |_runtime, call| -> ServiceFuture {
+                    assert_eq!(async_active.load(Ordering::SeqCst), 1);
+                    let active = Arc::clone(&async_active);
+                    Box::pin(async move {
+                        assert_eq!(active.load(Ordering::SeqCst), 1);
+                        tokio::task::yield_now().await;
+                        assert_eq!(active.load(Ordering::SeqCst), 1);
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        let sync_active = Arc::clone(&active);
+        runtime
+            .register_service(
+                "demo",
+                "scoped_sync",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    assert_eq!(sync_active.load(Ordering::SeqCst), 1);
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+
+        runtime
+            .call_service_async_scoped(
+                service_call("demo", "scoped_async", empty_map()),
+                Arc::clone(&scope),
+            )
+            .await
+            .unwrap();
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(scope_entries.load(Ordering::SeqCst) >= 3);
+        runtime
+            .call_service_async_scoped(service_call("demo", "scoped_sync", empty_map()), scope)
+            .await
+            .unwrap();
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn canceled_async_handler_future_is_dropped_with_request() {
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let handler_dropped = Arc::clone(&dropped);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let handler_started = Arc::clone(&started_tx);
+        runtime
+            .register_async_service(
+                "demo",
+                "pending",
+                Value::Null,
+                Arc::new(move |_runtime, _call| -> ServiceFuture {
+                    let dropped = Arc::clone(&handler_dropped);
+                    let started = handler_started.lock().unwrap().take();
+                    Box::pin(async move {
+                        let _drop_flag = DropFlag(dropped);
+                        if let Some(started) = started {
+                            let _ = started.send(());
+                        }
+                        std::future::pending::<Result<ServiceResult>>().await
+                    })
+                }),
+            )
+            .unwrap();
+        let call_runtime = runtime.clone();
+        let call = tokio::spawn(async move {
+            call_runtime
+                .call_service_async(service_call("demo", "pending", empty_map()))
+                .await
+        });
+        started_rx.await.unwrap();
+        call.abort();
+        let _ = call.await;
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canceled_sync_call_is_joined_by_shared_shutdown_and_reaped() {
+        let runtime = runtime_with_store(Arc::new(MemoryStore::default()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let handler_started = Arc::clone(&started_tx);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut release_on_drop = ReleaseOnDrop(Some(release_tx));
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let handler_finished = Arc::new(AtomicBool::new(false));
+        let finished = Arc::clone(&handler_finished);
+        runtime
+            .register_service(
+                "demo",
+                "block",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    if let Some(started) = handler_started.lock().unwrap().take() {
+                        let _ = started.send(());
+                    }
+                    release_rx.lock().unwrap().recv().unwrap();
+                    finished.store(true, Ordering::SeqCst);
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        let call_runtime = runtime.clone();
+        let call = tokio::spawn(async move {
+            call_runtime
+                .call_service_async(service_call("demo", "block", empty_map()))
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("blocking service handler did not start")
+            .unwrap();
+        call.abort();
+        let _ = call.await;
+
+        let shutdown_runtime = runtime.clone();
+        let canceled_waiter =
+            tokio::spawn(async move { shutdown_runtime.shutdown_service_tasks_async().await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !runtime.inner.service_tasks.admission_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("shutdown did not close service task admission");
+        let denied = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.call_service_async(service_call("demo", "block", empty_map())),
+        )
+        .await
+        .expect("closed admission probe did not return")
+        .unwrap_err();
+        assert!(
+            matches!(denied, Error::Service(message) if message.contains("admission is closed"))
+        );
+        assert!(!handler_finished.load(Ordering::SeqCst));
+        canceled_waiter.abort();
+        let _ = canceled_waiter.await;
+
+        let shutdown_runtime = runtime.clone();
+        let shared_waiter =
+            tokio::spawn(async move { shutdown_runtime.shutdown_service_tasks_async().await });
+        tokio::task::yield_now().await;
+        assert!(!shared_waiter.is_finished());
+        release_on_drop
+            .0
+            .take()
+            .expect("release token is present")
+            .send(())
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), shared_waiter)
+            .await
+            .expect("shutdown did not join the blocking handler")
+            .unwrap()
+            .unwrap();
+        assert!(handler_finished.load(Ordering::SeqCst));
+        runtime.shutdown_service_tasks_async().await.unwrap();
+        for _ in 0..100 {
+            if runtime.inner.service_tasks.pending_count() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runtime.inner.service_tasks.pending_count(), 0);
     }
 }

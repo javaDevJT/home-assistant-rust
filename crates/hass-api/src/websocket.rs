@@ -15,7 +15,9 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use hass_core::{Error as CoreError, Event, ServiceCall, ServiceResult, State as HassState};
+use hass_core::{
+    Error as CoreError, Event, ServiceCall, ServiceCallRequest, ServiceResult, State as HassState,
+};
 use serde_json::{Map, Value, json};
 use tokio::{
     sync::{OwnedSemaphorePermit, broadcast, mpsc},
@@ -942,6 +944,21 @@ async fn handle_command(
         return send_error(socket, id, WsError::new("unauthorized", "Unauthorized"))
             .await
             .is_ok();
+    }
+    if let Some(result) = crate::media_player::handle_ws(
+        state,
+        &Value::Object(message.clone()),
+        identity.user_id.clone(),
+    )
+    .await
+    {
+        return send_core_result(
+            socket,
+            id,
+            result.map_err(|error| WsError::new(error.code, error.message)),
+        )
+        .await
+        .is_ok();
     }
     if let Some(result) = crate::extensions::handle_ws(
         state,
@@ -1968,6 +1985,25 @@ async fn handle_command(
             send_core_result(socket, id, result).await.is_ok()
         }
         "call_service" => {
+            if message.keys().any(|field| {
+                !matches!(
+                    field.as_str(),
+                    "id" | "type"
+                        | "domain"
+                        | "service"
+                        | "service_data"
+                        | "target"
+                        | "return_response"
+                )
+            }) {
+                return send_error(
+                    socket,
+                    id,
+                    WsError::new("invalid_format", "Unexpected fields"),
+                )
+                .await
+                .is_ok();
+            }
             let Some(domain) = message.get("domain").and_then(Value::as_str) else {
                 return send_error(
                     socket,
@@ -1985,6 +2021,24 @@ async fn handle_command(
                 )
                 .await
                 .is_ok();
+            };
+            if !crate::http::service_call_authorized(identity, domain, service) {
+                return send_error(socket, id, WsError::new("unauthorized", "Unauthorized"))
+                    .await
+                    .is_ok();
+            }
+            let return_response = match message.get("return_response") {
+                None => false,
+                Some(Value::Bool(return_response)) => *return_response,
+                Some(_) => {
+                    return send_error(
+                        socket,
+                        id,
+                        WsError::new("invalid_format", "return_response must be a boolean"),
+                    )
+                    .await
+                    .is_ok();
+                }
             };
             let data = match message.get("service_data") {
                 None => Map::new(),
@@ -2020,39 +2074,37 @@ async fn handle_command(
                 context: identity.context(),
             };
             let runtime = state.api.runtime.clone();
-            let check_runtime = runtime.clone();
-            let check_domain = domain.to_owned();
-            let check_service = service.to_owned();
-            let registered = run_blocking(move || {
-                Ok(check_runtime
-                    .services()
-                    .get(&check_domain)
-                    .and_then(Value::as_object)
-                    .is_some_and(|services| services.contains_key(&check_service)))
-            })
-            .await;
-            match registered {
-                Ok(true) => {}
-                Ok(false) => {
-                    return send_error(
-                        socket,
-                        id,
-                        WsError::new("service_not_found", "Service not found"),
-                    )
-                    .await
-                    .is_ok();
+            let request = ServiceCallRequest {
+                call,
+                return_response,
+                authorize_targets: Some(crate::http::service_target_authorizer()),
+            };
+            let error_domain = domain.to_owned();
+            let error_service = service.to_owned();
+            let operation = runtime.call_service_request_async(request);
+            let shutdown = crate::http::service_call_shutdown(state, domain, service);
+            let result = if let Some(mut shutdown) = shutdown {
+                tokio::select! {
+                    biased;
+                    result = operation => result.map_err(|error| {
+                        map_service_call_error(error, &error_domain, &error_service)
+                    }),
+                    _ = crate::oauth2::wait_for_shutdown(&mut shutdown) => {
+                        Err(WsError::new("home_assistant_error", "API is shutting down."))
+                    }
                 }
-                Err(error) => return send_error(socket, id, error).await.is_ok(),
+            } else {
+                operation
+                    .await
+                    .map_err(|error| map_service_call_error(error, &error_domain, &error_service))
             }
-            let result = run_blocking(move || runtime.call_service(call)).await.map(
-                |result: ServiceResult| {
-                    json!({
-                        "changed_states": result.changed_states,
-                        "response": result.response,
-                        "context": result.context,
-                    })
-                },
-            );
+            .map(|result: ServiceResult| {
+                json!({
+                    "changed_states": result.changed_states,
+                    "response": result.response,
+                    "context": result.context,
+                })
+            });
             send_core_result(socket, id, result).await.is_ok()
         }
         _ => send_error(
@@ -2185,6 +2237,7 @@ impl WsError {
 fn map_core_error(error: CoreError) -> WsError {
     match error {
         CoreError::InvalidInput(message) => WsError::new("invalid_format", message),
+        CoreError::ServiceValidation(message) => WsError::new("service_validation_error", message),
         CoreError::InvalidData { schema_errors } => WsError::new(
             "invalid_format",
             format!("Invalid data: {}", json!(schema_errors)),
@@ -2194,6 +2247,15 @@ fn map_core_error(error: CoreError) -> WsError {
         CoreError::NotAllowed(message) => WsError::new("not_allowed", message),
         CoreError::Storage(_) => WsError::new("unknown_error", "Internal server error"),
         CoreError::Service(_) => WsError::new("service_error", "Service call failed"),
+    }
+}
+
+fn map_service_call_error(error: CoreError, domain: &str, service: &str) -> WsError {
+    match error {
+        CoreError::Service(message) if message == format!("unknown service {domain}.{service}") => {
+            WsError::new("service_not_found", "Service not found")
+        }
+        error => map_core_error(error),
     }
 }
 

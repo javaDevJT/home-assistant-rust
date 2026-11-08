@@ -451,5 +451,29 @@ async fn compiled_process_restart_reexecs_in_place_and_preserves_state_and_confi
         .close(None)
         .await
         .expect("close restarted WebSocket before SIGTERM");
+
+    let boot_count = server.boot_count();
+    let response = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(COMMAND_TIMEOUT)
+        .build()
+        .unwrap()
+        .post(format!(
+            "http://{address}/api/services/homeassistant/restart"
+        ))
+        .bearer_auth(TOKEN)
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("HTTP restart must acknowledge its own shutdown request");
+    assert!(response.status().is_success(), "{}", server.diagnostics());
+    assert_eq!(response.json::<Value>().await.unwrap(), json!([]));
+    let mut third_socket = server.wait_for_boot(boot_count + 1).await;
+    assert_eq!(
+        server.child.id(),
+        Some(pid),
+        "HTTP restart also execs in place"
+    );
+    third_socket.close(None).await.unwrap();
     server.stop().await;
 }

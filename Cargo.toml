@@ -25,6 +25,8 @@ members = [
     "crates/hass-application-credentials",
     "crates/hass-oauth2-client",
     "crates/hass-oauth2-flow",
+    "crates/hass-media-player",
+    "crates/hass-spotify",
 ]
 
 [workspace.package]
@@ -36,6 +38,7 @@ rust-version = "1.99"
 
 [workspace.dependencies]
 anyhow = "1"
+async-trait = "0.1"
 base64 = "=0.22.1"
 argon2 = "0.5"
 axum = { version = "0.8", features = ["ws", "json", "multipart"] }
@@ -43,8 +46,11 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+percent-encoding = "2"
 unicode-normalization = "=0.1.24"
 hass-core = { path = "crates/hass-core" }
+hass-media-player = { path = "crates/hass-media-player" }
+hass-spotify = { path = "crates/hass-spotify" }
 hass-storage = { path = "crates/hass-storage" }
 hass-automation = { path = "crates/hass-automation" }
 hass-api = { path = "crates/hass-api" }

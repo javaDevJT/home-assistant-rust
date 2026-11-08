@@ -305,6 +305,14 @@ async fn real_process_credentials_restore_private_records_and_stream_after_resta
                 .contains(&json!("application_credentials"))
         );
         assert!(!public.to_string().contains("dummy-fixture-secret"));
+        for component in ["media_player", "spotify"] {
+            assert!(
+                public["components"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(component))
+            );
+        }
         let mut socket = authenticated_socket(&server).await;
         let listed = ws_command(
             &mut socket,
@@ -338,8 +346,8 @@ async fn real_process_credentials_restore_private_records_and_stream_after_resta
         assert_eq!(catalog["success"], true, "{catalog}");
         assert_eq!(
             catalog["result"]["domains"],
-            json!([]),
-            "stored credentials do not fabricate a loaded native provider"
+            json!(["spotify"]),
+            "the catalog contains the registered Spotify provider, independently of stored fixture credentials"
         );
         assert!(!catalog.to_string().contains("dummy-fixture-secret"));
         let pid = server.child.id().unwrap();

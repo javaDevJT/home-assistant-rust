@@ -57,7 +57,8 @@ is accepted and retained with the configuration; it does not affect activation.
 Each script step must contain exactly one of:
 
 - `action: domain.service` or legacy `service: domain.service`, with `target`,
-  `data`, or legacy `service_data`.
+  `data`, or legacy `service_data`; `response_variable` stores a supported
+  service response for later actions and templates.
 - `delay` as seconds, `HH:MM:SS`, or a map with hours/minutes/seconds/
   milliseconds.
 - `condition` actions for `state`, `numeric_state`, `template`, `and`, `or`,
@@ -66,7 +67,9 @@ Each script step must contain exactly one of:
   `default`.
 - `repeat` with exactly one of `count`, `while`, or `until`, and a `sequence`.
 - `variables` to update the current variable map.
-- `stop`, optionally with `error: true` to fail the run.
+- `stop`, optionally with `response_variable` to return a previously assigned
+  variable from a direct script service call, or with `error: true` to fail the
+  run. Error stops cannot return a response.
 
 Choose/repeat conditions support state, numeric-state, template, and nested
 and/or/not forms. Templates in service data, target values, variables, and
@@ -83,8 +86,11 @@ Home Assistant Core `cbf2c02c9bff331537c19bff69da8dc11c3fbfbf`'s
 `helpers/condition/entity_condition.py`, and `helpers/config_validation.py`.
 Every struct rejects unknown configuration keys. `for_each`, script `fields`,
 `max_exceeded`, blueprints, parallel/if/then action blocks, wait/event/time
-triggers, response variables, traces, and dynamic includes are unsupported and
-fail strict deserialization or validation.
+triggers, traces, and dynamic includes are unsupported and fail strict
+deserialization or validation. A service response capability mismatch fails
+before dispatch: `None` rejects `response_variable`, `Only` requires it, and
+`Optional` allows either choice. Unknown services retain their normal dispatch
+error.
 
 ## Scheduling and limits
 
@@ -101,10 +107,13 @@ fail strict deserialization or validation.
 
 The engine registers `script.<object_id>`, `script.turn_on`,
 `script.turn_off`, `script.toggle`, `scene.turn_on`, and `scene.create`. Direct
-`script.<object_id>` calls wait for completion; `script.turn_on` acknowledges
-accepted runs and returns while they execute. `script.turn_off` cancels active
-delays and drops queued runs. A recursion chain that calls a script already in
-that chain fails with a clear service error.
+`script.<object_id>` calls wait for completion and support optional responses;
+a normal `stop` with `response_variable` returns that variable, while a run
+without a stop response returns an empty object when the caller requests one.
+`script.turn_on` acknowledges accepted runs and returns while they execute; it
+does not support responses. `script.turn_off` cancels active delays and drops
+queued runs. A recursion chain that calls a script already in that chain fails
+with a clear service error.
 
 ## Scenes, persistence, and service limits
 

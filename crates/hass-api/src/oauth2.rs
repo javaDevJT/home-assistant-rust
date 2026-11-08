@@ -130,6 +130,10 @@ pub(crate) fn map_flow_error(error: OAuthFlowError) -> ApiError {
             StatusCode::SERVICE_UNAVAILABLE,
             "OAuth flow service is shutting down.",
         ),
+        OAuthFlowError::ProviderAbort(_) => (
+            StatusCode::BAD_REQUEST,
+            "OAuth provider declined authorization.",
+        ),
         OAuthFlowError::ProviderFailure => {
             (StatusCode::BAD_GATEWAY, "OAuth provider operation failed.")
         }
@@ -145,7 +149,9 @@ pub(crate) fn map_flow_error(error: OAuthFlowError) -> ApiError {
 
 fn map_core_error(error: hass_core::Error) -> (StatusCode, &'static str) {
     match error {
-        hass_core::Error::InvalidInput(_) | hass_core::Error::InvalidData { .. } => {
+        hass_core::Error::InvalidInput(_)
+        | hass_core::Error::ServiceValidation(_)
+        | hass_core::Error::InvalidData { .. } => {
             (StatusCode::BAD_REQUEST, "Invalid OAuth flow request.")
         }
         hass_core::Error::NotFound(_) => (StatusCode::NOT_FOUND, "OAuth flow was not found."),

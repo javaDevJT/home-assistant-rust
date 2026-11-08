@@ -3,7 +3,10 @@
 //! The supported YAML subset and its limits are documented in `README.md`.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use hass_core::{Context, Error, Result, Runtime, ServiceCall, ServiceResult, State};
+use hass_core::{
+    Context, Error, Result, Runtime, ServiceCall, ServiceCallRequest, ServiceExecutionScope,
+    ServiceResponseSupport, ServiceResult, State,
+};
 use hass_sun::{
     LegacySunCondition, LegacySunEvent, Observer, PureSunCondition, SunPeriod, TwilightBand,
     evaluate_condition as evaluate_sun_condition,
@@ -46,7 +49,7 @@ const SERVICE_REPLY_TIMEOUT: Duration = Duration::from_secs(65);
 const SCENE_METADATA_KEY: &str = "hass-script.dynamic-scenes.v1";
 
 thread_local! {
-    /// Carries script ancestry through the synchronous Runtime service bridge.
+    /// Carries script ancestry through the scoped Runtime service dispatch.
     static SCRIPT_LINEAGE: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -118,6 +121,9 @@ pub struct Action {
     pub service_data: Option<Map<String, Value>>,
     /// Service target fields, usually `entity_id`.
     pub target: Option<Map<String, Value>>,
+    /// Variable that receives an optional service response, or a stop response.
+    #[serde(default, deserialize_with = "deserialize_response_variable")]
+    pub response_variable: Option<String>,
     /// A delay in seconds, `HH:MM:SS`, or a duration component map.
     pub delay: Option<DelayValue>,
     /// Condition action discriminator (`state`, `numeric_state`, `template`,
@@ -659,7 +665,7 @@ struct ActiveRun {
 struct Completion {
     id: String,
     run_id: String,
-    result: Result<()>,
+    result: Result<Option<Value>>,
     context: Context,
     waiter: Option<SyncSender<Result<ServiceResult>>>,
 }
@@ -1132,14 +1138,14 @@ async fn finish_run(
         completion.context.clone(),
     );
     let completion_result = match (completion.result, state_result) {
-        (Ok(()), Ok(state)) => Ok(state),
+        (Ok(response), Ok(state)) => Ok((state, response)),
         (Err(error), _) => Err(error),
         (_, Err(error)) => Err(error),
     };
     if let Some(waiter) = completion.waiter {
-        let response = completion_result.map(|state| ServiceResult {
+        let response = completion_result.map(|(state, response)| ServiceResult {
             changed_states: vec![state],
-            response: Some(json!({"completed": true, "script_id": completion.id})),
+            response: Some(script_response_or_empty(response)),
             context: completion.context.clone(),
         });
         let _ = waiter.send(response);
@@ -1168,6 +1174,21 @@ async fn finish_run(
     }
 }
 
+fn script_response_or_empty(response: Option<Value>) -> Value {
+    let Some(response) = response else {
+        return json!({});
+    };
+    let is_truthy = match &response {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|number| number != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    };
+    if is_truthy { response } else { json!({}) }
+}
+
 async fn execute_script(
     runtime: Runtime,
     config: ScriptConfig,
@@ -1176,7 +1197,7 @@ async fn execute_script(
     context: Context,
     mut cancel: watch::Receiver<bool>,
     template: TemplateEngine,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let deadline = Instant::now() + MAX_RUN_TIME;
     let mut variables = config.variables;
     for (key, value) in supplied_variables {
@@ -1184,7 +1205,7 @@ async fn execute_script(
     }
     variables = render_map(&template, &variables, &variables)?;
     let mut executed = 0;
-    match execute_actions(
+    let outcome = execute_actions(
         &runtime,
         &template,
         &config.sequence,
@@ -1196,10 +1217,11 @@ async fn execute_script(
         0,
         &mut executed,
     )
-    .await?
-    {
-        ExecutionControl::Continue | ExecutionControl::Stop | ExecutionControl::Cancelled => Ok(()),
-    }
+    .await?;
+    Ok(match outcome {
+        ExecutionControl::Stop(response) => response,
+        ExecutionControl::Continue | ExecutionControl::Cancelled => None,
+    })
 }
 
 /// Validate a script sequence stored as a JSON value. This is used by other
@@ -1214,28 +1236,39 @@ pub fn validate_sequence(sequence: &Value) -> Result<()> {
 /// Run a validated sequence with the shared bounded action executor.
 ///
 /// The caller-supplied context is passed unchanged to each invoked service.
-/// Cancellation is observed between actions and during delays. A synchronous
-/// service handler already entered through `Runtime::call_service` cannot be
-/// interrupted and is joined before this future returns.
+/// Cancellation is observed between actions and during delays. Native async
+/// service handlers are dropped when an action is cancelled or times out; Core
+/// retains ownership of any legacy blocking handler it has already started.
 pub async fn run_sequence(
+    runtime: Runtime,
+    sequence: Value,
+    variables: Map<String, Value>,
+    context: Context,
+    cancel: watch::Receiver<bool>,
+) -> Result<()> {
+    let _ = run_sequence_with_response(runtime, sequence, variables, context, cancel).await?;
+    Ok(())
+}
+
+async fn run_sequence_with_response(
     runtime: Runtime,
     sequence: Value,
     mut variables: Map<String, Value>,
     context: Context,
     mut cancel: watch::Receiver<bool>,
-) -> Result<()> {
+) -> Result<Option<Value>> {
     let actions: Vec<Action> = serde_json::from_value(sequence)
         .map_err(|error| invalid(format!("invalid script sequence: {error}")))?;
     let mut total = 0;
     validate_actions(&actions, 0, &mut total)?;
     if *cancel.borrow() {
-        return Ok(());
+        return Ok(None);
     }
     let template = TemplateEngine::new(runtime.clone());
     variables = render_map(&template, &variables, &variables)?;
     let deadline = Instant::now() + MAX_RUN_TIME;
     let mut executed = 0;
-    let _ = execute_actions(
+    let outcome = execute_actions(
         &runtime,
         &template,
         &actions,
@@ -1248,13 +1281,16 @@ pub async fn run_sequence(
         &mut executed,
     )
     .await?;
-    Ok(())
+    Ok(match outcome {
+        ExecutionControl::Stop(response) => response,
+        ExecutionControl::Continue | ExecutionControl::Cancelled => None,
+    })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq)]
 enum ExecutionControl {
     Continue,
-    Stop,
+    Stop(Option<Value>),
     Cancelled,
 }
 
@@ -1316,11 +1352,33 @@ async fn execute_actions(
                 target,
                 context: context.clone(),
             };
-            if call_service_cancellable(runtime.clone(), call, lineage.to_vec(), deadline, cancel)
-                .await?
-                .is_none()
-            {
+            let request = ServiceCallRequest {
+                call,
+                return_response: action.response_variable.is_some(),
+                authorize_targets: None,
+            };
+            let Some(result) = call_service_request_cancellable(
+                runtime.clone(),
+                request,
+                lineage.to_vec(),
+                deadline,
+                cancel,
+                domain,
+                service_name,
+            )
+            .await?
+            else {
                 return Ok(ExecutionControl::Cancelled);
+            };
+            if let Some(response_variable) = action
+                .response_variable
+                .as_deref()
+                .filter(|name| !name.is_empty())
+            {
+                variables.insert(
+                    response_variable.to_owned(),
+                    result.response.unwrap_or(Value::Null),
+                );
             }
         } else if let Some(delay) = &action.delay {
             let duration = delay.duration()?;
@@ -1396,7 +1454,16 @@ async fn execute_actions(
                     message.clone()
                 }));
             }
-            return Ok(ExecutionControl::Stop);
+            let response = action
+                .response_variable
+                .as_deref()
+                .map(|name| {
+                    variables.get(name).cloned().ok_or_else(|| {
+                        Error::Service(format!("Response variable '{name}' is not defined"))
+                    })
+                })
+                .transpose()?;
+            return Ok(ExecutionControl::Stop(response));
         }
     }
     Ok(ExecutionControl::Continue)
@@ -1480,6 +1547,7 @@ async fn wait_cancelled(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
+#[cfg(test)]
 async fn call_service_cancellable(
     runtime: Runtime,
     call: ServiceCall,
@@ -1488,22 +1556,76 @@ async fn call_service_cancellable(
     cancel: &mut watch::Receiver<bool>,
 ) -> Result<Option<ServiceResult>> {
     let service_name = format!("{}.{}", call.domain, call.service);
-    let mut handler =
-        tokio::task::spawn_blocking(move || with_lineage(lineage, || runtime.call_service(call)));
+    let handler = runtime.call_service_async_scoped(call, lineage_scope(lineage));
+    tokio::pin!(handler);
     tokio::select! {
-        result = &mut handler => match result {
-            Ok(Ok(value)) => Ok(Some(value)),
-            Ok(Err(error)) => Err(error),
-            Err(error) => Err(Error::Service(format!("service `{service_name}` task failed: {error}"))),
-        },
+        result = &mut handler => result.map(Some),
         _ = sleep_until(deadline) => {
-            tracing::warn!(service = %service_name, "script action exceeded run deadline; joining synchronous handler");
-            let _ = handler.await;
+            tracing::warn!(service = %service_name, "script action exceeded run deadline; dropping async service future");
             Err(Error::Service("script exceeded its 60-second run limit".into()))
         }
         _ = wait_cancelled(cancel) => {
-            // Arbitrary registered synchronous handlers cannot be interrupted.
-            let _ = handler.await;
+            // Dropping this call cancels native async handlers. Core retains and
+            // drains any started legacy blocking handler it owns.
+            Ok(None)
+        }
+    }
+}
+
+fn script_response_request_error(
+    error: Error,
+    domain: &str,
+    service: &str,
+    return_response: bool,
+) -> Error {
+    let service_name = format!("{domain}.{service}");
+    match error {
+        Error::ServiceValidation(message)
+            if return_response
+                && message
+                    == "Service does not support responses. Remove return_response from request." =>
+        {
+            invalid(format!(
+                "Script does not support 'response_variable' for service '{service_name}' which does not support response data."
+            ))
+        }
+        Error::ServiceValidation(message)
+            if !return_response
+                && message
+                    == "Service call requires responses but caller did not ask for responses. Add ?return_response to query parameters." =>
+        {
+            invalid(format!(
+                "Script requires 'response_variable' for response data for service call {service_name}"
+            ))
+        }
+        error => error,
+    }
+}
+
+async fn call_service_request_cancellable(
+    runtime: Runtime,
+    request: ServiceCallRequest,
+    lineage: Vec<String>,
+    deadline: Instant,
+    cancel: &mut watch::Receiver<bool>,
+    domain: &str,
+    service: &str,
+) -> Result<Option<ServiceResult>> {
+    let service_name = format!("{domain}.{service}");
+    let return_response = request.return_response;
+    let handler = runtime.call_service_request_async_scoped(request, lineage_scope(lineage));
+    tokio::pin!(handler);
+    tokio::select! {
+        result = &mut handler => result
+            .map(Some)
+            .map_err(|error| script_response_request_error(error, domain, service, return_response)),
+        _ = sleep_until(deadline) => {
+            tracing::warn!(service = %service_name, "script action exceeded run deadline; dropping async service future");
+            Err(Error::Service("script exceeded its 60-second run limit".into()))
+        }
+        _ = wait_cancelled(cancel) => {
+            // Dropping this call cancels native async handlers. Core retains and
+            // drains any started legacy blocking handler it owns.
             Ok(None)
         }
     }
@@ -2190,10 +2312,11 @@ fn register_services(
     for id in scripts.keys() {
         let sender = commands.clone();
         let script_id = id.clone();
-        runtime.register_service(
+        runtime.register_service_with_response_support(
             "script",
             id,
             json!({"name": scripts[id].alias.as_deref().unwrap_or(id)}),
+            ServiceResponseSupport::Optional,
             Arc::new(move |_runtime, call| {
                 let variables = service_variables(call)?;
                 let (reply, receiver) = mpsc::sync_channel(1);
@@ -2548,15 +2671,9 @@ async fn apply_scenes(
                 context.clone(),
                 &runtime,
             )?;
-            let runtime_for_call = runtime.clone();
-            let service_lineage = ancestry.clone();
-            let applied = tokio::task::spawn_blocking(move || {
-                with_lineage(service_lineage, || runtime_for_call.call_service(call))
-            })
-            .await
-            .map_err(|error| {
-                Error::Service(format!("scene entity service task failed: {error}"))
-            })??;
+            let applied = runtime
+                .call_service_async_scoped(call, lineage_scope(ancestry.clone()))
+                .await?;
             changed_states.extend(applied.changed_states);
         }
     }
@@ -2958,7 +3075,14 @@ fn validate_actions(actions: &[Action], depth: usize, total: &mut usize) -> Resu
             }
             reject_unused_action_fields(
                 action,
-                &["action", "service", "data", "service_data", "target"],
+                &[
+                    "action",
+                    "service",
+                    "data",
+                    "service_data",
+                    "target",
+                    "response_variable",
+                ],
             )?;
         } else if let Some(delay) = &action.delay {
             delay.duration()?;
@@ -3047,7 +3171,12 @@ fn validate_actions(actions: &[Action], depth: usize, total: &mut usize) -> Resu
         } else if let Some(_variables) = &action.variables {
             reject_unused_action_fields(action, &["variables"])?;
         } else if action.stop.is_some() {
-            reject_unused_action_fields(action, &["stop", "error"])?;
+            if action.error.unwrap_or(false) && action.response_variable.is_some() {
+                return Err(invalid(
+                    "not allowed to add a response to an error stop action",
+                ));
+            }
+            reject_unused_action_fields(action, &["stop", "error", "response_variable"])?;
             if action
                 .stop
                 .as_ref()
@@ -3080,6 +3209,7 @@ fn reject_unused_action_fields(action: &Action, allowed: &[&str]) -> Result<()> 
         ("data", action.data.is_some()),
         ("service_data", action.service_data.is_some()),
         ("target", action.target.is_some()),
+        ("response_variable", action.response_variable.is_some()),
         ("delay", action.delay.is_some()),
         ("condition", action.condition.is_some()),
         ("before", action.before.is_some()),
@@ -3356,12 +3486,29 @@ fn current_lineage() -> Vec<String> {
     SCRIPT_LINEAGE.with(|lineage| lineage.borrow().clone())
 }
 
-fn with_lineage<T>(lineage: Vec<String>, action: impl FnOnce() -> T) -> T {
-    SCRIPT_LINEAGE.with(|current| {
-        let previous = std::mem::replace(&mut *current.borrow_mut(), lineage);
-        let result = action();
-        *current.borrow_mut() = previous;
-        result
+struct ScriptLineageGuard {
+    previous: Vec<String>,
+}
+
+impl ScriptLineageGuard {
+    fn enter(lineage: Vec<String>) -> Self {
+        let previous =
+            SCRIPT_LINEAGE.with(|current| std::mem::replace(&mut *current.borrow_mut(), lineage));
+        Self { previous }
+    }
+}
+
+impl Drop for ScriptLineageGuard {
+    fn drop(&mut self) {
+        SCRIPT_LINEAGE.with(|current| {
+            *current.borrow_mut() = std::mem::take(&mut self.previous);
+        });
+    }
+}
+
+fn lineage_scope(lineage: Vec<String>) -> ServiceExecutionScope {
+    Arc::new(move || {
+        Box::new(ScriptLineageGuard::enter(lineage.clone())) as Box<dyn std::any::Any + Send>
     })
 }
 
@@ -3373,6 +3520,15 @@ fn reply_error(waiter: Option<SyncSender<Result<ServiceResult>>>, error: Error) 
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::InvalidInput(message.into())
+}
+
+fn deserialize_response_variable<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 #[cfg(test)]
@@ -3422,6 +3578,41 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         panic!("condition did not become true before timeout");
+    }
+
+    struct AsyncProviderDrop(Arc<AtomicBool>);
+
+    impl Drop for AsyncProviderDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn register_pending_async_provider(
+        runtime: &Runtime,
+        service: &'static str,
+    ) -> (Arc<tokio::sync::Notify>, Arc<AtomicBool>) {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started_for_handler = Arc::clone(&started);
+        let dropped_for_handler = Arc::clone(&dropped);
+        runtime
+            .register_async_service(
+                "test",
+                service,
+                Value::Null,
+                Arc::new(move |_runtime, _call| {
+                    let started = Arc::clone(&started_for_handler);
+                    let dropped = Arc::clone(&dropped_for_handler);
+                    Box::pin(async move {
+                        let _drop_signal = AsyncProviderDrop(dropped);
+                        started.notify_one();
+                        std::future::pending::<Result<ServiceResult>>().await
+                    })
+                }),
+            )
+            .unwrap();
+        (started, dropped)
     }
 
     #[tokio::test]
@@ -3716,6 +3907,191 @@ mod tests {
         engine.shutdown().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn async_action_preserves_context_variables_and_lineage_before_legacy_recursion() {
+        let runtime = runtime();
+        let observed = Arc::new(Mutex::new(Vec::<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Vec<String>,
+        )>::new()));
+        let observed_by_handler = Arc::clone(&observed);
+        runtime
+            .register_async_service(
+                "test",
+                "async_step",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    let observed = Arc::clone(&observed_by_handler);
+                    Box::pin(async move {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        let value = call
+                            .data
+                            .get("value")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        observed
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push((
+                                value,
+                                call.context.id.clone(),
+                                call.context.parent_id.clone(),
+                                call.context.user_id.clone(),
+                                current_lineage(),
+                            ));
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: Some(json!({"completed": true})),
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        let mut loop_script = script(
+            ScriptMode::Single,
+            json!([
+                {"action":"test.async_step", "data":{"value":"{{ greeting }}"}},
+                {"action":"script.turn_on", "target":{"entity_id":"script.loop_async"}}
+            ]),
+        );
+        loop_script
+            .variables
+            .insert("greeting".into(), json!("hello from script"));
+        let engine = ScriptEngine::start(
+            runtime.clone(),
+            BTreeMap::from([("loop_async".into(), loop_script)]),
+            Vec::new(),
+        )
+        .unwrap();
+        let context = Context {
+            id: "script-call-context".into(),
+            parent_id: Some("caller-context".into()),
+            user_id: Some("script-user".into()),
+        };
+        let error = runtime
+            .call_service(ServiceCall {
+                domain: "script".into(),
+                service: "loop_async".into(),
+                data: Map::new(),
+                target: Map::new(),
+                context: context.clone(),
+            })
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Service(message) if message.contains("recursion loop detected at `loop_async`"))
+        );
+
+        let observed = observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(observed.len(), 1, "async action must run once");
+        assert_eq!(observed[0].0, "hello from script");
+        assert_ne!(observed[0].1, context.id);
+        assert_eq!(observed[0].2, Some(context.id.clone()));
+        assert_eq!(observed[0].3, context.user_id);
+        assert_eq!(observed[0].4, vec!["loop_async"]);
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_async_action_drops_the_provider_future() {
+        let runtime = runtime();
+        let (started, dropped) = register_pending_async_provider(&runtime, "cancelled");
+        let (cancel_sender, mut cancel) = watch::channel(false);
+        let mut action = Box::pin(call_service_cancellable(
+            runtime,
+            ServiceCall {
+                domain: "test".into(),
+                service: "cancelled".into(),
+                data: Map::new(),
+                target: Map::new(),
+                context: Context::default(),
+            },
+            vec!["outer".into()],
+            Instant::now() + Duration::from_secs(5),
+            &mut cancel,
+        ));
+        tokio::select! {
+            _ = started.notified() => {}
+            result = &mut action => panic!("pending provider unexpectedly completed: {result:?}"),
+        }
+
+        cancel_sender.send(true).unwrap();
+        assert!(action.await.unwrap().is_none());
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn expired_async_action_drops_the_provider_future() {
+        let runtime = runtime();
+        let (started, dropped) = register_pending_async_provider(&runtime, "deadline");
+        let (_cancel_sender, mut cancel) = watch::channel(false);
+        let mut action = Box::pin(call_service_cancellable(
+            runtime,
+            ServiceCall {
+                domain: "test".into(),
+                service: "deadline".into(),
+                data: Map::new(),
+                target: Map::new(),
+                context: Context::default(),
+            },
+            vec!["outer".into()],
+            Instant::now() + Duration::from_secs(1),
+            &mut cancel,
+        ));
+        tokio::select! {
+            _ = started.notified() => {}
+            result = &mut action => panic!("pending provider unexpectedly completed: {result:?}"),
+        }
+
+        let error = action.await.unwrap_err();
+        assert!(
+            matches!(error, Error::Service(message) if message.contains("60-second run limit"))
+        );
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn async_action_provider_errors_do_not_become_success() {
+        let runtime = runtime();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_by_handler = Arc::clone(&calls);
+        runtime
+            .register_async_service(
+                "test",
+                "fail_async",
+                Value::Null,
+                Arc::new(move |_runtime, _call| {
+                    calls_by_handler.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        Err(Error::Service("async provider failed".into()))
+                    })
+                }),
+            )
+            .unwrap();
+        let (_cancel_sender, cancel) = watch::channel(false);
+        let result = run_sequence(
+            runtime,
+            json!([{"action":"test.fail_async"}]),
+            Map::new(),
+            Context::default(),
+            cancel,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(Error::Service(message)) if message == "async provider failed")
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     fn register_input_boolean(runtime: &Runtime) {
         runtime
             .set_state(
@@ -3844,6 +4220,119 @@ mod tests {
         .unwrap();
         assert_eq!(runtime.get_state("input_boolean.lamp").unwrap().state, "on");
         second.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn scenes_await_async_provider_commands_serially_with_context_and_lineage() {
+        let runtime = runtime();
+        let observed = Arc::new(Mutex::new(Vec::<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Vec<String>,
+        )>::new()));
+        let observed_by_handler = Arc::clone(&observed);
+        let active = Arc::new(AtomicUsize::new(0));
+        let active_by_handler = Arc::clone(&active);
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let max_active_by_handler = Arc::clone(&max_active);
+        runtime
+            .register_async_service(
+                "light",
+                "turn_on",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    let observed = Arc::clone(&observed_by_handler);
+                    let active = Arc::clone(&active_by_handler);
+                    let max_active = Arc::clone(&max_active_by_handler);
+                    Box::pin(async move {
+                        let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        max_active.fetch_max(current, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                        let entity_id = call
+                            .target
+                            .get("entity_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_owned();
+                        observed
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push((
+                                entity_id,
+                                call.context.id.clone(),
+                                call.context.parent_id.clone(),
+                                call.context.user_id.clone(),
+                                current_lineage(),
+                            ));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: None,
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        let scene = SceneConfig {
+            id: None,
+            name: "Serial async scene".into(),
+            icon: None,
+            metadata: Map::new(),
+            entities: BTreeMap::from([
+                ("light.first".into(), json!("on")),
+                ("light.second".into(), json!("on")),
+            ]),
+        };
+        let scene_map = build_scene_map(&[scene], &BTreeMap::new()).unwrap();
+        let scene_entity_id = scene_map.keys().next().unwrap().clone();
+        let scenes = Arc::new(SceneStore {
+            scenes: RwLock::new(scene_map),
+            dynamic: Mutex::new(BTreeMap::new()),
+        });
+        let context = Context {
+            id: "scene-context".into(),
+            parent_id: Some("scene-caller".into()),
+            user_id: Some("scene-user".into()),
+        };
+        let result = apply_scenes(
+            runtime,
+            scenes,
+            vec![scene_entity_id.clone()],
+            vec!["parent-script".into()],
+            None,
+            context.clone(),
+        )
+        .await
+        .unwrap();
+
+        let observed = observed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert_eq!(observed.len(), 2, "each scene entity is applied once");
+        assert_eq!(
+            observed
+                .iter()
+                .map(|entry| entry.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["light.first", "light.second"]
+        );
+        assert!(observed.iter().all(|entry| entry.1 == context.id));
+        assert!(observed.iter().all(|entry| entry.2 == context.parent_id));
+        assert!(observed.iter().all(|entry| entry.3 == context.user_id));
+        assert!(
+            observed
+                .iter()
+                .all(|entry| entry.4 == vec!["parent-script".to_owned()])
+        );
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(result.changed_states.len(), 1);
+        assert_eq!(result.changed_states[0].entity_id, scene_entity_id);
+        assert_eq!(result.context.id, context.id);
     }
 
     #[tokio::test]
@@ -4031,6 +4520,370 @@ mod tests {
         )
         .unwrap();
         validate_script_sun_condition(&condition).unwrap();
+    }
+
+    #[tokio::test]
+    async fn service_response_variables_feed_later_sync_and_async_actions() {
+        let runtime = runtime();
+        runtime
+            .register_async_service_with_response_support(
+                "test",
+                "async_response",
+                Value::Null,
+                ServiceResponseSupport::Optional,
+                Arc::new(|_runtime, call| {
+                    Box::pin(async move {
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: Some(json!({"value":"async result"})),
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+        runtime
+            .register_service_with_response_support(
+                "test",
+                "sync_response",
+                Value::Null,
+                ServiceResponseSupport::Optional,
+                Arc::new(|_runtime, call| {
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: Some(json!({"value":"sync result"})),
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        runtime
+            .register_service_with_response_support(
+                "test",
+                "empty_response",
+                Value::Null,
+                ServiceResponseSupport::Optional,
+                Arc::new(|_runtime, call| {
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+
+        let captured = Arc::new(Mutex::new(None::<Value>));
+        let capture_result = Arc::clone(&captured);
+        runtime
+            .register_service(
+                "test",
+                "capture",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    *capture_result
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(Value::Object(call.data.clone()));
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+
+        let sequence = json!([
+            {"action":"test.async_response", "response_variable":"async_result"},
+            {"action":"test.sync_response", "response_variable":"sync_result"},
+            {"action":"test.empty_response", "response_variable":"empty_result"},
+            {"action":"test.capture", "data":{
+                "async":"{{ async_result.value }}",
+                "sync":"{{ sync_result.value }}",
+                "empty_is_none":"{{ empty_result is none }}"
+            }}
+        ]);
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        run_sequence(runtime, sequence, Map::new(), Context::default(), cancel_rx)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(json!({
+                "async":"async result",
+                "sync":"sync result",
+                "empty_is_none":true
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn response_capability_mismatches_fail_before_service_effects() {
+        let runtime = runtime();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let sync_effects = Arc::clone(&effects);
+        runtime
+            .register_service_with_response_support(
+                "test",
+                "no_response",
+                Value::Null,
+                ServiceResponseSupport::None,
+                Arc::new(move |_runtime, call| {
+                    sync_effects.fetch_add(1, Ordering::SeqCst);
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+        let async_effects = Arc::clone(&effects);
+        runtime
+            .register_async_service_with_response_support(
+                "test",
+                "response_required",
+                Value::Null,
+                ServiceResponseSupport::Only,
+                Arc::new(move |_runtime, call| {
+                    let async_effects = Arc::clone(&async_effects);
+                    Box::pin(async move {
+                        async_effects.fetch_add(1, Ordering::SeqCst);
+                        Ok(ServiceResult {
+                            changed_states: Vec::new(),
+                            response: Some(json!({"value":true})),
+                            context: call.context,
+                        })
+                    })
+                }),
+            )
+            .unwrap();
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = run_sequence(
+            runtime.clone(),
+            json!([{"action":"test.no_response", "response_variable":"result"}]),
+            Map::new(),
+            Context::default(),
+            cancel_rx,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidInput(message)
+                if message == "Script does not support 'response_variable' for service 'test.no_response' which does not support response data."
+        ));
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = run_sequence(
+            runtime.clone(),
+            json!([{"action":"test.response_required"}]),
+            Map::new(),
+            Context::default(),
+            cancel_rx,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidInput(message)
+                if message == "Script requires 'response_variable' for response data for service call test.response_required"
+        ));
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = run_sequence(
+            runtime.clone(),
+            json!([{"action":"missing.service", "response_variable":"result"}]),
+            Map::new(),
+            Context::default(),
+            cancel_rx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::Service(message) if message.contains("unknown service missing.service"))
+        );
+
+        assert!(matches!(
+            validate_sequence(&json!([{"stop":"failed", "error":true, "response_variable":"result"}])),
+            Err(Error::InvalidInput(message)) if message == "not allowed to add a response to an error stop action"
+        ));
+        assert!(validate_sequence(&json!([{"delay":0, "response_variable":"result"}])).is_err());
+        assert!(
+            validate_sequence(&json!([{"action":"test.no_response", "response_variable":null}]))
+                .is_err()
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = run_sequence_with_response(
+            runtime,
+            json!([{"stop":"finished", "response_variable":"missing"}]),
+            Map::new(),
+            Context::default(),
+            cancel_rx,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::Service(message) if message == "Response variable 'missing' is not defined")
+        );
+    }
+
+    #[tokio::test]
+    async fn script_service_returns_stop_response_and_turn_on_rejects_response() {
+        assert_eq!(script_response_or_empty(None), json!({}));
+        let runtime = runtime();
+        let effects = Arc::new(AtomicUsize::new(0));
+        let effect_count = Arc::clone(&effects);
+        runtime
+            .register_service(
+                "test",
+                "effect",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    effect_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+
+        let captured = Arc::new(Mutex::new(None::<Value>));
+        let capture_result = Arc::clone(&captured);
+        runtime
+            .register_service(
+                "test",
+                "capture",
+                Value::Null,
+                Arc::new(move |_runtime, call| {
+                    *capture_result
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        Some(Value::Object(call.data.clone()));
+                    Ok(ServiceResult {
+                        changed_states: Vec::new(),
+                        response: None,
+                        context: call.context.clone(),
+                    })
+                }),
+            )
+            .unwrap();
+
+        let child = script(
+            ScriptMode::Single,
+            json!([
+                {"action":"test.effect"},
+                {"variables":{"answer":{"value":"from child"}}},
+                {"stop":"finished", "response_variable":"answer"}
+            ]),
+        );
+        let empty_child = script(ScriptMode::Single, json!([{"variables":{"done":true}}]));
+        let engine = ScriptEngine::start(
+            runtime.clone(),
+            BTreeMap::from([("child".into(), child), ("empty".into(), empty_child)]),
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.service_response_support("script", "child"),
+            Some(ServiceResponseSupport::Optional)
+        );
+        assert_eq!(
+            runtime.service_response_support("script", "turn_on"),
+            Some(ServiceResponseSupport::None)
+        );
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        let error = run_sequence(
+            runtime.clone(),
+            json!([{
+                "action":"script.turn_on",
+                "target":{"entity_id":"script.child"},
+                "response_variable":"result"
+            }]),
+            Map::new(),
+            Context::default(),
+            cancel_rx,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InvalidInput(message)
+                if message == "Script does not support 'response_variable' for service 'script.turn_on' which does not support response data."
+        ));
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+
+        let no_response = runtime
+            .call_service_request_async_scoped(
+                ServiceCallRequest {
+                    call: ServiceCall {
+                        domain: "script".into(),
+                        service: "child".into(),
+                        data: Map::new(),
+                        target: Map::new(),
+                        context: Context::default(),
+                    },
+                    return_response: false,
+                    authorize_targets: None,
+                },
+                lineage_scope(Vec::new()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(no_response.response, None);
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+
+        let empty_response = runtime
+            .call_service_request_async_scoped(
+                ServiceCallRequest {
+                    call: ServiceCall {
+                        domain: "script".into(),
+                        service: "empty".into(),
+                        data: Map::new(),
+                        target: Map::new(),
+                        context: Context::default(),
+                    },
+                    return_response: true,
+                    authorize_targets: None,
+                },
+                lineage_scope(Vec::new()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty_response.response, Some(json!({})));
+
+        let (_cancel_tx, cancel_rx) = watch::channel(false);
+        run_sequence(
+            runtime,
+            json!([
+                {"action":"script.child", "response_variable":"child_result"},
+                {"action":"test.capture", "data":{"answer":"{{ child_result.value }}"}}
+            ]),
+            Map::new(),
+            Context::default(),
+            cancel_rx,
+        )
+        .await
+        .unwrap();
+        assert_eq!(effects.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            *captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            Some(json!({"answer":"from child"}))
+        );
+        engine.shutdown().await.unwrap();
     }
 
     #[test]

@@ -7,6 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+percent-encoding.workspace = true
 axum.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
@@ -52,6 +56,8 @@ hass-hardware-metrics.workspace = true
 hass-application-credentials.workspace = true
 hass-oauth2-client.workspace = true
 hass-oauth2-flow.workspace = true
+hass-media-player.workspace = true
+hass-spotify.workspace = true
 url.workspace = true
 mdns-sd.workspace = true
 indexmap.workspace = true
@@ -66,7 +72,5 @@ uuid.workspace = true
 
 [dev-dependencies]
 image.workspace = true
-futures-util.workspace = true
-reqwest.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true

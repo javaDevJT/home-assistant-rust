@@ -36,6 +36,7 @@ hass-usb.workspace = true
 hass-application-credentials.workspace = true
 hass-oauth2-client.workspace = true
 hass-oauth2-flow.workspace = true
+hass-media-player.workspace = true
 axum.workspace = true
 chrono.workspace = true
 futures-util.workspace = true

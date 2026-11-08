@@ -10,11 +10,14 @@ mod instance_id;
 mod integration_drivers;
 mod ip_policy;
 mod logging;
+mod media_player;
 mod oauth2;
 mod persons;
 mod recorder;
 mod repairs;
 mod restart;
+mod spotify;
+mod spotify_projection;
 mod ssdp;
 mod system_health;
 mod system_sensors;
@@ -137,7 +140,16 @@ async fn main() -> Result<()> {
             .join(&config.recorder.db_path)
     });
     let helper_config = config.helpers.clone();
-    let api_config = config.api_config();
+    let mut api_config = config.api_config();
+    if let Some(components) = api_config
+        .get_mut("components")
+        .and_then(serde_json::Value::as_array_mut)
+        && !components
+            .iter()
+            .any(|component| component.as_str() == Some("media_player"))
+    {
+        components.push(serde_json::Value::String("media_player".into()));
+    }
     let seed_config = serde_json::json!({
         "name":config.homeassistant.name,
         "latitude":config.homeassistant.latitude,
@@ -212,7 +224,6 @@ async fn main() -> Result<()> {
     })
     .await??;
     let logger_manager = logger.manager();
-    let logger_catalog = logging::loaded_catalog(config_entries.clone(), api_config.clone());
     let system_log = hass_system_log::SystemLogIntegration::start(
         runtime.clone(),
         config.system_log.clone().unwrap_or_default(),
@@ -407,6 +418,9 @@ async fn main() -> Result<()> {
     let native = hass_native::NativeIntegrations::start(runtime.clone(), native_config).await?;
     let scripts = hass_script::ScriptEngine::start(runtime.clone(), config.script, config.scene)?;
     let entity_lifecycle = hass_entity::EntityLifecycle::new(runtime.clone(), registries.clone())?;
+    let media_players = hass_media_player::MediaPlayerDispatcher::new(entity_lifecycle.clone());
+    let media_player_host =
+        media_player::MediaPlayerHost::start(runtime.clone(), media_players.clone())?;
     let sun = hass_sun::SunIntegration::start(
         runtime.clone(),
         registries.clone(),
@@ -457,37 +471,6 @@ async fn main() -> Result<()> {
     )
     .await?;
     let templates = hass_template::TemplateEngine::new(runtime.clone());
-    let starting_runtime = runtime.clone();
-    tokio::task::spawn_blocking(move || {
-        starting_runtime.fire_event("homeassistant_start", Map::new(), Context::default())
-    })
-    .await??;
-    persons.mark_started().await?;
-    let started_runtime = runtime.clone();
-    tokio::task::spawn_blocking(move || {
-        started_runtime.fire_event("homeassistant_started", Map::new(), Context::default())
-    })
-    .await??;
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    discovery_dispatcher.mark_started().await;
-    if let Some(host) = &usb {
-        host.mark_started().await?;
-    }
-    let dhcp_providers = if let Some(host) = &mut dhcp {
-        let providers =
-            dhcp_providers::DhcpProviders::start(host.manager(), network_adapter_manager.clone())
-                .await?;
-        host.observe_removed_keys()?;
-        Some(providers)
-    } else {
-        None
-    };
-    if let Some(host) = &mut ssdp {
-        host.mark_started(bound_address).await?;
-    }
-    if let Some(host) = &mut zeroconf {
-        host.mark_started().await?;
-    }
     let mut oauth2_factory = None;
     let oauth2_host = if let Some(credentials) = &application_credentials {
         match oauth2::callback_url(&config_entries.core_config(), bound_address) {
@@ -522,6 +505,57 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    let spotify = if let Some(host) = &oauth2_host {
+        let integration = spotify::SpotifyIntegration::start(
+            runtime.clone(),
+            config_entries.clone(),
+            registries.clone(),
+            host,
+            media_players.clone(),
+        )
+        .await?;
+        if let Some(components) = api_config
+            .get_mut("components")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            components.push(serde_json::Value::String("spotify".into()));
+        }
+        Some(integration)
+    } else {
+        None
+    };
+    let logger_catalog = logging::loaded_catalog(config_entries.clone(), api_config.clone());
+    let starting_runtime = runtime.clone();
+    tokio::task::spawn_blocking(move || {
+        starting_runtime.fire_event("homeassistant_start", Map::new(), Context::default())
+    })
+    .await??;
+    persons.mark_started().await?;
+    let started_runtime = runtime.clone();
+    tokio::task::spawn_blocking(move || {
+        started_runtime.fire_event("homeassistant_started", Map::new(), Context::default())
+    })
+    .await??;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    discovery_dispatcher.mark_started().await;
+    if let Some(host) = &usb {
+        host.mark_started().await?;
+    }
+    let dhcp_providers = if let Some(host) = &mut dhcp {
+        let providers =
+            dhcp_providers::DhcpProviders::start(host.manager(), network_adapter_manager.clone())
+                .await?;
+        host.observe_removed_keys()?;
+        Some(providers)
+    } else {
+        None
+    };
+    if let Some(host) = &mut ssdp {
+        host.mark_started(bound_address).await?;
+    }
+    if let Some(host) = &mut zeroconf {
+        host.mark_started().await?;
+    }
     let oauth2_manager = oauth2_host
         .as_ref()
         .map(hass_oauth2_flow::OAuthFlowHost::manager);
@@ -556,6 +590,7 @@ async fn main() -> Result<()> {
             hardware: hardware_manager,
             application_credentials: application_credentials_manager,
             oauth2_flows: oauth2_manager,
+            media_players: Some(media_players),
             network_adapters: Some(network_adapter_manager),
         },
         Some(shutdown_rx),
@@ -604,9 +639,15 @@ async fn main() -> Result<()> {
     let system_sensor_result = system_sensors.shutdown().await;
     let sun_result = sun.shutdown().await;
     let tag_result = tags.shutdown();
-    let entity_lifecycle_result = entity_lifecycle.shutdown().await;
+    let script_result = scripts.shutdown().await;
     let template_entity_result = template_entities.shutdown().await;
     let driver_result = drivers.shutdown().await;
+    let spotify_result = if let Some(spotify) = spotify {
+        spotify.shutdown().await
+    } else {
+        Ok(())
+    };
+    let media_player_result = media_player_host.shutdown();
     if let Some(oauth2_host) = &oauth2_host {
         oauth2_host.shutdown().await;
     }
@@ -618,7 +659,6 @@ async fn main() -> Result<()> {
     if let Some(application_credentials) = &application_credentials {
         application_credentials.shutdown().await;
     }
-    let script_result = scripts.shutdown().await;
     let rest_result = rest.shutdown().await;
     let native_result = native.shutdown().await;
     let tracker_result = trackers.shutdown().await;
@@ -633,6 +673,8 @@ async fn main() -> Result<()> {
     } else {
         Ok(())
     };
+    let entity_lifecycle_result = entity_lifecycle.shutdown().await;
+    let service_tasks_result = runtime.shutdown_service_tasks_async().await;
     drop(repairs);
     network_adapters.shutdown();
     drop(_service_targets);
@@ -645,6 +687,7 @@ async fn main() -> Result<()> {
     .await?;
     result?;
     flow_shutdown_result?;
+    service_tasks_result?;
     oauth2_factory_result?;
     ssdp_result?;
     zeroconf_result?;
@@ -661,6 +704,8 @@ async fn main() -> Result<()> {
     entity_lifecycle_result?;
     template_entity_result?;
     driver_result?;
+    spotify_result?;
+    media_player_result?;
     script_result?;
     rest_result?;
     native_result?;

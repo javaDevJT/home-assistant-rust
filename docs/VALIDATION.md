@@ -1,5 +1,34 @@
 # Validation evidence
 
+## Native media and service candidate (44 crates)
+
+The current candidate passes **1,158 tests across 129 targets**, with zero
+failures or ignored tests, workspace formatting and strict locked offline
+all-target Clippy. This includes 176 app-bin cases, 20 end-to-end process cases,
+the compiled restart case through both WebSocket and HTTP, and the native
+media-service integration case. Nine Spotify runtime cases use synthetic tokens
+and numeric-loopback HTTP, covering restored/retried entries, authorization
+failures, retained token fields, post-command state, held-request cancellation,
+canceled startup/shutdown callers and abandoned reauth recovery. No real account
+or playback-device traffic was used.
+
+The initial full run exposed an obsolete Core response assertion and a restart
+acknowledgment race after blocking-pool dispatch. Unrequested response data is
+now suppressed at the request-aware Core boundary; the native restart command
+finishes its admitted result before the connection closes. The updated compiled
+test verifies both transports, restart in place and persisted state. The final
+full run and fresh strict lint/format checks pass after these corrections.
+
+The optimized workspace build and seven owned-temporary-directory CLI checks
+pass. They accept the example, empty config, and Application Credentials
+empty/null/false/ignored inputs, reject an unknown root key, create no additional
+files or database and do not echo the ignored fixture secret. Optimized macOS
+binary SHA-256 is
+`8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f`.
+Publication and exact-source Linux CI remain pending. The following 42-crate
+receipt remains the last published and Linux-accepted implementation; future
+isolated sensor SDK work is excluded from this 44-crate candidate.
+
 ## Accepted local external OAuth foundation (42 crates)
 
 The final workspace passes **1,070 tests across 121 targets**, with zero failed

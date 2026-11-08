@@ -10,26 +10,72 @@ The primary owns the workspace manifest/dependencies, app configuration and inte
 
 ### Native media players and asynchronous services (2026-11-07)
 
-The OAuth foundation below is published and Linux-accepted. Next, v134 owns
-only the isolated future `crates/hass-media-player/**` SDK, typed commands,
-projection and asynchronous provider dispatcher; its build hold has ended.
-Core owner v136 owns only `crates/hass-core/src/**` and its tests, implementing
-unified sync/async service registrations, response capabilities, request-aware
-target preflight and cancellation-safe owned service jobs. API owner v137 owns
-only `hass-api/src/http.rs`, `websocket.rs` and `tests/async_services_protocol.rs`;
-it preserves envelopes/roles and releases blocked HTTP/WS waiters on shutdown.
-Script owner v138 owns only `hass-script/src/**` and tests, awaiting the shared
-async dispatcher for action and ordered scene calls. All use explicit native
-Luna/max selection, no children, Git or real provider/device activity.
+The next independent platform work is outside this 44-member receipt: v151
+owns only isolated `crates/hass-sensor/**`; v152 owns only isolated
+`crates/hass-binary-sensor/**`. Their contract is `SENSOR-PORT.md`; root owns
+future workspace enrollment and actual consumer migration. Their scaffolds or
+isolated tests do not change the sensor domain inventory. Both use the same
+explicit native Luna/max selection and synthetic-only constraints.
 
-Root owns manifests/lock, app/provider integration, all shared docs and final
-checks. Root has migrated `schedule.get_schedule` to typed response-only
-registration and wired the future global service-task drain after provider
-shutdown; these depend on v136's additive API and are not yet compiled. The
-released Spotify wire client is isolated and reviewed; runtime/provider
-registration, polling, entities, service/browse wiring and full acceptance are
-still required. Current inventory remains 45 partial / 1,520 unported / zero
-complete, and no Spotify runtime activity is claimed.
+The OAuth foundation below is published and Linux-accepted. The next workspace
+has 44 members, adding the released Spotify wire client and media-player SDK.
+Core, API, script and SDK owners v134/v136/v137/v138 are released; root owns
+their integration and corrections. Only v144 writes Spotify `mod.rs`,
+`player.rs` and runtime tests, while v145 writes `spotify/browse.rs`. Root owns
+account policy, controls, projection, manifests/lock, main, shared docs and Git.
+Both implementation owners are now released. Read-only v147 reviews runtime
+cancellation and teardown; v148 owns only `spotify/tests.rs` for held-request
+shutdown and persisted-entry acceptance. v146 owns only `hass-script` source,
+README and tests for service response variables and stop-response propagation.
+All use explicit native Luna/max, no children or real provider I/O.
+
+Focused checks pass: Core 40 tests including registration handoff and callback
+destructor reentrancy; media SDK 14; asynchronous service HTTP/WS five; direct
+media browse/search WS five; app media-service integration one. SDK corrections
+reject undeclared command fields, skip unavailable players, preserve grouping
+null semantics and separate remote/local pictures. Core reads a consistent
+registration generation, drops removed callbacks outside locks, and reports
+typed service validation separately from transport schema failures. API tests
+cover source-defined user-facing service errors and zero effects on bad targets.
+Script actions/scenes await the shared dispatcher. v146's response variables
+and stop-response propagation pass 18 focused cases; strict checks and final
+handoff remain pending. `schedule.get_schedule` has typed response-only registration.
+
+Root's media host registers the standard services through Core with causal
+contexts, response gates and actual state changes. Provider shutdown precedes
+the shared entity lifecycle and owned service-task drain. OAuth activation is
+retained on a blocking worker so synchronous config-entry setup may await its
+captured runtime; host checks pass one unit and 21 integration cases including
+durable token restart. Spotify account/projection policy passes nine app cases,
+and controls pass two real loopback cases. Runtime compile corrections,
+production activation, polling/browse lifecycle acceptance and the complete
+44-member gate remain pending. Main now registers Spotify before startup
+events, restores entries through its driver, exposes the actual provider in the
+credentials catalog, and stops it before media/OAuth ownership. Encoded wrapper
+commands pass three control cases; five browse cases pass all pinned branches.
+Strict app Clippy exposed ten issues; root corrected the actual lock scope and
+the remaining lint findings, with a fresh gate pending. The compiled-process
+credentials restart/open-stream/SIGTERM case passes with the actual Spotify
+catalog and component list. Review v147 found canceled startup/shutdown ownership
+holes and a permanently retained reauth marker. Root constructs the integration
+owner before restoration, transfers all joins and the provider lease into an
+owned cleanup coordinator, and removes the poll/state ownership cycle. Reauth
+deduplication now tracks active flow IDs and expires them without resolving
+callbacks. The host's one unit plus 21 integration cases pass, including that
+non-resolving check. A 20ms TTL fixture expired during its own setup under build
+contention; its test budget is now one second, with runtime TTL policy unchanged.
+v148's nine runtime cases pass, including cancellation, restored setup-error
+recovery, due retry, abandoned reauth/reload and changed-playlist 401 handling.
+The full 44-member workspace passes 1,158 tests across 129 targets, zero failures
+or ignored tests, fresh strict all-target Clippy and formatting. The optimized
+workspace build and seven owned-temp CLI checks pass; binary SHA-256 is
+`8f8805e48b951a112eecdaf41a7fa56f0a8d5d66316d76d68b995d3e4afd829f`.
+The first full run exposed an obsolete response expectation and restart's own
+shutdown canceling its reply. Both are corrected; the compiled restart case
+verifies WebSocket and HTTP acknowledgments, in-place exec and persisted state.
+Publication and exact-source Linux CI remain pending. v150 owns only PARITY.md
+and upstream-parity.json for source-preserving Media Player/Spotify partial
+evidence; no domain is declared complete.
 
 ### OAuth external-flow implementation (2026-11-07)
 
@@ -56,12 +102,11 @@ Published source `eefd57e453c74229ad6f53fb02ab9f9734f424a0` passes
 partial / 1,520 unported / zero complete, with all 780 partial-row paths and
 476 Rust symbols resolved; other source snapshots/domain records are unchanged.
 
-Future work is isolated from the 42-crate receipt: v126 released the Spotify
+Work after this receipt is isolated from the 42-crate acceptance: v126 released the Spotify
 wire crate (15 tests, strict Clippy and formatting); independent v133 found no
 default-path wire mismatch. Root must use the default trusted API origin,
-enforce queue media types and preserve account identity on integration. v134
-owns only the future hass-media-player SDK and async dispatcher. Its Cargo
-build hold ended after the final workspace pass. v135 released the additive
+enforce queue media types and preserve account identity on integration. The
+media SDK owner is now released. v135 released the additive
 Runtime async service/response-capability contract in ASYNC-SERVICES-PORT.md.
 Root owns manifests, all live
 integration and index updates. The chronological records below preserve
