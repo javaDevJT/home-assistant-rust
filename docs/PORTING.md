@@ -178,6 +178,29 @@ platform names in the config/logger catalog: current API config is seeded
 from YAML, while the logger adds loaded entry domains without their platform
 dependencies. These gaps do not change the current partial acceptance.
 
+The 48-crate source is published at
+`2c9d9e5bca6b8b95d13c06e745640fa369d49a3a`.
+[Exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318)
+passes formatting, strict Clippy, full workspace tests and CLI validation.
+Root independently verified its exact head, completed status and successful
+conclusion. No deployment or PR was created.
+
+### Light, cover and fan lifecycle adoption (51 crates, pending)
+
+Root enrolled the released light, cover and fan SDKs as members 49-51, removed
+their generated standalone locks, added MQTT dependencies and refreshed the
+offline workspace lock. Their isolated evidence is 12 light / seven cover /
+seven fan cases with strict package checks. v175 now owns only MQTT
+source/tests/README for actual SDK-backed discovery/state/lifecycle adoption,
+preserving the accepted command completion and button/switch paths. It exposes
+`MqttEntityMetadata.entity_lifecycle_managed` from actual lease ownership;
+root owns the app reconciler's switch-only guard replacement and all manifests,
+SDK corrections and docs. No platform status changes are claimed yet.
+v174 independently owns isolated `hass-units` and UNITS-PORT.md. The source
+contains 31 converter classes; its planned fallible API preserves optional
+unit identifiers, source identity shortcuts and invalid-unit diagnostics.
+All new owners use native Luna/max, with provider/tier controls unexposed.
+
 ### Accepted native media and asynchronous services (44 crates)
 
 The next independent platform work is outside this 44-member receipt: v151

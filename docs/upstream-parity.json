@@ -169270,7 +169270,7 @@
         ],
         "remaining": "Binary-sensor and switch device conditions/triggers have focused coverage. Switch device schemas, state semantics, UUID rename resolution, context, and for-duration cancellation are tested. Device enumeration, the generic switch.is_on/switch.is_off state-condition registry, other automation actions/conditions/triggers, modes, tracing, automation config lifecycle, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Source publication and exact-source Linux CI remain pending. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
       },
       {
         "domain": "binary_sensor",
@@ -169328,7 +169328,7 @@
         ],
         "remaining": "Typed button descriptors, timestamp projection, press services, and actual MQTT press publication have focused SDK and wire evidence. Other provider adapters, broader action support, default localized names/translations, frontend/UI, the full platform catalog, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Source publication and exact-source Linux CI remain pending. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
       },
       {
         "domain": "config",
@@ -169497,7 +169497,7 @@
         ],
         "remaining": "Config-entry registry disable flags are derived after unload; startup synchronizes persisted-disabled entries while preserving shared-device disabler history; weak observer ownership and source-ordered unload/setup callbacks are tested. Full config-entry setup/unload/retry/discovery, registry API/command/event coverage, and exhaustive pinned config acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Source publication and exact-source Linux CI remain pending. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
       },
       {
         "domain": "counter",
@@ -169907,7 +169907,7 @@
         ],
         "remaining": "Native generic turn_on/turn_off/toggle delegation, group expansion, exclusions, and target validation are implemented. Fourteen focused cases cover concurrent provider dispatch, cancellation, context, and results; the compiled-process fixture proves generic homeassistant.turn_off reaches the MQTT switch provider. Other core services, full selector/exclusion variants, loader/dependency behavior, and exhaustive pinned acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Source publication and exact-source Linux CI remain pending. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
       },
       {
         "domain": "http",
@@ -170336,7 +170336,7 @@
         ],
         "remaining": "MQTT setup/reconnect, direct and generic switch service calls, button press publication, and QoS 0/1/2 callback completion have focused local-broker and compiled-process evidence. QoS callbacks wait for write/PUBACK/PUBCOMP as appropriate and cover cancellation, callback timeout, offline live attributes, context, changed states, and shutdown quiescence. Additional MQTT platform adapters, discovery/manifest/schema variants, and exhaustive pinned protocol acceptance remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Source publication and exact-source Linux CI remain pending. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
       },
       {
         "domain": "network",
@@ -171218,7 +171218,7 @@
         ],
         "remaining": "Native switch descriptors, state projection, assumed_state live publication, strict service targets/commands, and actual MQTT switch commands have focused SDK, wire, and process evidence. Switch device conditions and triggers are implemented in the automation engine. Remaining switch automation actions, device enumeration, the generic switch.is_on/switch.is_off state-condition registry, reproduce/significant-change semantics, switch-as-light, full provider coverage, translations, and frontend/UI behavior remain open.",
         "status": "partial",
-        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Source publication and exact-source Linux CI remain pending. This inventory writer did not run tests."
+        "verification": "The final 48-crate local candidate passes 1,250 tests across 140 targets (0 failed, 0 ignored), strict all-target Clippy, formatting, the optimized workspace build, and all 13 optimized CLI cases. The optimized macOS candidate binary SHA-256 is 6f755a88bc40f437ff41fc7f377e41dc098dff59552a6738aa629bc2bd443bca. Published source 2c9d9e5bca6b8b95d13c06e745640fa369d49a3a passes exact-source Linux CI [run 42453600318](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318); conclusion success, status completed. This inventory writer did not run tests."
       },
       {
         "domain": "system_health",

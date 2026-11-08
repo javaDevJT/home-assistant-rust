@@ -1,6 +1,6 @@
 # Validation evidence
 
-## Locally validated switch, button and awaited MQTT (48 crates)
+## Accepted switch, button and awaited MQTT (48 crates)
 
 The frozen candidate passes **1,250 tests across 140 targets**, zero failures
 or ignored tests, workspace formatting and strict locked offline all-target
@@ -32,9 +32,12 @@ source-compatible ten-second soft timeout, late acknowledgments and retained
 packet-ID ownership, caller cancellation, button timestamps and overlapping
 presses, and offline completion without reviving availability. Registry
 disablers follow source ordering around unload/setup; startup repairs entity
-flags while preserving persisted device history. Light, cover and fan SDK
-work remains outside this workspace receipt. Publication and exact-source
-Linux CI are pending.
+flags while preserving persisted device history. Light, cover, fan and unit
+SDK work remain outside this workspace receipt. Published source
+`2c9d9e5bca6b8b95d13c06e745640fa369d49a3a` passes
+[exact-source Linux CI](https://github.com/javaDevJT/home-assistant-rust/actions/runs/42453600318):
+formatting, strict all-target Clippy, full workspace tests and example CLI
+validation. Root independently verified the successful head and conclusion.
 
 ## Accepted native sensor platforms (46 crates)
 
